@@ -26,6 +26,11 @@ const (
 	RootFileReferenceNumber = 5
 )
 
+// isRootFRN reports whether frn is a volume root reference. ENUM_USN_DATA
+// does not return the root record itself, and reference numbers carry a 16-bit
+// sequence number in the high bits, so the low 48 bits are compared.
+func isRootFRN(frn uint64) bool { return frn&0x0000FFFFFFFFFFFF == RootFileReferenceNumber }
+
 // File attribute bits used by the index.
 const (
 	AttributeDirectory   = 0x00000010
@@ -210,6 +215,9 @@ func (t *Tree) Path(frn uint64, rootPath string) (string, bool) {
 	seen := make(map[uint64]struct{}, 16)
 	current := frn
 	for depth := 0; depth < maxDepth; depth++ {
+		if isRootFRN(current) {
+			break
+		}
 		node, ok := t.Nodes[current]
 		if !ok {
 			t.cache[frn] = ""
@@ -220,7 +228,7 @@ func (t *Tree) Path(frn uint64, rootPath string) (string, bool) {
 			return "", false
 		}
 		seen[current] = struct{}{}
-		if current == RootFileReferenceNumber || node.Parent == current {
+		if node.Parent == current {
 			break
 		}
 		parts = append(parts, node.Name)

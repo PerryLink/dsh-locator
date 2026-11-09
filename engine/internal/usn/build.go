@@ -38,7 +38,7 @@ func BuildItems(records []Record, opt BuildOptions) ([]index.AddItem, BuildStats
 	items := make([]index.AddItem, 0, len(tree.Nodes))
 	var stats BuildStats
 	for frn, node := range tree.Nodes {
-		if frn == RootFileReferenceNumber {
+		if isRootFRN(frn) {
 			continue
 		}
 		path, ok := tree.Path(frn, opt.VolumeRoot)

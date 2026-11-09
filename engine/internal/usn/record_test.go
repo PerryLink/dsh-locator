@@ -107,3 +107,21 @@ func TestWithin(t *testing.T) {
 		t.Fatal("sibling prefix must not match")
 	}
 }
+
+func TestTreeResolvesWithoutRootRecord(t *testing.T) {
+	// ENUM_USN_DATA omits the volume root; top-level entries point at the full
+	// sequenced root reference.
+	rootFRN := uint64(0x0005000000000005)
+	tree := NewTree([]Record{
+		{FRN: 100, ParentFRN: rootFRN, Name: "Users", Attributes: AttributeDirectory},
+		{FRN: 101, ParentFRN: 100, Name: "me", Attributes: AttributeDirectory},
+		{FRN: 102, ParentFRN: 101, Name: "report.pdf"},
+	})
+	path, ok := tree.Path(102, `C:\`)
+	if !ok || path != `C:\Users\me\report.pdf` {
+		t.Fatalf("Path = %q, %v", path, ok)
+	}
+	if _, ok := tree.Path(rootFRN, `C:\`); !ok {
+		t.Fatal("root reference must resolve to the volume root")
+	}
+}
