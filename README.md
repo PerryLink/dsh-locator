@@ -1,5 +1,7 @@
 # dsh-locator
 
+[GitHub](https://github.com/PerryLink/dsh-locator) · [Gitee](https://gitee.com/perrylink/dsh-locator) · [GitCode](https://gitcode.com/PerryLink/dsh-locator)
+
 [![npm](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![ci](https://github.com/PerryLink/dsh-locator/actions/workflows/ci.yml/badge.svg)](https://github.com/PerryLink/dsh-locator/actions/workflows/ci.yml)
 
