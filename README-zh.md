@@ -119,7 +119,13 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 
 ### Windows 与 USN 日志
 
-引擎里已经有 USN 解码器、可选的快路径和探针。快路径**默认关闭**（`windowsUsn: false`）：卷 ioctl 需要管理员权限，而当前开发机没有提权，探针就是验收步骤：
+引擎里已经有 USN 解码器、可选的快路径和探针。快路径**默认关闭**（`windowsUsn: false`）：卷 ioctl 需要管理员权限；它已经在 GitHub Actions 的 Windows runner（管理员、真实 NTFS 卷）上端到端验证：
+- 读取 1,345,546 条 MFT 记录，解析出 1,345,539 条路径
+- `C:\Windows` 下 164,209 条（122,915 文件、41,294 目录）
+- `scan --usn --root C:\Windows` 建索引 164,216 条用 7.8 秒；查询 9.6 ms
+- 变更日志可读（某次运行读到 8,233 条）；`D:` 卷日志未启用时带警告回退目录遍历
+
+你也可以自己跑同一个探针：
 
 ```powershell
 # 管理员 PowerShell（或：Start-Process -Verb RunAs <路径> ...）
@@ -128,7 +134,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 
 它会打印日志 id/USN、枚举 MFT（每秒记录数、根目录下文件/目录数、样例路径），并解码最近几条变更日志。非管理员运行会明确报 `Access is denied`；解析与路径重建在 Linux 上有单元测试覆盖。
 
-打开 `windowsUsn: true`（或 `indexd scan --usn`）后，引擎用 MFT 枚举代替目录遍历，再按 FRN 父表重建路径。引擎保留卷句柄，每 2 秒轮询变更日志，按同一张 FRN 表就地应用新建、删除、重命名（`usn.ApplyChanges`）。USN 记录**没有大小和修改时间**：名字/路径是准的，`locator_status` 会把这种索引标成 `USN`，守护进程会对返回页现场 stat，所以面板/模型看到的行仍有真实大小和日期；但全库的 `size:`/`dm:` 过滤在元数据补齐前是近似的。任何失败（没提权、卷不支持、记录过多）都会带警告回退到目录遍历，绝不会让搜索不可用。运行中日志轮询失败会报警并停止该监视器，可移植的 `ReadDirectoryChangesW` 监听和 `locator_rebuild` 仍然可用。变更应用逻辑有合成记录测试，但 ioctl 本身仍待提权探针验收。
+打开 `windowsUsn: true`（或 `indexd scan --usn`）后，引擎用 MFT 枚举代替目录遍历，再按 FRN 父表重建路径。引擎保留卷句柄，每 2 秒轮询变更日志，按同一张 FRN 表就地应用新建、删除、重命名（`usn.ApplyChanges`）。USN 记录**没有大小和修改时间**：名字/路径是准的，`locator_status` 会把这种索引标成 `USN`，守护进程会对返回页现场 stat，所以面板/模型看到的行仍有真实大小和日期；但全库的 `size:`/`dm:` 过滤在元数据补齐前是近似的。任何失败（没提权、卷不支持、记录过多）都会带警告回退到目录遍历，绝不会让搜索不可用。运行中日志轮询失败会报警并停止该监视器，可移植的 `ReadDirectoryChangesW` 监听和 `locator_rebuild` 仍然可用。变更应用逻辑有合成记录测试，ioctl 路径由 Windows CI job 验证。
 
 Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直接读 NTFS 主文件表。`dsh-locator` v0.1 刻意先做可移植的目录遍历 + 变更通知：不需要服务、不需要 UAC、任何文件系统都能用。USN/MFT 枚举会作为可选快路径加入路线图（需要进程对卷持有 `GENERIC_READ`，通常意味着管理员权限），可移植路径始终保留为回退。
 

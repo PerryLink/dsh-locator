@@ -119,7 +119,13 @@ The engine is pure Go with no cgo, cross-compiled from one machine. It never nee
 
 ### Windows and the USN journal
 
-The engine carries a USN decoder, an opt-in fast path and a probe. The path is **off by default** (`windowsUsn: false`) because the volume ioctl needs administrator rights and the development machine here has no elevation; the probe is the acceptance step:
+The engine carries a USN decoder, an opt-in fast path and a probe. The path is **off by default** (`windowsUsn: false`) because the volume ioctl needs administrator rights; it has been validated end to end on a GitHub Actions Windows runner (administrator, real NTFS volume):
+- 1,345,546 MFT records read, 1,345,539 paths resolved
+- 164,209 entries under `C:\Windows` (122,915 files, 41,294 dirs)
+- `scan --usn --root C:\Windows` indexed 164,216 entries in 7.8 s; a query returned in 9.6 ms
+- the change journal was read (8,233 records on one run) and an inactive journal on `D:` fell back to the walk with a warning
+
+You can still run the same probe yourself:
 
 ```powershell
 # Elevated PowerShell (or: Start-Process -Verb RunAs <path> ...)
@@ -128,7 +134,7 @@ The engine carries a USN decoder, an opt-in fast path and a probe. The path is *
 
 It prints the journal id/USNs, enumerates the MFT (records per second, files/dirs below the root, sample paths) and decodes the last few change-journal records. A non-elevated run fails with `Access is denied` — the parser and path reconstruction are covered by unit tests on every platform.
 
-With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. It keeps the volume handle and polls the change journal every two seconds, applying creates, deletes and renames through `usn.ApplyChanges` (the same FRN map, updated in place). USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows the panel/model sees still show real sizes and dates. `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search. If journal polling fails mid-session, the watcher reports it and stops; the portable `ReadDirectoryChangesW` watcher and `locator_rebuild` are still there. The journal applier is covered by synthetic-record tests, but the ioctl path itself still awaits the elevated probe.
+With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. It keeps the volume handle and polls the change journal every two seconds, applying creates, deletes and renames through `usn.ApplyChanges` (the same FRN map, updated in place). USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows the panel/model sees still show real sizes and dates. `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search. If journal polling fails mid-session, the watcher reports it and stops; the portable `ReadDirectoryChangesW` watcher and `locator_rebuild` are still there. The journal applier is covered by synthetic-record tests and the ioctl path by the Windows CI job.
 
 Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` v0.1 deliberately starts with a portable directory walk plus change notifications: it works without a service, without UAC and on every filesystem. USN/MFT enumeration is on the roadmap as an opt-in fast path for volumes where the process holds `GENERIC_READ` (admin) — the portable path stays the fallback.
 
