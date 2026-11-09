@@ -14,6 +14,7 @@ CFArrayRef dsh_locator_paths_new(void);
 void dsh_locator_paths_add(CFArrayRef array, const char *path);
 void dsh_locator_paths_free(CFArrayRef array);
 FSEventStreamRef dsh_locator_stream_create(CFArrayRef paths, void *info, double latency);
+int dsh_locator_stream_valid(FSEventStreamRef stream);
 void dsh_locator_stream_start(FSEventStreamRef stream);
 void dsh_locator_stream_stop(FSEventStreamRef stream);
 */
@@ -97,7 +98,7 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		return nil, errors.New("FSEvents: cannot allocate the callback context")
 	}
 	stream := C.dsh_locator_stream_create(paths, info, 0.2)
-	if stream == 0 {
+	if C.dsh_locator_stream_valid(stream) == 0 {
 		C.dsh_locator_info_free(info)
 		return nil, errors.New("FSEvents: FSEventStreamCreate failed")
 	}
@@ -269,10 +270,11 @@ func (w *watcher) rescan() {
 func (w *watcher) Close() error {
 	w.once.Do(func() {
 		w.closed.Store(true)
-		if w.stream != 0 {
+		if C.dsh_locator_stream_valid(w.stream) != 0 {
 			C.dsh_locator_stream_stop(w.stream)
-			w.stream = 0
 		}
+		var zero C.FSEventStreamRef
+		w.stream = zero
 		if w.info != nil {
 			C.dsh_locator_info_free(w.info)
 			w.info = nil

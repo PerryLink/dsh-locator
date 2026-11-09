@@ -55,6 +55,10 @@ void dsh_locator_stream_start(FSEventStreamRef stream) {
   FSEventStreamStart(stream);
 }
 
+int dsh_locator_stream_valid(FSEventStreamRef stream) {
+  return stream != NULL;
+}
+
 void dsh_locator_stream_stop(FSEventStreamRef stream) {
   FSEventStreamStop(stream);
   FSEventStreamInvalidate(stream);
