@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 — 2026-11-09
+
+* macOS now ships **FSEvents** in the cgo darwin binaries (arm64 and x64): a pure-C stream callback serializes events into a pipe, so the recursive watcher has no per-directory descriptor limit. The previous crash was `FSEventStreamCreate` receiving the callback context instead of a real `FSEventStreamContext`.
+* kqueue remains the `CGO_ENABLED=0` fallback and is used by the cross-built binaries in custom builds.
+* CI builds the cgo darwin binaries on the macOS runner and the FSEvents create/delete test runs there.
+* Replaces the 0.3.0 darwin binaries with the cgo builds; other platforms are unchanged.
+
 ## 0.3.0 — 2026-11-09
 
 * Web panel: double-click a row to reveal it in the platform file manager (Explorer `/select`, Finder `open -R`, `xdg-open` on the directory). The path must be inside the configured roots and is passed as an argument vector, never through a shell; failure falls back to copying the path.

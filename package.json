@@ -1,6 +1,6 @@
 {
   "name": "dsh-locator",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index, an Everything-style query language, agent tools and a Web search panel (Ctrl+Shift+F). Windows, macOS and Linux.",
   "author": "PerryLink contributors",
   "repository": {

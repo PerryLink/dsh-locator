@@ -97,7 +97,7 @@ Every field is a Schemastery config field; edit the `dsh-locator` entry in the p
 | `roots` | `[]` | Directories to index; empty means the home directory. |
 | `excludes` | dev/cache directories | Base-name globs skipped by scanner and watcher. |
 | `watch` | `true` | Apply native filesystem notifications. |
-| `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher exists (macOS today); `0` disables. |
+| `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher is active (kqueue fallback or a watcher failure); `0` disables. |
 | `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
 | `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
 | `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
@@ -114,9 +114,9 @@ Narrow `roots` if indexing the whole home directory is too much I/O. A small, fo
 |---|---|---|---|
 | Linux | yes | inotify, recursive | Watch descriptors are per directory; very large trees can hit `fs.inotify.max_user_watches`. |
 | Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Optional USN/MFT enumeration when running elevated. Changes made by WSL to `/mnt/<drive>` may not raise notifications; use `locator_rebuild` for those. |
-| macOS | yes | kqueue vnode watches for up to 4,096 directories, plus periodic rebuild | Directory-level events cover creates, deletes and renames. File content changes do not raise vnode events, so size/mtime refresh comes from `refreshIntervalMs` or `locator_rebuild`. |
+| macOS | yes | FSEvents in the shipped cgo binaries, recursive and uncapped | kqueue is the `CGO_ENABLED=0` fallback (up to 4,096 directories). File content changes do not raise vnode events in the fallback, so size/mtime refresh comes from `refreshIntervalMs` or `locator_rebuild`. |
 
-The engine is pure Go with no cgo, cross-compiled from one machine. It never needs admin privileges.
+The engine is pure Go except the macOS FSEvents backend, which uses cgo and is built on a macOS runner. Linux, Windows and the kqueue fallback build with `CGO_ENABLED=0`; USN is optional and needs admin rights, everything else does not.
 
 ### Windows and the USN journal
 
@@ -202,14 +202,14 @@ The engine is a separate Go module under `engine/`; run its tests with `cd engin
 * Linux inotify watches one descriptor per directory; a home directory with hundreds of thousands of directories can exceed the kernel limit. The plugin reports the warning and the snapshot stays usable; rebuilds catch up.
 * WSL writes into `/mnt/c` may not produce Windows notifications (the Windows watcher cannot see the 9p writer's change stream). Rebuild those roots explicitly.
 * Network shares are scanned only if they are reachable as ordinary directories; no SMB-specific change feed.
-* macOS watches are directory-level (kqueue, one descriptor per directory, capped at 4,096). Creates/deletes/renames land immediately; file content changes rely on the periodic rebuild. FSEvents remains the roadmap item for an uncapped, file-level feed.
-* No USN/MFT fast enumeration yet (see above).
+* macOS uses FSEvents (recursive) in the shipped binaries; a `CGO_ENABLED=0` build falls back to kqueue, capped at 4,096 directories. Content-only changes rely on the periodic rebuild either way.
+* Windows USN/MFT is optional and only used when the process can read the volume and the journal is active; otherwise the portable walk is used.
 
 ## Roadmap
 
-1. macOS FSEvents watcher.
-2. Windows USN/MFT fast enumeration when the process can read the volume; journal-based catch-up after downtime.
-3. Dedicated Web GUI panel (table, sortable columns, filters, preview, insert-as-`@file`).
+1. USN journal catch-up after downtime (persist the journal cursor and FRN map).
+2. Panel actions: insert a result as `@file`, richer previews.
+3. More platform runtime coverage (Electron desktop, Windows on ARM).
 4. Optional lowercase-name arena and trigram prefilter for large indexes.
 5. Incremental snapshot compaction and per-root journals.
 

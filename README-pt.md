@@ -47,7 +47,7 @@ Depois de instalar em uma GUI em execução, recarregue a página. O painel abre
 
 - Apenas nomes, caminhos, tamanhos e datas: **não indexa conteúdo**. Use `grep` para conteúdo.
 - Windows: USN/MFT é opcional e exige administrador e diário de alterações ativo; caso contrário, varredura portátil.
-- macOS: kqueue cobre criação, remoção e renomeação; mudanças de conteúdo chegam na reconstrução periódica.
+- macOS: FSEvents nos binários cgo publicados (recursivo, sem limite de descritores); kqueue é o fallback para compilações `CGO_ENABLED=0`. Mudanças de conteúdo chegam na reconstrução periódica.
 - Snapshot local; sem rede ou telemetria.
 
 Documentação completa em [English](README.md) e [中文](README-zh.md). Licença Apache-2.0.
