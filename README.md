@@ -213,6 +213,10 @@ The engine is a separate Go module under `engine/`; run its tests with `cd engin
 4. Optional lowercase-name arena and trigram prefilter for large indexes.
 5. Incremental snapshot compaction and per-root journals.
 
+## Memory
+
+The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables. A 1.24 M-entry index peaks around 700–800 MB RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format.
+
 ## Security and privacy
 
 The index is local: no network calls, no telemetry, no uploads. The snapshot contains file names and paths, so treat the state directory as private data and exclude it from backups if that matters to you. The plugin never modifies, moves or deletes indexed files.

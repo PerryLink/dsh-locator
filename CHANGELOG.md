@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-11-09
+
+* Engine version is injected at build time (`-X main.version`) instead of a hard-coded `0.1.0`; `locator_status` now reports the package version.
+* `locator_export` verified against the live 1.24 M-entry index: 1,238,602 rows, 477 MB, 6.4 s.
+* Memory tuning documented: Go honours `GOMEMLIMIT` / `GOGC`, so the engine can be capped without a rebuild (e.g. `GOMEMLIMIT=600MiB`).
+
 ## 0.4.0 — 2026-11-09
 
 * macOS now ships **FSEvents** in the cgo darwin binaries (arm64 and x64): a pure-C stream callback serializes events into a pipe, so the recursive watcher has no per-directory descriptor limit. The previous crash was `FSEventStreamCreate` receiving the callback context instead of a real `FSEventStreamContext`.

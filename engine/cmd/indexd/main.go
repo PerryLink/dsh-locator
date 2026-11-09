@@ -23,7 +23,8 @@ import (
 	"github.com/PerryLink/dsh-locator/engine/internal/usn"
 )
 
-const version = "0.1.0"
+// version is injected by scripts/build-engine.mjs and the CI build.
+var version = "0.0.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {

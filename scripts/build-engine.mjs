@@ -9,6 +9,7 @@
  * target. Set GO=/path/to/go when the toolchain is not on PATH.
  */
 import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,7 +45,8 @@ for (const target of targets) {
   const outDir = join(root, 'bin', target.tag)
   mkdirSync(outDir, { recursive: true })
   const out = join(outDir, `indexd${target.ext}`)
-  const result = spawnSync(go, ['build', '-trimpath', '-ldflags', '-s -w', '-o', out, './cmd/indexd'], {
+  const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+  const result = spawnSync(go, ['build', '-trimpath', '-ldflags', `-s -w -X main.version=${version}`, '-o', out, './cmd/indexd'], {
     cwd: engineDir,
     stdio: 'inherit',
     env: {
