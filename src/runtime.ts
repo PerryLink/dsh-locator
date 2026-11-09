@@ -5,6 +5,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { chmodSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import type { Config } from './config.ts'
 
@@ -124,6 +125,15 @@ export class LocatorRuntime {
   }
 
   private spawn(): void {
+    // npm and git checkouts can lose the executable bit on the bundled engine.
+    // Restore it (best effort) before spawning; Windows does not use it.
+    if (process.platform !== 'win32') {
+      try {
+        chmodSync(this.binary, 0o755)
+      } catch {
+        // A read-only install cannot be fixed here; spawn reports the real error.
+      }
+    }
     const args = ['serve', '--state', this.stateDir]
     for (const root of this.roots) args.push('--root', root)
     for (const exclude of this.config.excludes) args.push('--exclude', exclude)
