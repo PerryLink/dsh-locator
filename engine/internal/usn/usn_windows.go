@@ -211,9 +211,10 @@ func Probe(opt ProbeOptions) (ProbeResult, error) {
 		return ProbeResult{}, err
 	}
 	result := ProbeResult{Volume: NormalizeVolume(opt.Volume), Journal: journal}
+	volumeRootPath := volumeRoot(opt.Volume)
 	root := opt.Root
 	if root == "" {
-		root = volumeRoot(opt.Volume)
+		root = volumeRootPath
 	}
 	result.Root = root
 	if opt.JournalSamples > 0 {
@@ -258,7 +259,7 @@ func Probe(opt ProbeOptions) (ProbeResult, error) {
 		limit = 10
 	}
 	for _, record := range records {
-		path, ok := tree.Path(record.FRN, root)
+		path, ok := tree.Path(record.FRN, volumeRootPath)
 		if !ok {
 			continue
 		}

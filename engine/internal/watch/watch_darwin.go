@@ -139,6 +139,7 @@ func (w *watcher) addDir(path string) bool {
 	entry := &watchedDir{fd: fd, known: listNames(path)}
 	w.mu.Lock()
 	w.dirs[fd] = entry
+	w.fdPaths[fd] = path
 	w.paths[path] = fd
 	w.names[path] = entry
 	w.mu.Unlock()
