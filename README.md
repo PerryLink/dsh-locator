@@ -4,7 +4,7 @@
 
 A whole-disk, millisecond file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that builds its **own** index. No Everything installation, no `es.exe`, no Everything service.
 
-`dsh-locator` scans the directories you choose once, keeps the result in a compact snapshot, applies filesystem changes as they happen, and answers name/path queries in tens of milliseconds across a million entries. The agent gets `locator_search`, `locator_status` and `locator_rebuild`; you get results rendered as a path-search card in the Web GUI.
+`dsh-locator` scans the directories you choose once, keeps the result in a compact snapshot, applies filesystem changes as they happen, and answers name/path queries in tens of milliseconds across a million entries. The agent gets `locator_search`, `locator_status` and `locator_rebuild`; people get a global **search panel** in the Web GUI (`Ctrl+Shift+F` or the magnifier at the sidebar foot) with sortable columns, filters, keyboard navigation and one-key path copy.
 
 Everything inspired the *ideas*: a persistent index of file names, a query language with `ext:` / `size:` / `dm:` filters, and an updater that consumes the filesystem's own change stream. The implementation is independent and cross-platform.
 
@@ -38,6 +38,16 @@ On first mount the engine indexes the configured roots (default: your home direc
 | Linux | `$XDG_CACHE_HOME/dsh-locator` or `~/.cache/dsh-locator` |
 
 The first scan of a large home directory reads the disk; later starts load the snapshot instead. A default exclude list skips `node_modules`, `.git`, `.svn`, `.hg`, `.cache`, `__pycache__`, `.venv`, `venv` and `.next`.
+
+## Web search panel
+
+Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot. The overlay queries the same index through two same-origin host routes (`POST /dsh-locator/search`, `POST /dsh-locator/status`), so it needs no second server and no extra port.
+
+* Empty query lists the most recently modified entries; typing runs the same Everything-style syntax as the tool after a 110 ms debounce.
+* Click a column header to sort by name, size, modification time or path; toggle ascending/descending.
+* `只看文件` / `只看目录` filter the kind; the footer reports matches, the page cap and query latency.
+* `↑`/`↓` select, `Enter` copies the selected path, `Esc` closes.
+* The panel is optional: profiles without a Web server never mount it, and the three tools keep working.
 
 ## Tools
 
@@ -123,6 +133,8 @@ Search is parallel over the record array; the slower cold scan is disk-bound. Nu
 DeepSeek Harness
   └─ dsh-locator (TypeScript plugin)
        ├─ locator_search / locator_status / locator_rebuild
+       ├─ client.js: Ctrl+Shift+F overlay (shell.overlay slot)
+       ├─ POST /dsh-locator/{search,status} (same-origin, loopback-hosted)
        └─ child process: indexd serve  (Go, NDJSON over stdio)
             ├─ scanner: recursive walk, excludes, progress
             ├─ index:   names arena + fixed records + open-addressing path table

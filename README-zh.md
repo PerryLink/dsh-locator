@@ -4,7 +4,7 @@
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的全盘毫秒级文件搜索，**自建索引**：不装 Everything、不用 `es.exe`、不需要 Everything 服务。
 
-`dsh-locator` 扫描你指定的目录，把文件名、路径、大小、修改时间写进一个紧凑的快照；之后按文件系统事件增量更新，百万条目上的名字/路径查询在几十毫秒内返回。模型拿到 `locator_search`、`locator_status`、`locator_rebuild` 三个工具，Web GUI 里结果以路径搜索卡片展示。
+`dsh-locator` 扫描你指定的目录，把文件名、路径、大小、修改时间写进一个紧凑的快照；之后按文件系统事件增量更新，百万条目上的名字/路径查询在几十毫秒内返回。模型拿到 `locator_search`、`locator_status`、`locator_rebuild` 三个工具；人则有一个 Web GUI 全局**搜索面板**（`Ctrl+Shift+F`，或侧栏底部的放大镜），支持列排序、过滤、键盘操作和一键复制路径。
 
 思路借鉴 Everything：常驻的文件名索引、带 `ext:` / `size:` / `dm:` 过滤的查询语法、直接消费文件系统的变更流。实现是独立的，并且跨平台。
 
@@ -38,6 +38,16 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 | Linux | `$XDG_CACHE_HOME/dsh-locator` 或 `~/.cache/dsh-locator` |
 
 大目录首次扫描会读盘；之后启动直接加载快照。默认排除 `node_modules`、`.git`、`.svn`、`.hg`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`。
+
+## Web 搜索面板
+
+在 Web GUI 里按 `Ctrl+Shift+F`，或点侧栏底部的放大镜。浮层通过两个同源宿主路由（`POST /dsh-locator/search`、`POST /dsh-locator/status`）查询同一个索引，不另起服务、不加端口。
+
+* 空查询按修改时间倒序列出最近条目；输入后 110 ms 防抖，走和工具完全相同的 Everything 风格语法。
+* 点列头按名称、大小、修改时间、路径排序，再点切换升降序。
+* `只看文件` / `只看目录` 过滤类型；底栏显示命中数、分页上限和查询耗时。
+* `↑`/`↓` 选择，`Enter` 复制选中路径，`Esc` 关闭。
+* 面板是可选的：没有 Web server 的 profile 不会挂载它，三个工具照常工作。
 
 ## 工具
 
@@ -123,6 +133,8 @@ Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直�
 DeepSeek Harness
   └─ dsh-locator（TypeScript 插件）
        ├─ locator_search / locator_status / locator_rebuild
+       ├─ client.js：Ctrl+Shift+F 浮层（shell.overlay slot）
+       ├─ POST /dsh-locator/{search,status}（同源、仅回环宿主）
        └─ 子进程：indexd serve（Go，stdio 上的 NDJSON）
             ├─ 扫描器：递归遍历、排除、进度
             ├─ 索引：名字 arena + 定长记录 + 开放寻址路径表

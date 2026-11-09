@@ -1,7 +1,7 @@
 {
   "name": "dsh-locator",
   "version": "0.1.0",
-  "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index (inotify / ReadDirectoryChangesW / FSEvents when available) with an Everything-style query language, a persistent snapshot and agent tools. Windows, macOS and Linux.",
+  "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index, an Everything-style query language, agent tools and a Web search panel (Ctrl+Shift+F). Windows, macOS and Linux.",
   "author": "PerryLink contributors",
   "repository": {
     "type": "git",
@@ -20,11 +20,15 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": {
+      "default": "./client.js"
+    }
   },
   "files": [
     "lib",
     "src",
+    "client.js",
     "bin",
     "cordis.patch.yml",
     "CHANGELOG.md",
@@ -38,6 +42,9 @@
     "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "keywords": [
