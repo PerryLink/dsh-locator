@@ -126,6 +126,7 @@ export class LocatorRuntime {
     for (const exclude of this.config.excludes) args.push('--exclude', exclude)
     if (!this.config.watch) args.push('--no-watch')
     if (this.config.refreshIntervalMs > 0) args.push('--refresh', `${String(this.config.refreshIntervalMs)}ms`)
+    if (this.config.scanWorkers > 0) args.push('--workers', String(this.config.scanWorkers))
 
     let child: ChildProcessWithoutNullStreams
     try {

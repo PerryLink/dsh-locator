@@ -88,6 +88,7 @@ Every field is a Schemastery config field; edit the `dsh-locator` entry in the p
 | `excludes` | dev/cache directories | Base-name globs skipped by scanner and watcher. |
 | `watch` | `true` | Apply native filesystem notifications. |
 | `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher exists (macOS today); `0` disables. |
+| `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
 | `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
 | `binaryPath` | `''` | Override the bundled engine (development). |
 | `maxResults` | `100` | Hard cap for one search page. |
@@ -117,7 +118,7 @@ Measured on a developer WSL2 machine with a Linux home directory (1,234,757 entr
 | Metric | Result |
 |---|---|
 | Cold scan (uncached I/O) | 50.3 s |
-| Warm scan (page cache) | 11.8 s (~105k entries/s) |
+| Warm scan (page cache, 8 readers) | 6.5 s (~190k entries/s) |
 | Snapshot size | 133 MB |
 | Peak scan RSS | ~490 MB |
 | `locator_search "report"` (981 matches) | 34 ms |
@@ -143,6 +144,7 @@ DeepSeek Harness
             └─ snapshot: single file, mmap-friendly, atomic rename
 ```
 
+* **Parallel scanner.** Directory readers drain a bounded work queue and flush one batch per directory (`AddBatch`), so a parent record exists before its children are enqueued. The queue never blocks: a full queue falls back to scanning that subtree inline.
 * **Memory layout.** Records store a name offset/length into one byte arena plus a parent id; full paths are reconstructed only for the result page and for `path:` filters. That avoids one string header per file.
 * **Path table.** An open-addressing table of `id+1` slots keeps lookup/update near 12 bytes per entry instead of the ~50 bytes a `map[string]int32` costs.
 * **Query engine.** Bare terms and filters are compiled once, matched in parallel chunks, then reduced with a bounded max-heap: the top `offset+limit` rows are selected without sorting a million matches.

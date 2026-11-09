@@ -7,7 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
@@ -22,6 +25,8 @@ type Options struct {
 	Excludes []string
 	// FollowSymlinks descends into directory symlinks when set.
 	FollowSymlinks bool
+	// Workers is the number of directory readers; zero uses GOMAXPROCS.
+	Workers int
 	// Progress, when set, is called periodically and once at the end.
 	Progress func(Progress)
 	// ProgressEvery is the minimum interval between progress calls.
@@ -44,6 +49,7 @@ type Stats struct {
 	Files   int64         `json:"files"`
 	Skipped int64         `json:"skipped"`
 	Errors  int64         `json:"errors"`
+	Workers int           `json:"workers"`
 	Took    time.Duration `json:"tookNs"`
 }
 
@@ -72,91 +78,141 @@ func Run(ctx context.Context, ix *index.Index, opt Options) (Stats, error) {
 	}
 	st.Roots = len(valid)
 
-	every := opt.ProgressEvery
-	if every <= 0 {
-		every = 250 * time.Millisecond
+	workers := opt.Workers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
 	}
-	last := time.Now()
-	report := func(root, current string) {
-		if opt.Progress == nil || time.Since(last) < every {
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 16 {
+		workers = 16
+	}
+	st.Workers = workers
+
+	var entries, dirs, files, skipped, errs atomic.Int64
+	progress := newProgress(opt)
+
+	queue := make(chan string, workers*8)
+	var pending sync.WaitGroup
+	var workerGroup sync.WaitGroup
+
+	// scanDir reads one directory, appends its entries to a local batch, flushes
+	// it before enqueueing subdirectories so a parent record always exists
+	// before its children are indexed.
+	var scanDir func(path string)
+	scanDir = func(path string) {
+		if ctx.Err() != nil {
 			return
 		}
-		last = time.Now()
-		opt.Progress(Progress{Root: root, Entries: st.Entries, Dirs: st.Dirs, Current: current})
+		list, err := os.ReadDir(path)
+		if err != nil {
+			errs.Add(1)
+			progress.report(path, &entries, &dirs)
+			return
+		}
+		batch := make([]index.AddItem, 0, len(list))
+		children := make([]string, 0, 8)
+		for _, entry := range list {
+			if ctx.Err() != nil {
+				break
+			}
+			name := entry.Name()
+			child := filepath.Join(path, name)
+			isDir := entry.IsDir()
+			if excluded(child, name, isDir, opt.Excludes) {
+				skipped.Add(1)
+				continue
+			}
+			if isDir {
+				dirs.Add(1)
+			} else {
+				files.Add(1)
+			}
+			entries.Add(1)
+			if entry.Type()&fs.ModeSymlink != 0 && !opt.FollowSymlinks {
+				if info, lerr := entry.Info(); lerr == nil {
+					batch = append(batch, index.AddItem{Path: child, Info: infoOf(info)})
+				}
+				continue
+			}
+			info, ierr := entry.Info()
+			if ierr != nil {
+				errs.Add(1)
+				continue
+			}
+			batch = append(batch, index.AddItem{Path: child, Info: infoOf(info)})
+			if isDir {
+				children = append(children, child)
+			}
+		}
+		if len(batch) > 0 {
+			ix.AddBatch(batch)
+		}
+		progress.report(path, &entries, &dirs)
+		for _, child := range children {
+			if ctx.Err() != nil {
+				return
+			}
+			pending.Add(1)
+			select {
+			case queue <- child:
+			default:
+				// The queue is full: scan this subtree inline instead of
+				// blocking a producer that might also be the only consumer.
+				scanDir(child)
+				pending.Done()
+			}
+		}
 	}
 
-	var walkErr error
+	workerGroup.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer workerGroup.Done()
+			for dir := range queue {
+				scanDir(dir)
+				pending.Done()
+			}
+		}()
+	}
+
 	for _, root := range valid {
-		if err := ctx.Err(); err != nil {
-			walkErr = err
+		if ctx.Err() != nil {
 			break
 		}
-		rootInfo, err := os.Stat(root)
+		info, err := os.Stat(root)
 		if err != nil {
-			st.Errors++
+			errs.Add(1)
 			continue
 		}
 		ix.AddRoot(root)
-		ix.AddPath(root, infoOf(rootInfo))
-
-		err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			if err != nil {
-				// Permission denied on one subtree must not abort the scan.
-				st.Errors++
-				if d != nil && d.IsDir() {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if path != root && excluded(path, d.Name(), d.IsDir(), opt.Excludes) {
-				st.Skipped++
-				if d.IsDir() {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if d.IsDir() {
-				st.Dirs++
-			} else {
-				st.Files++
-			}
-			st.Entries++
-			if d.Type()&fs.ModeSymlink != 0 && !opt.FollowSymlinks {
-				if li, lerr := os.Lstat(path); lerr == nil {
-					ix.AddPath(path, infoOf(li))
-				}
-				if d.IsDir() {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			info, ierr := d.Info()
-			if ierr != nil {
-				st.Errors++
-				return nil
-			}
-			ix.AddPath(path, infoOf(info))
-			report(root, path)
-			return nil
-		})
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				walkErr = err
-				break
-			}
-			// WalkDir already counted per-entry failures; a root-level failure
-			// still leaves the rest indexed.
-			st.Errors++
+		ix.AddPath(root, infoOf(info))
+		entries.Add(1)
+		dirs.Add(1)
+		pending.Add(1)
+		select {
+		case queue <- root:
+		default:
+			scanDir(root)
+			pending.Done()
 		}
 	}
+
+	// Every queued directory is still counted in pending while it may discover
+	// children, so this Wait cannot return with work in flight.
+	pending.Wait()
+	close(queue)
+	workerGroup.Wait()
+
+	st.Entries = entries.Load()
+	st.Dirs = dirs.Load()
+	st.Files = files.Load()
+	st.Skipped = skipped.Load()
+	st.Errors = errs.Load()
 	st.Took = time.Since(start)
-	if opt.Progress != nil {
-		opt.Progress(Progress{Entries: st.Entries, Dirs: st.Dirs})
-	}
-	return st, walkErr
+	progress.finish(&entries, &dirs)
+	return st, ctx.Err()
 }
 
 func excluded(path, name string, isDir bool, patterns []string) bool {
@@ -169,8 +225,6 @@ func excluded(path, name string, isDir bool, patterns []string) bool {
 			if ok, _ := filepath.Match(p, path); ok {
 				return true
 			}
-			// A directory pattern such as `**/node_modules/**` is matched by
-			// its base-name segment when the full path does not match.
 			if isDir && strings.HasSuffix(p, "/**") {
 				base := strings.TrimSuffix(strings.TrimSuffix(p, "/**"), "/")
 				if ok, _ := filepath.Match(base, name); ok {
@@ -192,4 +246,43 @@ func infoOf(info fs.FileInfo) index.FileInfo {
 		Mtime: info.ModTime().UnixNano(),
 		Mode:  info.Mode(),
 	}
+}
+
+type progressReporter struct {
+	mu      sync.Mutex
+	fn      func(Progress)
+	every   time.Duration
+	last    time.Time
+	lastCur string
+}
+
+func newProgress(opt Options) *progressReporter {
+	every := opt.ProgressEvery
+	if every <= 0 {
+		every = 250 * time.Millisecond
+	}
+	return &progressReporter{fn: opt.Progress, every: every, last: time.Now()}
+}
+
+func (p *progressReporter) report(current string, entries, dirs *atomic.Int64) {
+	if p.fn == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if time.Since(p.last) < p.every {
+		return
+	}
+	p.last = time.Now()
+	p.lastCur = current
+	p.fn(Progress{Entries: entries.Load(), Dirs: dirs.Load(), Current: current})
+}
+
+func (p *progressReporter) finish(entries, dirs *atomic.Int64) {
+	if p.fn == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fn(Progress{Entries: entries.Load(), Dirs: dirs.Load()})
 }

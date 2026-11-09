@@ -33,8 +33,10 @@ type Options struct {
 	// SaveInterval is the autosave cadence; zero uses 30s.
 	SaveInterval time.Duration
 	// RefreshInterval rebuilds the index periodically when no native watcher
-	// is available (macOS today). Zero disables the fallback.
+	// is available. Zero disables the fallback.
 	RefreshInterval time.Duration
+	// ScanWorkers is the directory reader concurrency; zero uses GOMAXPROCS.
+	ScanWorkers int
 	// Version is reported by status.
 	Version string
 	// Log receives diagnostics; nil means stderr.
@@ -180,6 +182,7 @@ func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) 
 	st, err := scan.Run(ctx, ix, scan.Options{
 		Roots:    roots,
 		Excludes: s.opt.Excludes,
+		Workers:  s.opt.ScanWorkers,
 		Progress: func(p scan.Progress) {
 			s.event("scan", map[string]any{"phase": "progress", "entries": p.Entries, "current": p.Current})
 		},

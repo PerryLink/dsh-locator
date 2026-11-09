@@ -31,6 +31,9 @@
         # Platforms without a native watcher (macOS in v0.1) rebuild the index
         # on this cadence. 0 disables it; locator_rebuild still works.
         refreshIntervalMs: 1800000
+        # Directory reader concurrency during a scan. 0 uses the CPU count;
+        # raise it on fast NVMe arrays, lower it on spinning disks.
+        scanWorkers: 0
         # Snapshot directory. Empty means the platform cache directory
         # (%LOCALAPPDATA%\dsh-locator, ~/Library/Application Support/dsh-locator,
         # or $XDG_CACHE_HOME/dsh-locator).

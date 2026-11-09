@@ -21,6 +21,8 @@ export interface Config {
    * `locator_rebuild`.
    */
   refreshIntervalMs: number
+  /** Directory reader concurrency during scans; 0 uses the CPU count. */
+  scanWorkers: number
   /** Snapshot directory. Empty means the platform cache directory. */
   stateDir: string
   /** Override the engine binary path (development or custom builds). */
@@ -50,6 +52,7 @@ export const Config: Schema<Config> = Schema.object({
   ]),
   watch: Schema.boolean().default(true),
   refreshIntervalMs: Schema.number().default(1_800_000),
+  scanWorkers: Schema.number().default(0),
   stateDir: Schema.string().default(''),
   binaryPath: Schema.string().default(''),
   maxResults: Schema.number().default(100),

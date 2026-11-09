@@ -49,6 +49,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       excludes: ['node_modules'],
       watch: true,
     refreshIntervalMs: 1_800_000,
+    scanWorkers: 0,
       stateDir: state,
       binaryPath: binary,
       maxResults: 100,

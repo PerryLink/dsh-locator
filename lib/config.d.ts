@@ -19,6 +19,8 @@ export interface Config {
      * `locator_rebuild`.
      */
     refreshIntervalMs: number;
+    /** Directory reader concurrency during scans; 0 uses the CPU count. */
+    scanWorkers: number;
     /** Snapshot directory. Empty means the platform cache directory. */
     stateDir: string;
     /** Override the engine binary path (development or custom builds). */

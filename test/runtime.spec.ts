@@ -14,6 +14,7 @@ function config(overrides: Partial<Config> = {}): Config {
     excludes: ['node_modules', '.git'],
     watch: true,
     refreshIntervalMs: 1_800_000,
+    scanWorkers: 0,
     stateDir: '',
     binaryPath: '',
     maxResults: 100,

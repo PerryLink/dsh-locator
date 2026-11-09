@@ -92,28 +92,9 @@ func (ix *Index) AddPath(full string, info FileInfo) (int32, bool) {
 	full = cleanPath(full)
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	if id := ix.table.get(full, ix); id >= 0 {
-		r := &ix.recs[id]
-		r.Size = info.Size
-		r.Mtime = info.Mtime
-		r.Flags = flagsFor(info.Mode, r.Flags)
-		ix.gen++
-		return id, false
-	}
-	parent := int32(-1)
-	if dir := filepath.Dir(full); dir != full {
-		parent = ix.table.get(dir, ix)
-	}
-	name := filepath.Base(full)
-	if parent < 0 {
-		// An orphan (a create event arriving before its directory, or a root
-		// that was never registered) keeps its full path as the name so path
-		// reconstruction still yields the real path.
-		name = full
-	}
-	id := ix.appendLocked(name, parent, info)
-	ix.gen++
-	return id, true
+	existed := ix.table.get(full, ix) >= 0
+	id := ix.addLocked(full, info)
+	return id, !existed
 }
 
 // appendLocked appends one record; the caller holds the write lock.
@@ -387,4 +368,43 @@ func (ix *Index) Generation() uint64 {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.gen
+}
+
+// AddItem is one path and its metadata for AddBatch.
+type AddItem struct {
+	Path string
+	Info FileInfo
+}
+
+// AddBatch indexes many entries under one lock. It is used by the parallel
+// scanner; callers must add a directory before its children so parents resolve.
+func (ix *Index) AddBatch(items []AddItem) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, item := range items {
+		ix.addLocked(item.Path, item.Info)
+	}
+}
+
+func (ix *Index) addLocked(full string, info FileInfo) int32 {
+	full = cleanPath(full)
+	if id := ix.table.get(full, ix); id >= 0 {
+		r := &ix.recs[id]
+		r.Size = info.Size
+		r.Mtime = info.Mtime
+		r.Flags = flagsFor(info.Mode, r.Flags)
+		ix.gen++
+		return id
+	}
+	parent := int32(-1)
+	if dir := filepath.Dir(full); dir != full {
+		parent = ix.table.get(dir, ix)
+	}
+	name := filepath.Base(full)
+	if parent < 0 {
+		name = full
+	}
+	id := ix.appendLocked(name, parent, info)
+	ix.gen++
+	return id
 }

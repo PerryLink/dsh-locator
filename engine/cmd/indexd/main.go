@@ -87,6 +87,7 @@ func cmdScan(args []string) error {
 	fs.Var(&roots, "root", "directory to index (repeatable)")
 	fs.Var(&excludes, "exclude", "base-name glob to skip (repeatable)")
 	follow := fs.Bool("follow", false, "follow directory symlinks")
+	workers := fs.Int("workers", 0, "directory reader concurrency (0 = CPU count)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -104,6 +105,7 @@ func cmdScan(args []string) error {
 		Roots:          roots,
 		Excludes:       excludes,
 		FollowSymlinks: *follow,
+		Workers:        *workers,
 		Progress: func(p scan.Progress) {
 			if p.Current != "" {
 				fmt.Fprintf(os.Stderr, "\r%d entries, %d dirs  %s", p.Entries, p.Dirs, shorten(p.Current, 80))
@@ -224,6 +226,7 @@ func cmdServe(args []string) error {
 	fs.Var(&excludes, "exclude", "base-name glob to skip (repeatable)")
 	noWatch := fs.Bool("no-watch", false, "disable filesystem watching")
 	refresh := fs.Duration("refresh", 30*time.Minute, "rebuild interval when no native watcher exists (0 disables)")
+	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -255,6 +258,7 @@ func cmdServe(args []string) error {
 		Excludes: excludes,
 		Watch:           !*noWatch,
 		RefreshInterval: *refresh,
+		ScanWorkers:     *workers,
 		Version:         version,
 	})
 	return srv.Run(ctx, os.Stdin, os.Stdout)
