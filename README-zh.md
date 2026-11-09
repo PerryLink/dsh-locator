@@ -31,6 +31,8 @@ dsh plugin --profile web add /绝对路径/dsh-locator-0.1.0.tgz
 
 npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64` 六个平台的预编译引擎。
 
+装进**已经在运行**的 Web profile 后，请**刷新页面**（`F5`）：宿主工具可能立即热挂载，但浏览器面板（`client.js`）是在页面加载时从 boot graph 取的。headless/TUI profile 不会挂面板。
+
 ## 首次运行
 
 首次挂载时引擎扫描配置的根目录（默认：用户主目录），快照写到平台缓存目录：

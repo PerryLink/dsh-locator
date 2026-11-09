@@ -31,6 +31,8 @@ dsh plugin --profile web add /absolute/path/to/dsh-locator-0.1.0.tgz
 
 The npm package ships prebuilt engines for `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` and `darwin-arm64`.
 
+After installing into a Web profile that is already running, **reload the page** (`F5`): the host tools may mount immediately, but the browser panel (`client.js`) is loaded from the boot graph at page load. Headless/TUI profiles never mount the panel.
+
 ## First run
 
 On first mount the engine indexes the configured roots (default: your home directory) and writes a snapshot to the platform cache directory:
