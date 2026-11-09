@@ -26,7 +26,14 @@ jobs:
         run: '.\indexd.exe usn-probe --volume C: --root C:\Windows --limit 5 --journal 5'
       - name: USN probe (JSON)
         run: '.\indexd.exe usn-probe --volume C: --root C:\Windows --enumerate=false --json'
-      - name: USN scan end to end
+      - name: USN scan on C:\Windows
+        shell: pwsh
+        run: |
+          $state = Join-Path $env:RUNNER_TEMP 'usn-winstate'
+          .\indexd.exe scan --usn --state $state --root 'C:\Windows'
+          .\indexd.exe status --state $state
+          .\indexd.exe query --state $state --limit 3 --sort size --desc '.exe'
+      - name: Portable fallback on a volume without a journal
         shell: pwsh
         run: |
           $tree = Join-Path $env:RUNNER_TEMP 'usn-tree'
