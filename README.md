@@ -65,6 +65,7 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 | `locator_search` | Query the index. Returns path, size, modification time, extension and kind, plus total/truncated so a capped page is never presented as complete. |
 | `locator_status` | Roots, entry counts, watcher state, state directory and engine path. Use it to explain coverage or diagnose a stale result. |
 | `locator_rebuild` | Replace the index with a fresh background scan. Searches keep using the old index until the new one is ready. |
+| `locator_export` | Write a read-only SQLite mirror of the index (`entries` table) for external SQL tools. Streams page by page; the binary snapshot stays primary. |
 
 ### Query language
 

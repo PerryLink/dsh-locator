@@ -65,6 +65,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 | `locator_search` | 查询索引，返回路径、大小、修改时间、扩展名、类型，并给出 total/truncated，截断页面不会被当成完整结果。 |
 | `locator_status` | 根目录、条目数、监听状态、状态目录与引擎路径。用来解释覆盖范围或排查结果过期。 |
 | `locator_rebuild` | 后台重建索引；新索引就绪前，搜索继续用旧索引。 |
+| `locator_export` | 把索引导出成只读 SQLite（`entries` 表），供外部 SQL 工具查询；逐页流式导出，二进制快照仍是主存储。 |
 
 ### 查询语法
 

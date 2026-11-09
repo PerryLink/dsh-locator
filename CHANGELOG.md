@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0 — 2026-11-09
+
+* `locator_export`: stream the index page by page and write a read-only SQLite mirror (`entries(path, name, dir, size, mtime_ms, ext)`) through Node's built-in `node:sqlite`. The compact snapshot remains the primary store.
+* Engine `dump` RPC with a record-id cursor, so exports do not hold the index lock between pages.
+* CI runs the engine build before the Node tests, exercising the new RPC and the clean-install path together.
+* Windows USN path validated end to end on a Windows CI runner (1.34 M records, `C:\Windows` indexed in 7.8 s); macOS kqueue watcher covered by a macOS CI test.
+* Experimental cgo FSEvents backend was attempted and removed after an arm64 `FSEventStreamCreate` crash; kqueue remains the shipped macOS backend.
+
 ## 0.1.0 — 2026-11-09
 
 First working release.
