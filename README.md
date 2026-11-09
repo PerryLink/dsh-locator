@@ -1,5 +1,8 @@
 # dsh-locator
 
+[![npm](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
+[![ci](https://github.com/PerryLink/dsh-locator/actions/workflows/ci.yml/badge.svg)](https://github.com/PerryLink/dsh-locator/actions/workflows/ci.yml)
+
 [中文](README-zh.md) | English
 
 A whole-disk, millisecond file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that builds its **own** index. No Everything installation, no `es.exe`, no Everything service.
