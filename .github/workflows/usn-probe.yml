@@ -1,0 +1,37 @@
+name: usn-probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/usn-probe.yml'
+
+jobs:
+  windows-usn:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+      - name: Build engine
+        run: go build -o indexd.exe ./cmd/indexd
+      - name: Engine version
+        run: .\indexd.exe version
+      - name: USN probe (journal + MFT enumeration)
+        run: .\indexd.exe usn-probe --volume C: --root C:\Windows --limit 5 --journal 5
+      - name: USN probe (JSON)
+        run: .\indexd.exe usn-probe --volume C: --root C:\Windows --enumerate=false --json
+      - name: USN scan end to end
+        shell: pwsh
+        run: |
+          $tree = Join-Path $env:RUNNER_TEMP 'usn-tree'
+          $state = Join-Path $env:RUNNER_TEMP 'usn-state'
+          New-Item -ItemType Directory -Force -Path (Join-Path $tree 'docs') | Out-Null
+          Set-Content -Path (Join-Path $tree 'docs\report.pdf') -Value 'x'
+          .\indexd.exe scan --usn --state $state --root $tree
+          .\indexd.exe query --state $state --limit 5 report
