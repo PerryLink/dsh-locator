@@ -1,0 +1,179 @@
+# dsh-locator
+
+[中文](README-zh.md) | English
+
+A whole-disk, millisecond file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that builds its **own** index. No Everything installation, no `es.exe`, no Everything service.
+
+`dsh-locator` scans the directories you choose once, keeps the result in a compact snapshot, applies filesystem changes as they happen, and answers name/path queries in tens of milliseconds across a million entries. The agent gets `locator_search`, `locator_status` and `locator_rebuild`; you get results rendered as a path-search card in the Web GUI.
+
+Everything inspired the *ideas*: a persistent index of file names, a query language with `ext:` / `size:` / `dm:` filters, and an updater that consumes the filesystem's own change stream. The implementation is independent and cross-platform.
+
+## Why another file search
+
+`glob` and `grep` walk the workspace on every call — fine when you know the directory, slow when you remember only part of a name. Everything is excellent on Windows but is Windows-only, and wrapping it leaves macOS, Linux, WSL and remote hosts uncovered. `dsh-locator` owns the index, so the same tools work everywhere Node and Go run.
+
+## Install
+
+```sh
+# from npm (once published)
+dsh plugin --profile web add dsh-locator
+
+# from a checkout
+pnpm install
+pnpm build            # TypeScript plugin
+pnpm build:engine     # Go engine for the host platform
+dsh plugin --profile web add /absolute/path/to/dsh-locator
+```
+
+The npm package ships prebuilt engines for `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` and `darwin-arm64`.
+
+## First run
+
+On first mount the engine indexes the configured roots (default: your home directory) and writes a snapshot to the platform cache directory:
+
+| Platform | Default state directory |
+|---|---|
+| Windows | `%LOCALAPPDATA%\dsh-locator` |
+| macOS | `~/Library/Application Support/dsh-locator` |
+| Linux | `$XDG_CACHE_HOME/dsh-locator` or `~/.cache/dsh-locator` |
+
+The first scan of a large home directory reads the disk; later starts load the snapshot instead. A default exclude list skips `node_modules`, `.git`, `.svn`, `.hg`, `.cache`, `__pycache__`, `.venv`, `venv` and `.next`.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `locator_search` | Query the index. Returns path, size, modification time, extension and kind, plus total/truncated so a capped page is never presented as complete. |
+| `locator_status` | Roots, entry counts, watcher state, state directory and engine path. Use it to explain coverage or diagnose a stale result. |
+| `locator_rebuild` | Replace the index with a fresh background scan. Searches keep using the old index until the new one is ready. |
+
+### Query language
+
+Bare words are ANDed substrings of the file name. Everything-style filters combine with them:
+
+| Example | Meaning |
+|---|---|
+| `report` | name contains `report` |
+| `report ext:pdf` | …and the extension is `pdf` |
+| `ext:ts,js` / `ext:!tmp` | include or exclude extensions |
+| `*.sln` / `?ata` | `*` and `?` wildcards |
+| `"annual report"` | phrase with a space |
+| `!archive` | negate a term |
+| `path:src` | the full path contains `src` |
+| `size:>10mb` / `size:1kb..2mb` | size comparisons |
+| `dm:today` / `dm:thisweek` / `dm:2026-01-01` | modification time |
+| `folder:` / `file:` | directories or files only |
+| `case:1` / `wholeword:1` | case-sensitive / word boundaries |
+
+`locator_search` also takes `sort` (`name`, `path`, `size`, `mtime`, `ext`), `desc`, `offset`, `limit`, `regex`, `caseSensitive` and `wholeWord` parameters.
+
+## Configuration
+
+Every field is a Schemastery config field; edit the `dsh-locator` entry in the profile patch (or the bundled `cordis.patch.yml` defaults).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Mount no tools and start no engine when `false`. |
+| `roots` | `[]` | Directories to index; empty means the home directory. |
+| `excludes` | dev/cache directories | Base-name globs skipped by scanner and watcher. |
+| `watch` | `true` | Apply native filesystem notifications. |
+| `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher exists (macOS today); `0` disables. |
+| `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
+| `binaryPath` | `''` | Override the bundled engine (development). |
+| `maxResults` | `100` | Hard cap for one search page. |
+| `startupTimeoutMs` | `120000` | How long a cold build may take before the plugin reports failure. |
+| `requestTimeoutMs` | `15000` | Per-request deadline. |
+
+Narrow `roots` if indexing the whole home directory is too much I/O. A small, focused set (`~/Documents`, `~/Downloads`, one code tree) is usually the best trade-off.
+
+## Platform support
+
+| Platform | Scan + snapshot | Live updates | Notes |
+|---|---|---|---|
+| Linux | yes | inotify, recursive | Watch descriptors are per directory; very large trees can hit `fs.inotify.max_user_watches`. |
+| Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Changes made by WSL to `/mnt/<drive>` may not raise notifications; use `locator_rebuild` for those. |
+| macOS | yes | periodic rebuild (v0.1) | A native FSEvents backend is next; until then `refreshIntervalMs` keeps the snapshot fresh. |
+
+The engine is pure Go with no cgo, cross-compiled from one machine. It never needs admin privileges.
+
+### Windows and the USN journal
+
+Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` v0.1 deliberately starts with a portable directory walk plus change notifications: it works without a service, without UAC and on every filesystem. USN/MFT enumeration is on the roadmap as an opt-in fast path for volumes where the process holds `GENERIC_READ` (admin) — the portable path stays the fallback.
+
+## Performance
+
+Measured on a developer WSL2 machine with a Linux home directory (1,234,757 entries: 1,128,288 files, 106,469 directories), excluding `node_modules`, `.git`, `.cache` and `.venv`:
+
+| Metric | Result |
+|---|---|
+| Cold scan (uncached I/O) | 50.3 s |
+| Warm scan (page cache) | 11.8 s (~105k entries/s) |
+| Snapshot size | 133 MB |
+| Peak scan RSS | ~490 MB |
+| `locator_search "report"` (981 matches) | 34 ms |
+| `locator_search "package.json"` (1,287 matches) | 25 ms |
+| Query process RSS (1.2 M entries) | ~197 MB |
+| Small tree (39k entries) scan | 0.47 s |
+
+Search is parallel over the record array; the slower cold scan is disk-bound. Numbers vary with the filesystem, cache state and CPU.
+
+## Design
+
+```
+DeepSeek Harness
+  └─ dsh-locator (TypeScript plugin)
+       ├─ locator_search / locator_status / locator_rebuild
+       └─ child process: indexd serve  (Go, NDJSON over stdio)
+            ├─ scanner: recursive walk, excludes, progress
+            ├─ index:   names arena + fixed records + open-addressing path table
+            ├─ query:   parser, matcher, top-K selection, sort, pagination
+            ├─ watcher: inotify (Linux) / ReadDirectoryChangesW (Windows)
+            └─ snapshot: single file, mmap-friendly, atomic rename
+```
+
+* **Memory layout.** Records store a name offset/length into one byte arena plus a parent id; full paths are reconstructed only for the result page and for `path:` filters. That avoids one string header per file.
+* **Path table.** An open-addressing table of `id+1` slots keeps lookup/update near 12 bytes per entry instead of the ~50 bytes a `map[string]int32` costs.
+* **Query engine.** Bare terms and filters are compiled once, matched in parallel chunks, then reduced with a bounded max-heap: the top `offset+limit` rows are selected without sorting a million matches.
+* **Persistence.** The snapshot is written to a temporary file and renamed; a generation counter lets the daemon autosave only when the index changed. Tombstones are compacted when deletions exceed a threshold.
+* **Protocol.** One JSON request/response per line on stdio, with unsolicited `scan`, `stats`, `warning`, `error` and `rebuilt` events. No ports, no auth surface, no network listeners.
+* **Read-only.** The engine opens files for metadata only; it never writes to indexed paths.
+
+## Build from source
+
+Requirements: Node `^22.19 || >=24.9`, pnpm, Go 1.22+ for the engine.
+
+```sh
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm build:engine:all   # or build:engine for the host target
+```
+
+The engine is a separate Go module under `engine/`; run its tests with `cd engine && go test ./...`.
+
+## Limitations (v0.1)
+
+* File names, paths, sizes and modification times only — **no content indexing**. Use `grep` for contents.
+* The index covers configured roots; it is not a filesystem driver.
+* Linux inotify watches one descriptor per directory; a home directory with hundreds of thousands of directories can exceed the kernel limit. The plugin reports the warning and the snapshot stays usable; rebuilds catch up.
+* WSL writes into `/mnt/c` may not produce Windows notifications (the Windows watcher cannot see the 9p writer's change stream). Rebuild those roots explicitly.
+* Network shares are scanned only if they are reachable as ordinary directories; no SMB-specific change feed.
+* macOS live updates are periodic rebuilds in v0.1.
+* No USN/MFT fast enumeration yet (see above).
+
+## Roadmap
+
+1. macOS FSEvents watcher.
+2. Windows USN/MFT fast enumeration when the process can read the volume; journal-based catch-up after downtime.
+3. Dedicated Web GUI panel (table, sortable columns, filters, preview, insert-as-`@file`).
+4. Optional lowercase-name arena and trigram prefilter for large indexes.
+5. Incremental snapshot compaction and per-root journals.
+
+## Security and privacy
+
+The index is local: no network calls, no telemetry, no uploads. The snapshot contains file names and paths, so treat the state directory as private data and exclude it from backups if that matters to you. The plugin never modifies, moves or deletes indexed files.
+
+## License
+
+Apache-2.0.

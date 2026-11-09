@@ -1,0 +1,85 @@
+{
+  "name": "dsh-locator",
+  "version": "0.1.0",
+  "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index (inotify / ReadDirectoryChangesW / FSEvents when available) with an Everything-style query language, a persistent snapshot and agent tools. Windows, macOS and Linux.",
+  "author": "PerryLink contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PerryLink/dsh-locator.git"
+  },
+  "homepage": "https://github.com/PerryLink/dsh-locator#readme",
+  "bugs": {
+    "url": "https://github.com/PerryLink/dsh-locator/issues"
+  },
+  "private": false,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "bin",
+    "cordis.patch.yml",
+    "CHANGELOG.md",
+    "README.md",
+    "README-zh.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "sideEffects": false,
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "search",
+    "file-search",
+    "disk-index",
+    "everything",
+    "locator",
+    "inotify",
+    "usn",
+    "fts"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.9.0",
+    "dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "packageManager": "pnpm@12.16.1",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5-alpha.1",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-0 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.18.5-alpha.1"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:engine": "node scripts/build-engine.mjs",
+    "build:engine:all": "node scripts/build-engine.mjs --all",
+    "clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "verify": "node scripts/verify.mjs"
+  },
+  "license": "Apache-2.0"
+}

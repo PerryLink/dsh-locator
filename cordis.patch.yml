@@ -1,0 +1,45 @@
+# dsh-locator bundle patch: mount the file index tools.
+#
+# Every key below is a Config field (Schemastery schema); invalid values fail
+# the profile load loudly. The engine scans the configured roots once, keeps a
+# snapshot under `stateDir`, and applies filesystem notifications when the
+# platform backend is available.
+- insert:
+    - id: dsh-locator
+      name: dsh-locator
+      config:
+        # Master switch. `false` mounts no tools and starts no engine.
+        enabled: true
+        # Directories to index. Empty means the current user's home directory.
+        # Narrow this if the home directory is huge or holds network mounts.
+        roots: []
+        # Base-name globs skipped by both the scanner and the watcher.
+        excludes:
+          - node_modules
+          - .git
+          - .hg
+          - .svn
+          - .cache
+          - __pycache__
+          - .venv
+          - venv
+          - .next
+        # Keep the index current with native filesystem notifications.
+        # Platforms without a backend fall back to a snapshot that is refreshed
+        # by locator_rebuild.
+        watch: true
+        # Platforms without a native watcher (macOS in v0.1) rebuild the index
+        # on this cadence. 0 disables it; locator_rebuild still works.
+        refreshIntervalMs: 1800000
+        # Snapshot directory. Empty means the platform cache directory
+        # (%LOCALAPPDATA%\dsh-locator, ~/Library/Application Support/dsh-locator,
+        # or $XDG_CACHE_HOME/dsh-locator).
+        stateDir: ''
+        # Override the bundled engine binary (development builds).
+        binaryPath: ''
+        # Hard cap for one locator_search page.
+        maxResults: 100
+        # A cold index build may take this long before the plugin reports it.
+        startupTimeoutMs: 120000
+        # Per-request deadline for engine calls.
+        requestTimeoutMs: 15000
