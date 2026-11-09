@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 — 2026-11-09
+
+* **USN restart catch-up**: index records carry the NTFS FRN (in the old snapshot padding, so v1 snapshots still load), `scan --usn` persists `usn-state.json` (journal id, next USN, roots), and `serve --usn` replays the journal before serving. A file created while the daemon is stopped is found after restart without a full scan; a wrapped/mismatched journal falls back to the portable watcher. Validated on a Windows CI runner.
+* **Panel i18n** (zh/en/es/pt/hi): follow `navigator.language`, including status, empty/error states, relative times and footer hints.
+* **Panel actions**: `Ctrl+O` opens the selected file with its default app; `Ctrl+Enter` inserts a quoted `@"path"` into the composer (falls back to copying the mention); double-click still reveals it.
+* `/dsh-locator/open` host route with the same root/path validation as reveal.
+
 ## 0.4.1 — 2026-11-09
 
 * Engine version is injected at build time (`-X main.version`) instead of a hard-coded `0.1.0`; `locator_status` now reports the package version.

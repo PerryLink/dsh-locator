@@ -100,8 +100,133 @@ window.__ModuleLoader__.load({
       })
       const data = await response.json().catch(() => null)
       if (!response.ok || data === null) throw new Error('HTTP ' + response.status)
-      if (data.ok === false) throw new Error(typeof data.error === 'string' ? data.error : '搜索失败')
+      if (data.ok === false) throw new Error(typeof data.error === 'string' ? data.error : 'request failed')
       return data
+    }
+
+
+    // ── i18n ────────────────────────────────────────────────────────────────
+    const STRINGS = {
+      en: {
+        placeholder: 'Search file names or paths… e.g. ext:pdf size:>10mb dm:thisweek path:src !tmp',
+        searchLabel: 'Search files', dialog: 'Local file search', closeTitle: 'Close (Esc)', closeLabel: 'Close',
+        filesOnly: 'Files only', dirsOnly: 'Directories only', statusLoading: 'Reading index status…',
+        status: 'Index {entries} entries · {mode} · {roots} roots', live: 'live', snapshot: 'snapshot', usn: 'USN',
+        sortTitle: 'Click to change sorting', name: 'Name', size: 'Size', mtime: 'Modified', path: 'Path',
+        dirBadge: 'DIR', fileBadge: 'FILE', loading: 'Searching…', errorPrefix: 'Search failed: ', empty: 'No matching files',
+        results: '{total} results', showing: 'showing first {n}', indexing: 'indexing, results may be incomplete',
+        copied: 'Path copied', revealed: 'Revealed in file manager', opened: 'Opened', inserted: 'Inserted @file',
+        insertFailed: 'Insert failed; @file copied', footer: '↑↓ select · Enter copy · Ctrl+O open · Ctrl+Enter insert @file · double-click reveal · Esc close',
+        launcher: 'Local file search (Ctrl+Shift+F)',
+        justNow: 'just now', minutesAgo: '{n} min ago', hoursAgo: '{n} h ago',
+      },
+      zh: {
+        placeholder: '搜索文件名或路径… 支持 ext:pdf size:>10mb dm:thisweek path:src !tmp',
+        searchLabel: '文件搜索', dialog: '本地文件搜索', closeTitle: '关闭 (Esc)', closeLabel: '关闭',
+        filesOnly: '只看文件', dirsOnly: '只看目录', statusLoading: '索引状态读取中…',
+        status: '索引 {entries} 条 · {mode} · {roots} 个根目录', live: '实时监听', snapshot: '快照', usn: 'USN',
+        sortTitle: '点击切换排序', name: '名称', size: '大小', mtime: '修改时间', path: '路径',
+        dirBadge: '目录', fileBadge: '文件', loading: '搜索中…', errorPrefix: '搜索失败：', empty: '没有匹配的文件',
+        results: '{total} 条结果', showing: '显示前 {n} 条', indexing: '索引构建中，结果可能不完整',
+        copied: '已复制路径', revealed: '已在文件管理器中定位', opened: '已打开', inserted: '已插入 @file',
+        insertFailed: '插入失败，已复制 @file', footer: '↑↓ 选择 · Enter 复制 · Ctrl+O 打开 · Ctrl+Enter 插入 @file · 双击定位 · Esc 关闭',
+        launcher: '本地文件搜索 (Ctrl+Shift+F)',
+        justNow: '刚刚', minutesAgo: '{n} 分钟前', hoursAgo: '{n} 小时前',
+      },
+      es: {
+        placeholder: 'Busca nombres o rutas… p. ej. ext:pdf size:>10mb dm:thisweek path:src !tmp',
+        searchLabel: 'Buscar archivos', dialog: 'Búsqueda local de archivos', closeTitle: 'Cerrar (Esc)', closeLabel: 'Cerrar',
+        filesOnly: 'Solo archivos', dirsOnly: 'Solo carpetas', statusLoading: 'Leyendo el estado del índice…',
+        status: 'Índice: {entries} entradas · {mode} · {roots} raíces', live: 'en vivo', snapshot: 'instantánea', usn: 'USN',
+        sortTitle: 'Clic para cambiar el orden', name: 'Nombre', size: 'Tamaño', mtime: 'Modificado', path: 'Ruta',
+        dirBadge: 'DIR', fileBadge: 'ARCH', loading: 'Buscando…', errorPrefix: 'Error de búsqueda: ', empty: 'Sin coincidencias',
+        results: '{total} resultados', showing: 'mostrando {n}', indexing: 'indexando, resultados incompletos',
+        copied: 'Ruta copiada', revealed: 'Mostrado en el gestor de archivos', opened: 'Abierto', inserted: '@file insertado',
+        insertFailed: 'No se pudo insertar; @file copiado', footer: '↑↓ elegir · Enter copiar · Ctrl+O abrir · Ctrl+Enter insertar @file · doble clic revelar · Esc cerrar',
+        launcher: 'Búsqueda local (Ctrl+Shift+F)',
+        justNow: 'ahora', minutesAgo: 'hace {n} min', hoursAgo: 'hace {n} h',
+      },
+      pt: {
+        placeholder: 'Busque nomes ou caminhos… ex. ext:pdf size:>10mb dm:thisweek path:src !tmp',
+        searchLabel: 'Buscar arquivos', dialog: 'Busca local de arquivos', closeTitle: 'Fechar (Esc)', closeLabel: 'Fechar',
+        filesOnly: 'Somente arquivos', dirsOnly: 'Somente pastas', statusLoading: 'Lendo o estado do índice…',
+        status: 'Índice: {entries} entradas · {mode} · {roots} raízes', live: 'ao vivo', snapshot: 'instantâneo', usn: 'USN',
+        sortTitle: 'Clique para mudar a ordem', name: 'Nome', size: 'Tamanho', mtime: 'Modificado', path: 'Caminho',
+        dirBadge: 'DIR', fileBadge: 'ARQ', loading: 'Buscando…', errorPrefix: 'Falha na busca: ', empty: 'Nenhum resultado',
+        results: '{total} resultados', showing: 'mostrando {n}', indexing: 'indexando, resultados incompletos',
+        copied: 'Caminho copiado', revealed: 'Mostrado no gerenciador de arquivos', opened: 'Aberto', inserted: '@file inserido',
+        insertFailed: 'Falha ao inserir; @file copiado', footer: '↑↓ escolher · Enter copiar · Ctrl+O abrir · Ctrl+Enter inserir @file · clique duplo revelar · Esc fechar',
+        launcher: 'Busca local (Ctrl+Shift+F)',
+        justNow: 'agora', minutesAgo: 'há {n} min', hoursAgo: 'há {n} h',
+      },
+      hi: {
+        placeholder: 'फ़ाइल नाम या पथ खोजें… जैसे ext:pdf size:>10mb dm:thisweek path:src !tmp',
+        searchLabel: 'फ़ाइल खोज', dialog: 'स्थानीय फ़ाइल खोज', closeTitle: 'बंद करें (Esc)', closeLabel: 'बंद करें',
+        filesOnly: 'केवल फ़ाइलें', dirsOnly: 'केवल फ़ोल्डर', statusLoading: 'इंडेक्स स्थिति पढ़ी जा रही है…',
+        status: 'इंडेक्स {entries} प्रविष्टियाँ · {mode} · {roots} रूट', live: 'लाइव', snapshot: 'स्नैपशॉट', usn: 'USN',
+        sortTitle: 'क्रम बदलने के लिए क्लिक करें', name: 'नाम', size: 'आकार', mtime: 'संशोधित', path: 'पथ',
+        dirBadge: 'DIR', fileBadge: 'FILE', loading: 'खोज रहे हैं…', errorPrefix: 'खोज विफल: ', empty: 'कोई मेल नहीं',
+        results: '{total} परिणाम', showing: 'पहले {n} दिखाए', indexing: 'इंडेक्स बन रहा है, परिणाम अधूरे हो सकते हैं',
+        copied: 'पथ कॉपी हुआ', revealed: 'फ़ाइल मैनेजर में दिखाया', opened: 'खोला गया', inserted: '@file डाला गया',
+        insertFailed: 'डालना विफल; @file कॉपी हुआ', footer: '↑↓ चुनें · Enter कॉपी · Ctrl+O खोलें · Ctrl+Enter @file डालें · डबल-क्लिक दिखाएँ · Esc बंद',
+        launcher: 'स्थानीय फ़ाइल खोज (Ctrl+Shift+F)',
+        justNow: 'अभी', minutesAgo: '{n} मिनट पहले', hoursAgo: '{n} घंटे पहले',
+      },
+    }
+    const LANG = (() => {
+      const tag = String((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase()
+      if (tag.startsWith('zh')) return 'zh'
+      if (tag.startsWith('es')) return 'es'
+      if (tag.startsWith('pt')) return 'pt'
+      if (tag.startsWith('hi')) return 'hi'
+      return 'en'
+    })()
+    const TEXT = STRINGS[LANG]
+    function t(key, vars) {
+      let value = TEXT[key] || STRINGS.en[key] || key
+      if (vars) value = value.replace(/\{(\w+)\}/g, (_, name) => String(vars[name] ?? ''))
+      return value
+    }
+
+    function formatRelative(ms) {
+      const diff = Date.now() - ms
+      if (diff >= 0 && diff < 60_000) return t('justNow')
+      if (diff >= 0 && diff < 3_600_000) return t('minutesAgo', { n: Math.floor(diff / 60_000) })
+      if (diff >= 0 && diff < 86_400_000) return t('hoursAgo', { n: Math.floor(diff / 3_600_000) })
+      return ''
+    }
+
+    function copyText(text) {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        return navigator.clipboard.writeText(text)
+      }
+      return new Promise((resolve, reject) => {
+        const area = document.createElement('textarea')
+        area.value = text
+        document.body.appendChild(area)
+        area.select()
+        try {
+          if (document.execCommand('copy')) resolve()
+          else reject(new Error('copy failed'))
+        } finally {
+          area.remove()
+        }
+      })
+    }
+
+    function insertIntoComposer(text) {
+      const element = document.querySelector('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]')
+      if (!element) return false
+      element.focus()
+      if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
+        const start = typeof element.selectionStart === 'number' ? element.selectionStart : element.value.length
+        const end = typeof element.selectionEnd === 'number' ? element.selectionEnd : start
+        if (typeof element.setRangeText === 'function') element.setRangeText(text, start, end, 'end')
+        else element.value = element.value.slice(0, start) + text + element.value.slice(end)
+        element.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      }
+      return document.execCommand('insertText', false, text)
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
@@ -122,11 +247,8 @@ window.__ModuleLoader__.load({
       if (!ms) return ''
       const date = new Date(ms)
       if (Number.isNaN(date.getTime())) return ''
-      const now = Date.now()
-      const diff = now - ms
-      if (diff >= 0 && diff < 60_000) return '刚刚'
-      if (diff >= 0 && diff < 3_600_000) return Math.floor(diff / 60_000) + ' 分钟前'
-      if (diff >= 0 && diff < 86_400_000) return Math.floor(diff / 3_600_000) + ' 小时前'
+      const relative = formatRelative(ms)
+      if (relative !== '') return relative
       const pad = value => String(value).padStart(2, '0')
       return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
     }
@@ -239,38 +361,38 @@ window.__ModuleLoader__.load({
         }
       }, [sort])
 
+      const notify = useCallback(message => {
+        setToast(message)
+        setTimeout(() => setToast(''), 1600)
+      }, [])
+
       const copy = useCallback(hit => {
         if (!hit) return
-        const text = hit.path
-        const done = () => {
-          setToast('已复制路径')
-          setTimeout(() => setToast(''), 1500)
-        }
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          navigator.clipboard.writeText(text).then(done).catch(() => {})
-          return
-        }
-        const area = document.createElement('textarea')
-        area.value = text
-        document.body.appendChild(area)
-        area.select()
-        try {
-          document.execCommand('copy')
-          done()
-        } finally {
-          area.remove()
-        }
-      }, [])
+        copyText(hit.path).then(() => notify(t('copied'))).catch(() => {})
+      }, [notify])
 
       const reveal = useCallback(hit => {
         if (!hit) return
-        post('/dsh-locator/reveal', { path: hit.path }).then(() => {
-          setToast('已在文件管理器中定位')
-          setTimeout(() => setToast(''), 1500)
-        }).catch(() => {
-          copy(hit)
-        })
-      }, [copy])
+        post('/dsh-locator/reveal', { path: hit.path }).then(() => notify(t('revealed'))).catch(() => copy(hit))
+      }, [copy, notify])
+
+      const openFile = useCallback(hit => {
+        if (!hit || hit.dir) return
+        post('/dsh-locator/open', { path: hit.path }).then(() => notify(t('opened'))).catch(() => copy(hit))
+      }, [copy, notify])
+
+      const insert = useCallback(hit => {
+        if (!hit) return
+        const mention = '@"' + hit.path.replace(/"/g, '') + '" '
+        close()
+        setTimeout(() => {
+          if (insertIntoComposer(mention)) {
+            notify(t('inserted'))
+          } else {
+            copyText(mention).then(() => notify(t('insertFailed'))).catch(() => {})
+          }
+        }, 80)
+      }, [close, notify])
 
       const onKeyDown = useCallback(event => {
         if (event.key === 'Escape') {
@@ -288,11 +410,22 @@ window.__ModuleLoader__.load({
           setSelected(value => Math.max(0, value - 1))
           return
         }
+        const modifier = event.ctrlKey || event.metaKey
+        if (modifier && String(event.key).toLowerCase() === 'o') {
+          event.preventDefault()
+          openFile(hits[selected])
+          return
+        }
+        if (modifier && event.key === 'Enter' && !event.isComposing) {
+          event.preventDefault()
+          insert(hits[selected])
+          return
+        }
         if (event.key === 'Enter' && !event.isComposing) {
           event.preventDefault()
           copy(hits[selected])
         }
-      }, [close, copy, hits, selected])
+      }, [close, copy, hits, insert, openFile, selected])
 
       useEffect(() => {
         const list = listRef.current
@@ -308,7 +441,7 @@ window.__ModuleLoader__.load({
         className: sort === key ? 'sorted' : '',
         style: { width },
         onClick: () => toggleSort(key),
-        title: '点击切换排序',
+        title: t('sortTitle'),
       }, label + (sort === key ? (desc ? ' ↓' : ' ↑') : ''))
 
       return h('div', {
@@ -318,7 +451,7 @@ window.__ModuleLoader__.load({
         className: 'dsh-locator-panel',
         role: 'dialog',
         'aria-modal': 'true',
-        'aria-label': '本地文件搜索',
+        'aria-label': t('dialog'),
         onKeyDown,
       },
         h('div', { className: 'dsh-locator-head' },
@@ -329,24 +462,28 @@ window.__ModuleLoader__.load({
             value: query,
             spellCheck: false,
             autoComplete: 'off',
-            placeholder: '搜索文件名或路径… 支持 ext:pdf size:>10mb dm:thisweek path:src !tmp',
+            placeholder: t('placeholder'),
             onChange: event => setQuery(event.target.value),
-            'aria-label': '文件搜索',
+            'aria-label': t('searchLabel'),
           }),
           h('span', { className: 'dsh-locator-kbd' }, 'Ctrl+Shift+F'),
-          h('button', { className: 'dsh-locator-close', onClick: close, title: '关闭 (Esc)', 'aria-label': '关闭' }, '✕'),
+          h('button', { className: 'dsh-locator-close', onClick: close, title: t('closeTitle'), 'aria-label': t('closeLabel') }, '✕'),
         ),
         h('div', { className: 'dsh-locator-bar' },
           h('label', { className: 'dsh-locator-check' },
             h('input', { type: 'checkbox', checked: filesOnly, onChange: event => { setFilesOnly(event.target.checked); if (event.target.checked) setDirsOnly(false) } }),
-            '只看文件'),
+            t('filesOnly')),
           h('label', { className: 'dsh-locator-check' },
             h('input', { type: 'checkbox', checked: dirsOnly, onChange: event => { setDirsOnly(event.target.checked); if (event.target.checked) setFilesOnly(false) } }),
-            '只看目录'),
+            t('dirsOnly')),
           h('span', { className: 'dsh-locator-status' },
             status === null
-              ? '索引状态读取中…'
-              : '索引 ' + (status.entries || 0).toLocaleString() + ' 条 · ' + (status.watching ? '实时监听' : '快照') + (status.usn ? ' · USN' : '') + ' · ' + (status.roots || []).length + ' 个根目录'),
+              ? t('statusLoading')
+              : t('status', {
+                  entries: (status.entries || 0).toLocaleString(),
+                  mode: status.watching ? t('live') : t('snapshot'),
+                  roots: (status.roots || []).length,
+                }) + ((status.usnActive || status.usn) ? ' · ' + t('usn') : '')),
         ),
         h('div', { className: 'dsh-locator-scroll', ref: listRef },
           h('table', { className: 'dsh-locator-table' },
@@ -357,15 +494,15 @@ window.__ModuleLoader__.load({
               h('col', { style: { width: '41%' } }),
             ),
             h('thead', null, h('tr', null,
-              header('name', '名称'),
-              header('size', '大小'),
-              header('mtime', '修改时间'),
-              header('path', '路径'),
+              header('name', t('name')),
+              header('size', t('size')),
+              header('mtime', t('mtime')),
+              header('path', t('path')),
             )),
             h('tbody', null,
               hits.length === 0
                 ? h('tr', null, h('td', { colSpan: 4, className: 'dsh-locator-empty' },
-                    loading ? '搜索中…' : error !== '' ? '搜索失败：' + error : '没有匹配的文件'))
+                    loading ? t('loading') : error !== '' ? t('errorPrefix') + error : t('empty')))
                 : hits.map((hit, index) => h('tr', {
                     key: hit.path,
                     'data-index': index,
@@ -375,7 +512,7 @@ window.__ModuleLoader__.load({
                     onDoubleClick: () => reveal(hit),
                   },
                   h('td', null, h('div', { className: 'dsh-locator-name' },
-                    h('span', { className: 'dsh-locator-badge' }, hit.dir ? '目录' : (hit.ext || '文件').toUpperCase()),
+                    h('span', { className: 'dsh-locator-badge' }, hit.dir ? t('dirBadge') : (hit.ext || t('fileBadge')).toUpperCase()),
                     h('span', null, highlight(hit.name, query)),
                   )),
                   h('td', { className: 'dsh-locator-size' }, hit.dir ? '' : formatSize(hit.size)),
@@ -388,12 +525,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-locator-foot' },
           h('span', null,
             loading
-              ? '搜索中…'
-              : total.toLocaleString() + ' 条结果' + (truncated ? '（显示前 ' + hits.length + ' 条）' : '') + ' · ' + took.toFixed(1) + ' ms'
-                + (status && status.scanning ? ' · 索引构建中，结果可能不完整' : '')),
+              ? t('loading')
+              : t('results', { total: total.toLocaleString() }) + (truncated ? ' (' + t('showing', { n: hits.length }) + ')' : '') + ' · ' + took.toFixed(1) + ' ms'
+                + (status && status.scanning ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
           toast === '' ? null : h('span', { className: 'dsh-locator-toast' }, toast),
-          h('span', null, '↑↓ 选择 · Enter 复制路径 · 双击定位 · Esc 关闭'),
+          h('span', null, t('footer')),
         ),
       ))
     }
@@ -401,8 +538,8 @@ window.__ModuleLoader__.load({
     function Launcher() {
       return h('button', {
         className: 'dsh-locator-launch',
-        title: '本地文件搜索 (Ctrl+Shift+F)',
-        'aria-label': '本地文件搜索',
+        title: t('launcher'),
+        'aria-label': t('searchLabel'),
         onClick: () => store.toggle(),
       }, '🔎')
     }

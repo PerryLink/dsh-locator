@@ -55,7 +55,8 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 * Empty query lists the most recently modified entries; typing runs the same Everything-style syntax as the tool after a 110 ms debounce.
 * Click a column header to sort by name, size, modification time or path; toggle ascending/descending.
 * `只看文件` / `只看目录` filter the kind; the footer reports matches, the page cap and query latency.
-* `↑`/`↓` select, `Enter` copies the selected path, **double-click reveals it** in Explorer/Finder/`xdg-open`, `Esc` closes.
+* `↑`/`↓` select, `Enter` copies the selected path, `Ctrl+O` opens it, `Ctrl+Enter` inserts a quoted `@"path"` into the composer, **double-click reveals it** in Explorer/Finder/`xdg-open`, `Esc` closes.
+* The panel follows `navigator.language` (zh/en/es/pt/hi).
 * The panel is optional: profiles without a Web server never mount it, and the three tools keep working.
 
 ## Tools
@@ -135,9 +136,9 @@ You can still run the same probe yourself:
 
 It prints the journal id/USNs, enumerates the MFT (records per second, files/dirs below the root, sample paths) and decodes the last few change-journal records. A non-elevated run fails with `Access is denied` — the parser and path reconstruction are covered by unit tests on every platform.
 
-With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. It keeps the volume handle and polls the change journal every two seconds, applying creates, deletes and renames through `usn.ApplyChanges` (the same FRN map, updated in place). USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows the panel/model sees still show real sizes and dates. `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search. If journal polling fails mid-session, the watcher reports it and stops; the portable `ReadDirectoryChangesW` watcher and `locator_rebuild` are still there. The journal applier is covered by synthetic-record tests and the ioctl path by the Windows CI job.
+With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. A successful USN scan also writes `usn-state.json` (journal id, next USN, roots) and keeps the FRN in each record; on the next `serve --usn` the engine replays the journal from that cursor before answering, so files created while it was stopped appear without a full scan. A wrapped, deleted or mismatched journal falls back to the portable watcher. It keeps the volume handle and polls the change journal every two seconds, applying creates, deletes and renames through `usn.ApplyChanges` (the same FRN map, updated in place). USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows the panel/model sees still show real sizes and dates. `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search. If journal polling fails mid-session, the watcher reports it and stops; the portable `ReadDirectoryChangesW` watcher and `locator_rebuild` are still there. The journal applier is covered by synthetic-record tests and the ioctl path by the Windows CI job.
 
-Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` v0.1 deliberately starts with a portable directory walk plus change notifications: it works without a service, without UAC and on every filesystem. USN/MFT enumeration is on the roadmap as an opt-in fast path for volumes where the process holds `GENERIC_READ` (admin) — the portable path stays the fallback.
+Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` keeps a portable directory walk as the default (no service, no UAC, any filesystem) and uses USN/MFT as an opt-in fast path where the process holds `GENERIC_READ` (admin), with journal replay across restarts. The portable path stays the fallback.
 
 ## Performance
 
@@ -207,9 +208,9 @@ The engine is a separate Go module under `engine/`; run its tests with `cd engin
 
 ## Roadmap
 
-1. USN journal catch-up after downtime (persist the journal cursor and FRN map).
-2. Panel actions: insert a result as `@file`, richer previews.
-3. More platform runtime coverage (Electron desktop, Windows on ARM).
+1. Electron desktop runtime check on a real Windows install.
+2. Richer previews and result grouping in the panel.
+3. Windows on ARM / Linux ARM runtime coverage.
 4. Optional lowercase-name arena and trigram prefilter for large indexes.
 5. Incremental snapshot compaction and per-root journals.
 

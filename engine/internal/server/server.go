@@ -497,6 +497,7 @@ func (s *Server) statusPayload() map[string]any {
 	s.mu.RLock()
 	meta := s.meta
 	watching := s.watcher != nil
+	usnActive := s.usnActive
 	s.mu.RUnlock()
 	return map[string]any{
 		"version":   s.opt.Version,
@@ -507,7 +508,8 @@ func (s *Server) statusPayload() map[string]any {
 		"dirs":      st.Dirs,
 		"nameBytes": st.NameBytes,
 		"deleted":   st.Deleted,
-		"watching":  watching,
+		"watching":  watching || usnActive,
+		"usnActive": usnActive,
 		"scanning":  s.isScanning(),
 		"usn":       meta.Stats.USN,
 		"uptimeSec": int(time.Since(s.started).Seconds()),

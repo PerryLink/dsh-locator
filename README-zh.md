@@ -55,7 +55,8 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 * 空查询按修改时间倒序列出最近条目；输入后 110 ms 防抖，走和工具完全相同的 Everything 风格语法。
 * 点列头按名称、大小、修改时间、路径排序，再点切换升降序。
 * `只看文件` / `只看目录` 过滤类型；底栏显示命中数、分页上限和查询耗时。
-* `↑`/`↓` 选择，`Enter` 复制选中路径，**双击在文件管理器中定位**（Explorer / Finder / `xdg-open`），`Esc` 关闭。
+* `↑`/`↓` 选择，`Enter` 复制选中路径，`Ctrl+O` 打开，`Ctrl+Enter` 把带引号的 `@"路径"` 插入输入框，**双击在文件管理器中定位**（Explorer / Finder / `xdg-open`），`Esc` 关闭。
+* 面板跟随 `navigator.language`（中/英/西/葡/印地语）。
 * 面板是可选的：没有 Web server 的 profile 不会挂载它，三个工具照常工作。
 
 ## 工具
@@ -135,7 +136,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 
 它会打印日志 id/USN、枚举 MFT（每秒记录数、根目录下文件/目录数、样例路径），并解码最近几条变更日志。非管理员运行会明确报 `Access is denied`；解析与路径重建在 Linux 上有单元测试覆盖。
 
-打开 `windowsUsn: true`（或 `indexd scan --usn`）后，引擎用 MFT 枚举代替目录遍历，再按 FRN 父表重建路径。引擎保留卷句柄，每 2 秒轮询变更日志，按同一张 FRN 表就地应用新建、删除、重命名（`usn.ApplyChanges`）。USN 记录**没有大小和修改时间**：名字/路径是准的，`locator_status` 会把这种索引标成 `USN`，守护进程会对返回页现场 stat，所以面板/模型看到的行仍有真实大小和日期；但全库的 `size:`/`dm:` 过滤在元数据补齐前是近似的。任何失败（没提权、卷不支持、记录过多）都会带警告回退到目录遍历，绝不会让搜索不可用。运行中日志轮询失败会报警并停止该监视器，可移植的 `ReadDirectoryChangesW` 监听和 `locator_rebuild` 仍然可用。变更应用逻辑有合成记录测试，ioctl 路径由 Windows CI job 验证。
+打开 `windowsUsn: true`（或 `indexd scan --usn`）后，引擎用 MFT 枚举代替目录遍历，再按 FRN 父表重建路径。成功的 USN 扫描会写 `usn-state.json`（日志 id、next USN、根目录），并把 FRN 存进索引记录；下次 `serve --usn` 会先从该游标重放日志再提供服务，停机期间新建的文件无需全量重扫即可出现。日志回绕/被删/不匹配时回退到可移植监听。引擎保留卷句柄，每 2 秒轮询变更日志，按同一张 FRN 表就地应用新建、删除、重命名（`usn.ApplyChanges`）。USN 记录**没有大小和修改时间**：名字/路径是准的，`locator_status` 会把这种索引标成 `USN`，守护进程会对返回页现场 stat，所以面板/模型看到的行仍有真实大小和日期；但全库的 `size:`/`dm:` 过滤在元数据补齐前是近似的。任何失败（没提权、卷不支持、记录过多）都会带警告回退到目录遍历，绝不会让搜索不可用。运行中日志轮询失败会报警并停止该监视器，可移植的 `ReadDirectoryChangesW` 监听和 `locator_rebuild` 仍然可用。变更应用逻辑有合成记录测试，ioctl 路径由 Windows CI job 验证。
 
 Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直接读 NTFS 主文件表。`dsh-locator` v0.1 刻意先做可移植的目录遍历 + 变更通知：不需要服务、不需要 UAC、任何文件系统都能用。USN/MFT 枚举会作为可选快路径加入路线图（需要进程对卷持有 `GENERIC_READ`，通常意味着管理员权限），可移植路径始终保留为回退。
 
@@ -203,7 +204,6 @@ pnpm build:engine:all   # 或 build:engine 只构建本机
 * WSL 写 `/mnt/c` 可能不产生 Windows 侧通知（Windows 监听看不到 9p 写入方的变更流），需显式重建。
 * 网络共享只有在能当普通目录访问时才会被扫描；没有 SMB 专用变更源。
 * macOS 随包二进制使用 FSEvents（递归）；`CGO_ENABLED=0` 构建回退到 kqueue（每目录一个描述符，上限 4,096）。两种模式的内容变更都靠周期重建兜底。
-* 还没有 USN/MFT 快速枚举（见上）。
 
 ## 路线图
 

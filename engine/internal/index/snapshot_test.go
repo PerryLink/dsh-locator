@@ -45,11 +45,14 @@ func TestSaveLoadEmptyIndex(t *testing.T) {
 }
 
 func TestSnapshotRoundTripsFRN(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	pathA := filepath.Join(root, "a.txt")
+	pathB := filepath.Join(root, "b.txt")
 	ix := New()
-	ix.AddRoot("/data")
+	ix.AddRoot(root)
 	ix.AddBatch([]AddItem{
-		{Path: "/data/a.txt", FRN: 0x000500000000002a, Info: FileInfo{Size: 3}},
-		{Path: "/data/b.txt", Info: FileInfo{Size: 4}},
+		{Path: pathA, FRN: 0x000500000000002a, Info: FileInfo{Size: 3}},
+		{Path: pathB, Info: FileInfo{Size: 4}},
 	})
 	path := filepath.Join(t.TempDir(), "frn.snap")
 	if err := ix.Save(path); err != nil {
@@ -60,8 +63,8 @@ func TestSnapshotRoundTripsFRN(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := back.FRNPaths()
-	if got := paths[0x000500000000002a]; got != "/data/a.txt" {
-		t.Fatalf("FRN path = %q", got)
+	if got := paths[0x000500000000002a]; got != pathA {
+		t.Fatalf("FRN path = %q, want %q", got, pathA)
 	}
 	if len(paths) != 1 {
 		t.Fatalf("FRN map has %d entries, want 1", len(paths))

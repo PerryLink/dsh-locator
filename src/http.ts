@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
-import { revealInFileManager, withinRoots } from './reveal.ts'
+import { openWithDefaultApp, revealInFileManager, withinRoots } from './reveal.ts'
 import { statSync } from 'node:fs'
 
 interface WebServerLike {
@@ -68,6 +68,11 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime): void {
       kind: 'exact',
       path: '/dsh-locator/reveal',
       handler: handler(scoped, async body => await reveal(rt, body)),
+    }))
+    scoped.effect(() => server.register({
+      kind: 'exact',
+      path: '/dsh-locator/open',
+      handler: handler(scoped, async body => await openPath(rt, body)),
     }))
   })
 }
@@ -139,6 +144,25 @@ async function reveal(rt: LocatorRuntime, raw: Record<string, unknown>): Promise
   }
   try {
     await revealInFileManager(path)
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: messageOf(error) }
+  }
+}
+
+async function openPath(rt: LocatorRuntime, raw: Record<string, unknown>): Promise<unknown> {
+  const path = typeof raw.path === 'string' ? raw.path : ''
+  if (path === '' || !withinRoots(path, rt.roots)) {
+    return { ok: false, error: 'path is outside the indexed roots' }
+  }
+  try {
+    const info = statSync(path)
+    if (!info.isFile()) return { ok: false, error: 'not a file' }
+  } catch {
+    return { ok: false, error: 'path does not exist' }
+  }
+  try {
+    await openWithDefaultApp(path)
     return { ok: true }
   } catch (error) {
     return { ok: false, error: messageOf(error) }

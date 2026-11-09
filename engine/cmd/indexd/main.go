@@ -108,6 +108,7 @@ func cmdScan(args []string) error {
 	ctx, stop := signalContext()
 	defer stop()
 
+	var usnCursor *scan.USNState
 	ix := index.New()
 	st, err := scan.Run(ctx, ix, scan.Options{
 		Roots:          roots,
@@ -125,9 +126,8 @@ func cmdScan(args []string) error {
 		},
 		ProgressEvery: 200 * time.Millisecond,
 		OnUSNState: func(cursor scan.USNState) {
-			if err := usnstate.Save(*state, cursor); err != nil {
-				fmt.Fprintf(os.Stderr, "usn state: %v\n", err)
-			}
+			copied := cursor
+			usnCursor = &copied
 		},
 	})
 	fmt.Fprintln(os.Stderr)
@@ -141,6 +141,13 @@ func cmdScan(args []string) error {
 		}
 		if err := store.Save(*state, ix, m); err != nil {
 			return err
+		}
+		if usnCursor != nil {
+			if err := usnstate.Save(*state, *usnCursor); err != nil {
+				fmt.Fprintf(os.Stderr, "usn state: %v\n", err)
+			}
+		} else {
+			_ = usnstate.Clear(*state)
 		}
 		fmt.Printf("indexed %d entries (%d files, %d dirs) in %s -> %s\n",
 			st.Entries, st.Files, st.Dirs, st.Took.Round(time.Millisecond), *state)

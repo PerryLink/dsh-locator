@@ -19,24 +19,26 @@ export function withinRoots(target: string, roots: readonly string[]): boolean {
 }
 
 /**
- * Ask the platform file manager to select a path. Uses an argument vector, not
- * a shell, so a path can never be interpreted as a command. The child is
- * detached: the opener outlives the plugin call.
+ * Ask the platform to reveal a path in its file manager. Uses an argument
+ * vector, not a shell, so a path can never be interpreted as a command. The
+ * child is detached: the opener outlives the plugin call.
  */
 export async function revealInFileManager(target: string): Promise<void> {
   const absolute = resolve(target)
-  let command: string
-  let args: string[]
-  if (process.platform === 'win32') {
-    command = 'explorer.exe'
-    args = [`/select,${absolute}`]
-  } else if (process.platform === 'darwin') {
-    command = 'open'
-    args = ['-R', absolute]
-  } else {
-    command = 'xdg-open'
-    args = [dirname(absolute)]
-  }
+  if (process.platform === 'win32') return spawnDetached('explorer.exe', [`/select,${absolute}`])
+  if (process.platform === 'darwin') return spawnDetached('open', ['-R', absolute])
+  return spawnDetached('xdg-open', [dirname(absolute)])
+}
+
+/** Open a path with its default application. */
+export async function openWithDefaultApp(target: string): Promise<void> {
+  const absolute = resolve(target)
+  if (process.platform === 'win32') return spawnDetached('explorer.exe', [absolute])
+  if (process.platform === 'darwin') return spawnDetached('open', [absolute])
+  return spawnDetached('xdg-open', [absolute])
+}
+
+async function spawnDetached(command: string, args: string[]): Promise<void> {
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true })
     child.once('error', reject)
