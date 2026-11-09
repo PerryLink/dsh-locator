@@ -82,7 +82,7 @@ var (
 
 func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 	paths := C.dsh_locator_paths_new()
-	if paths == nil {
+	if paths == 0 {
 		return nil, errors.New("FSEvents: cannot allocate the watched path array")
 	}
 	defer C.dsh_locator_paths_free(paths)
@@ -97,7 +97,7 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		return nil, errors.New("FSEvents: cannot allocate the callback context")
 	}
 	stream := C.dsh_locator_stream_create(paths, info, 0.2)
-	if stream == nil {
+	if stream == 0 {
 		C.dsh_locator_info_free(info)
 		return nil, errors.New("FSEvents: FSEventStreamCreate failed")
 	}
@@ -269,9 +269,9 @@ func (w *watcher) rescan() {
 func (w *watcher) Close() error {
 	w.once.Do(func() {
 		w.closed.Store(true)
-		if w.stream != nil {
+		if w.stream != 0 {
 			C.dsh_locator_stream_stop(w.stream)
-			w.stream = nil
+			w.stream = 0
 		}
 		if w.info != nil {
 			C.dsh_locator_info_free(w.info)
