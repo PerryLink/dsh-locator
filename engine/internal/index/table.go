@@ -11,6 +11,7 @@ import (
 type pathTable struct {
 	slots []int32 // 0 empty, -1 tombstone, otherwise id+1
 	count int
+	tombs int
 }
 
 func newPathTable(capacity int) *pathTable {
@@ -47,7 +48,12 @@ func pathHash(key string) uint64 {
 // get returns the record id stored under key, or -1.
 func (t *pathTable) get(key string, ix *Index) int32 {
 	mask := uint64(len(t.slots) - 1)
+	probes := 0
 	for i := pathHash(key) & mask; ; i = (i + 1) & mask {
+		probes++
+		if probes > len(t.slots) {
+			return -1
+		}
 		v := t.slots[i]
 		if v == 0 {
 			return -1
@@ -63,7 +69,7 @@ func (t *pathTable) get(key string, ix *Index) int32 {
 
 // set inserts or replaces key. It reports whether a new key was inserted.
 func (t *pathTable) set(key string, id int32, ix *Index) bool {
-	if (t.count+1)*10 >= len(t.slots)*7 {
+	if (t.count+1)*10 >= len(t.slots)*7 || (t.count+t.tombs+1)*10 >= len(t.slots)*7 && t.tombs*4 >= len(t.slots) {
 		t.grow(ix)
 	}
 	mask := uint64(len(t.slots) - 1)
@@ -73,6 +79,7 @@ func (t *pathTable) set(key string, id int32, ix *Index) bool {
 		if v == 0 {
 			if firstTombstone >= 0 {
 				t.slots[firstTombstone] = id + 1
+				t.tombs--
 			} else {
 				t.slots[i] = id + 1
 			}
@@ -103,6 +110,10 @@ func (t *pathTable) remove(key string, ix *Index) int32 {
 		if v > 0 && pathsEqual(ix.pathLocked(int32(v-1)), key) {
 			t.slots[i] = -1
 			t.count--
+			t.tombs++
+			if t.tombs*4 > len(t.slots) {
+				t.rehash(ix)
+			}
 			return v - 1
 		}
 	}
@@ -112,6 +123,22 @@ func (t *pathTable) grow(ix *Index) {
 	old := t.slots
 	t.slots = make([]int32, len(old)*2)
 	t.count = 0
+	t.tombs = 0
+	for _, v := range old {
+		if v > 0 {
+			id := v - 1
+			t.set(ix.pathLocked(int32(id)), int32(id), ix)
+		}
+	}
+}
+
+// rehash rebuilds the table at the same size, dropping tombstones. Remove
+// calls it when tombstones would otherwise starve probe chains of empty slots.
+func (t *pathTable) rehash(ix *Index) {
+	old := t.slots
+	t.slots = make([]int32, len(old))
+	t.count = 0
+	t.tombs = 0
 	for _, v := range old {
 		if v > 0 {
 			id := v - 1
@@ -123,6 +150,7 @@ func (t *pathTable) grow(ix *Index) {
 func (t *pathTable) reset(slots []int32, count int) {
 	t.slots = slots
 	t.count = count
+	t.tombs = 0
 }
 
 // pathsEqual compares a stored path with a lookup key. Windows comparisons are

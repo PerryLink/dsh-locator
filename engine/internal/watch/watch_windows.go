@@ -210,12 +210,12 @@ func (w *watcher) handleBuffer(root string, buf []byte) {
 					w.addTree(path)
 				}
 			case actionRemoved:
-				w.ix.RemoveSubtree(path)
+				w.remove(path)
 			case actionRenamedOld:
 				pendingOld = path
 			case actionRenamedNew:
 				if pendingOld != "" {
-					w.ix.RemoveSubtree(pendingOld)
+					w.remove(pendingOld)
 					pendingOld = ""
 				}
 				if !w.excludedPath(path) {
@@ -233,7 +233,7 @@ func (w *watcher) handleBuffer(root string, buf []byte) {
 	}
 	if pendingOld != "" {
 		// Renamed out of the watched tree: only the old name arrived.
-		w.ix.RemoveSubtree(pendingOld)
+		w.remove(pendingOld)
 	}
 }
 
@@ -269,11 +269,19 @@ func (w *watcher) rescan(root string) {
 	})
 }
 
+func (w *watcher) remove(path string) {
+	if w.ix.IsDir(path) {
+		w.ix.RemoveSubtree(path)
+		return
+	}
+	w.ix.RemovePath(path)
+}
+
 func (w *watcher) upsert(path string) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			w.ix.RemoveSubtree(path)
+			w.remove(path)
 		}
 		return
 	}

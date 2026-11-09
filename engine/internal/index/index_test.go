@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -177,4 +178,29 @@ func TestCompact(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+func TestTableSurvivesChurn(t *testing.T) {
+	ix := New()
+	ix.AddRoot("/churn")
+	for i := 0; i < 20000; i++ {
+		path := filepath.Join("/churn", "f"+strconv.Itoa(i)+".txt")
+		ix.AddPath(path, FileInfo{Size: 1, Mode: 0o644})
+		if i%2 == 0 {
+			ix.RemovePath(path)
+		}
+	}
+	if got := ix.Len(); got != 10001 {
+		t.Fatalf("len = %d, want 10001", got)
+	}
+	if _, added := ix.AddPath(filepath.Join("/churn", "f19999.txt"), FileInfo{Size: 2, Mode: 0o644}); added {
+		t.Fatal("existing path re-added as new")
+	}
+	res, err := ix.Search(Query{Text: "f19999", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 1 {
+		t.Fatalf("lookup after churn: %+v", res.Hits)
+	}
 }

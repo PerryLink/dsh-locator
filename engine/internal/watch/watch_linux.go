@@ -224,7 +224,7 @@ func (w *watcher) handle(buf []byte) {
 					w.upsert(path)
 				}
 			case mask&(syscall.IN_DELETE|syscall.IN_MOVED_FROM) != 0:
-				w.ix.RemoveSubtree(path)
+				w.remove(path, true)
 				w.removeWatch(path)
 			}
 		default:
@@ -232,17 +232,26 @@ func (w *watcher) handle(buf []byte) {
 			case mask&(syscall.IN_CREATE|syscall.IN_CLOSE_WRITE|syscall.IN_ATTRIB|syscall.IN_MOVED_TO|syscall.IN_MODIFY) != 0:
 				w.upsert(path)
 			case mask&(syscall.IN_DELETE|syscall.IN_MOVED_FROM) != 0:
-				w.ix.RemoveSubtree(path)
+				w.remove(path, false)
 			}
 		}
 	}
+}
+
+// remove deletes one path, sweeping the subtree only for directories.
+func (w *watcher) remove(path string, isDir bool) {
+	if isDir || w.ix.IsDir(path) {
+		w.ix.RemoveSubtree(path)
+		return
+	}
+	w.ix.RemovePath(path)
 }
 
 func (w *watcher) upsert(path string) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			w.ix.RemoveSubtree(path)
+			w.remove(path, false)
 		}
 		return
 	}

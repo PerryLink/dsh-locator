@@ -99,6 +99,9 @@ func Load(path string) (*Index, error) {
 	rootCount := int(binary.LittleEndian.Uint32(data[36:]))
 	tableCap := int(binary.LittleEndian.Uint32(data[40:]))
 	deleted := int(binary.LittleEndian.Uint32(data[44:]))
+	if tableCap < 16 || tableCap&(tableCap-1) != 0 {
+		return nil, errors.New("index snapshot has an invalid path table size")
+	}
 
 	need := headerSize + recCount*recordSize + nameLen + rootCount*4 + tableCap*4
 	if need > len(data) {
