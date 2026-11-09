@@ -262,6 +262,16 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      const reveal = useCallback(hit => {
+        if (!hit) return
+        post('/dsh-locator/reveal', { path: hit.path }).then(() => {
+          setToast('已在文件管理器中定位')
+          setTimeout(() => setToast(''), 1500)
+        }).catch(() => {
+          copy(hit)
+        })
+      }, [copy])
+
       const onKeyDown = useCallback(event => {
         if (event.key === 'Escape') {
           event.preventDefault()
@@ -362,7 +372,7 @@ window.__ModuleLoader__.load({
                     className: 'dsh-locator-row' + (index === selected ? ' sel' : ''),
                     title: hit.path,
                     onClick: () => setSelected(index),
-                    onDoubleClick: () => copy(hit),
+                    onDoubleClick: () => reveal(hit),
                   },
                   h('td', null, h('div', { className: 'dsh-locator-name' },
                     h('span', { className: 'dsh-locator-badge' }, hit.dir ? '目录' : (hit.ext || '文件').toUpperCase()),
@@ -383,7 +393,7 @@ window.__ModuleLoader__.load({
                 + (status && status.scanning ? ' · 索引构建中，结果可能不完整' : '')),
           h('span', { className: 'grow' }),
           toast === '' ? null : h('span', { className: 'dsh-locator-toast' }, toast),
-          h('span', null, '↑↓ 选择 · Enter 复制路径 · Esc 关闭'),
+          h('span', null, '↑↓ 选择 · Enter 复制路径 · 双击定位 · Esc 关闭'),
         ),
       ))
     }

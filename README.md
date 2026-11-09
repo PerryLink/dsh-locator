@@ -55,7 +55,7 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 * Empty query lists the most recently modified entries; typing runs the same Everything-style syntax as the tool after a 110 ms debounce.
 * Click a column header to sort by name, size, modification time or path; toggle ascending/descending.
 * `只看文件` / `只看目录` filter the kind; the footer reports matches, the page cap and query latency.
-* `↑`/`↓` select, `Enter` copies the selected path, `Esc` closes.
+* `↑`/`↓` select, `Enter` copies the selected path, **double-click reveals it** in Explorer/Finder/`xdg-open`, `Esc` closes.
 * The panel is optional: profiles without a Web server never mount it, and the three tools keep working.
 
 ## Tools

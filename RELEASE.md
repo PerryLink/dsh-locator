@@ -2,7 +2,7 @@
 
 ## Published
 
-`dsh-locator@0.2.0` adds `locator_export` (SQLite mirror); `0.1.0` was the first release (2026-11-09), source at
+`dsh-locator@0.3.0` adds the panel reveal action and supports DSH 0.2.1+; `0.2.x` added `locator_export`; `0.1.0` was the first release (2026-11-09), source at
 <https://github.com/PerryLink/dsh-locator>, CI green on `main`.
 
 Install with `dsh plugin --profile web add dsh-locator`.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 — 2026-11-09
+
+* Web panel: double-click a row to reveal it in the platform file manager (Explorer `/select`, Finder `open -R`, `xdg-open` on the directory). The path must be inside the configured roots and is passed as an argument vector, never through a shell; failure falls back to copying the path.
+* DSH compatibility widened to `>=0.2.1-rc.2 <0.3.0` (peer `dsh-tools` `>=0.2.1-0`). Verified end to end on DSH 0.2.1-rc.5: plugin loads, reuses the snapshot, HTTP search answers, and the panel returns 964 matches in 24.4 ms with no console errors.
+* `locator_export` and the rest of 0.2.x are unchanged.
+
 ## 0.2.1 — 2026-11-09
 
 * Rebuild `lib/` before packing: 0.2.0's npm tarball was built from a stale
