@@ -66,8 +66,11 @@ int dsh_locator_create(const char *const *roots, int count, int *read_fd,
       CFRelease(path);
     }
   }
+  FSEventStreamContext stream_context;
+  memset(&stream_context, 0, sizeof(stream_context));
+  stream_context.info = context;
   FSEventStreamRef stream = FSEventStreamCreate(
-      kCFAllocatorDefault, dsh_locator_pipe_callback, context, paths,
+      kCFAllocatorDefault, dsh_locator_pipe_callback, &stream_context, paths,
       kFSEventStreamEventIdSinceNow, 0.2,
       kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
           kFSEventStreamCreateFlagWatchRoot);
