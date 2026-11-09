@@ -44,6 +44,18 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build ./...
+      - name: Build cgo darwin binaries
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p ../dist/darwin-arm64 ../dist/darwin-x64
+          CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -ldflags '-s -w' -o ../dist/darwin-arm64/indexd ./cmd/indexd
+          CGO_ENABLED=1 GOARCH=amd64 CC='clang -arch x86_64' go build -trimpath -ldflags '-s -w' -o ../dist/darwin-x64/indexd ./cmd/indexd
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'macos-latest'
+        with:
+          name: dsh-locator-darwin-cgo
+          path: dist
+          if-no-files-found: warn
 
   cross:
     runs-on: ubuntu-latest
