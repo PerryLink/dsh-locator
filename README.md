@@ -109,6 +109,17 @@ The engine is pure Go with no cgo, cross-compiled from one machine. It never nee
 
 ### Windows and the USN journal
 
+The engine already carries a USN decoder and a probe. It is **not wired into indexing yet** because the volume ioctl needs administrator rights and the development machine here has no elevation; the probe is the acceptance step:
+
+```powershell
+# Elevated PowerShell (or: Start-Process -Verb RunAs <path> ...)
+& ".\bin\win32-x64\indexd.exe" usn-probe --volume C: --root "C:\Windows" --limit 5 --journal 5
+```
+
+It prints the journal id/USNs, enumerates the MFT (records per second, files/dirs below the root, sample paths) and decodes the last few change-journal records. A non-elevated run fails with `Access is denied` — the parser and path reconstruction are covered by unit tests on every platform.
+
+Until that probe is verified, indexing uses the portable directory walk (which needs no elevation, no service and works on every filesystem).
+
 Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` v0.1 deliberately starts with a portable directory walk plus change notifications: it works without a service, without UAC and on every filesystem. USN/MFT enumeration is on the roadmap as an opt-in fast path for volumes where the process holds `GENERIC_READ` (admin) — the portable path stays the fallback.
 
 ## Performance

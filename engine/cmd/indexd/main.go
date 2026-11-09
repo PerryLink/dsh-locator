@@ -20,6 +20,7 @@ import (
 	"github.com/PerryLink/dsh-locator/engine/internal/scan"
 	"github.com/PerryLink/dsh-locator/engine/internal/server"
 	"github.com/PerryLink/dsh-locator/engine/internal/store"
+	"github.com/PerryLink/dsh-locator/engine/internal/usn"
 )
 
 const version = "0.1.0"
@@ -41,6 +42,8 @@ func main() {
 		err = cmdStatus(args)
 	case "serve":
 		err = cmdServe(args)
+	case "usn-probe":
+		err = cmdUsnProbe(args)
 	case "version", "--version", "-v":
 		fmt.Printf("indexd %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
 	case "help", "--help", "-h":
@@ -66,6 +69,8 @@ usage:
                  [--whole-word] QUERY...
   indexd status  --state DIR [--json]
   indexd serve   --state DIR [--root PATH...] [--exclude GLOB...] [--no-watch]
+  indexd usn-probe [--volume C:] [--root 'C:\\Users\\me'] [--limit 10]
+                   [--enumerate=false] [--json]
 
 The state directory holds index.snapshot and meta.json. serve speaks
 line-delimited JSON on stdin/stdout.
@@ -262,6 +267,45 @@ func cmdServe(args []string) error {
 		Version:         version,
 	})
 	return srv.Run(ctx, os.Stdin, os.Stdout)
+}
+
+func cmdUsnProbe(args []string) error {
+	fs := flag.NewFlagSet("usn-probe", flag.ContinueOnError)
+	volume := fs.String("volume", "C:", "NTFS volume, for example C: or D:")
+	root := fs.String("root", "", "restrict counts/samples to this directory (default: volume root)")
+	limit := fs.Int("limit", 10, "sample paths to print")
+	enumerate := fs.Bool("enumerate", true, "enumerate the MFT to measure throughput")
+	journalSamples := fs.Int("journal", 0, "print this many recent USN journal records")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	result, err := usn.Probe(usn.ProbeOptions{Volume: *volume, Root: *root, Limit: *limit, Enumerate: *enumerate, JournalSamples: *journalSamples})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	fmt.Printf("volume      %s\n", result.Volume)
+	fmt.Printf("journal id  %x\n", result.Journal.ID)
+	fmt.Printf("journal usn first=%d next=%d lowest-valid=%d\n", result.Journal.FirstUSN, result.Journal.NextUSN, result.Journal.LowestValidUSN)
+	if *journalSamples > 0 {
+		fmt.Printf("journal     %d record(s) read\n", result.JournalRead)
+		for _, sample := range result.JournalList {
+			fmt.Printf("  %s\n", sample)
+		}
+	}
+	if *enumerate {
+		fmt.Printf("enumerated  %d records in %d ms (%d/s)%s\n", result.Records, result.ElapsedMS, result.RecordsPerS, map[bool]string{true: " [truncated]"}[result.Truncated])
+		fmt.Printf("under root  %d entries (%d files, %d dirs) below %s\n", result.UnderRoot, result.Files, result.Dirs, result.Root)
+		for _, sample := range result.Samples {
+			fmt.Printf("  %s\n", sample)
+		}
+	}
+	return nil
 }
 
 func signalContext() (context.Context, context.CancelFunc) {

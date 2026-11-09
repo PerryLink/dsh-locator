@@ -109,6 +109,17 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 
 ### Windows 与 USN 日志
 
+引擎里已经有 USN 解码器和探针，但**还没有接进正式索引**：卷 ioctl 需要管理员权限，而当前开发机没有提权，探针就是验收步骤：
+
+```powershell
+# 管理员 PowerShell（或：Start-Process -Verb RunAs <路径> ...）
+& ".\bin\win32-x64\indexd.exe" usn-probe --volume C: --root "C:\Windows" --limit 5 --journal 5
+```
+
+它会打印日志 id/USN、枚举 MFT（每秒记录数、根目录下文件/目录数、样例路径），并解码最近几条变更日志。非管理员运行会明确报 `Access is denied`；解析与路径重建在 Linux 上有单元测试覆盖。
+
+在探针验证之前，索引使用可移植的目录遍历（不需要提权、不需要服务、任何文件系统可用）。
+
 Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直接读 NTFS 主文件表。`dsh-locator` v0.1 刻意先做可移植的目录遍历 + 变更通知：不需要服务、不需要 UAC、任何文件系统都能用。USN/MFT 枚举会作为可选快路径加入路线图（需要进程对卷持有 `GENERIC_READ`，通常意味着管理员权限），可移植路径始终保留为回退。
 
 ## 性能
