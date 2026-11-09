@@ -204,3 +204,49 @@ func TestTableSurvivesChurn(t *testing.T) {
 		t.Fatalf("lookup after churn: %+v", res.Hits)
 	}
 }
+
+func TestQueryEdges(t *testing.T) {
+	ix := testIndex(t)
+	q, _ := ParseQuery("")
+	q.Offset = 100
+	res, err := ix.Search(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total == 0 || len(res.Hits) != 0 || res.Truncated {
+		t.Fatalf("offset beyond total: %+v", res)
+	}
+
+	q, _ = ParseQuery("")
+	q.Limit = 10_000
+	if _, err := ix.Search(q); err != nil {
+		t.Fatal(err)
+	}
+
+	q, _ = ParseQuery("size:>=800 size:<=1mb ext:go")
+	res, _ = ix.Search(q)
+	if res.Total != 1 || res.Hits[0].Name != "main.go" {
+		t.Fatalf("size range: %+v", res.Hits)
+	}
+
+	q, _ = ParseQuery("path:DOCS")
+	res, _ = ix.Search(q)
+	if res.Total != 3 {
+		t.Fatalf("path filter total = %d, want 3", res.Total)
+	}
+
+	q, _ = ParseQuery("")
+	q.SetSort("size", true)
+	q.Limit = 1
+	res, _ = ix.Search(q)
+	if len(res.Hits) != 1 || res.Hits[0].Name != "archive.zip" {
+		t.Fatalf("desc size top: %+v", res.Hits)
+	}
+
+	if _, err := ParseQuery("size:wat"); err == nil {
+		t.Fatal("invalid size accepted")
+	}
+	if _, err := ParseQuery("dm:2026-13-99"); err == nil {
+		t.Fatal("invalid date accepted")
+	}
+}

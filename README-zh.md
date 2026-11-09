@@ -23,6 +23,10 @@ pnpm install
 pnpm build            # TypeScript 插件
 pnpm build:engine     # 本机平台的 Go 引擎
 dsh plugin --profile web add /绝对路径/dsh-locator
+
+# 从打包 tarball（已实测的安装路径）
+npm pack
+dsh plugin --profile web add /绝对路径/dsh-locator-0.1.0.tgz
 ```
 
 npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64` 六个平台的预编译引擎。

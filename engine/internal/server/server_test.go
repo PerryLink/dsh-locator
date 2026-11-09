@@ -53,8 +53,14 @@ func TestServeSearchAndStatus(t *testing.T) {
 		t.Fatalf("status = %v", status)
 	}
 
-	writeLine(t, inW, map[string]any{"id": 3, "method": "shutdown"})
-	_ = waitForID(t, scanner, 3)
+	writeLine(t, inW, map[string]any{"id": 4, "method": "no-such-method"})
+	unknown := waitForMessage(t, scanner, 4)
+	if unknown["error"] == nil {
+		t.Fatalf("unknown method did not return an error: %v", unknown)
+	}
+
+	writeLine(t, inW, map[string]any{"id": 5, "method": "shutdown"})
+	_ = waitForID(t, scanner, 5)
 	select {
 	case err := <-done:
 		if err != nil {
@@ -102,6 +108,24 @@ func waitForEntries(t *testing.T, scanner *bufio.Scanner, in io.Writer, want flo
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("entries never reached %v", want)
+}
+
+// waitForMessage returns the raw response for id, including error responses.
+func waitForMessage(t *testing.T, scanner *bufio.Scanner, id float64) map[string]any {
+	t.Helper()
+	for {
+		line, ok := readLine(t, scanner)
+		if !ok {
+			t.Fatalf("server closed before response %v", id)
+		}
+		var message map[string]any
+		if err := json.Unmarshal(line, &message); err != nil {
+			t.Fatal(err)
+		}
+		if message["id"] == id {
+			return message
+		}
+	}
 }
 
 func waitForID(t *testing.T, scanner *bufio.Scanner, id float64) map[string]any {

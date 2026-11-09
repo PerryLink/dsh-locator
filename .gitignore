@@ -4,3 +4,4 @@ node_modules/
 .plugin-market/
 .locator-state/
 _usn-probe.txt
+*.tgz

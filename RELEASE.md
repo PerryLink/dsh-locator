@@ -7,6 +7,7 @@ Nothing here has been published yet. Do not publish without the owner's explicit
 * `dsh-locator@0.1.0`, Apache-2.0, local git repo with prebuilt engines for six targets.
 * `npm pack --dry-run`: 8.4 MB tarball, 44 files (engine binaries, `client.js`, `lib/`, docs).
 * Verified: Go tests (including `-race` on the concurrent packages), plugin integration tests, `tsc`, `scripts/verify.mjs`, a real Web profile boot, and a headless-Chromium pass over the search panel.
+* Verified install path: `npm pack` tarball installed into a fresh Web profile (`dsh plugin --profile <name> add ./dsh-locator-0.1.0.tgz`), profile booted on a spare port, `POST /dsh-locator/search` answered, the client bundle appeared in the boot graph, and the panel worked in headless Chromium with no console errors.
 
 ## Before publishing
 

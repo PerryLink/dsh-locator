@@ -222,6 +222,9 @@ func (w *watcher) handle(buf []byte) {
 						w.report(err)
 					}
 					w.upsert(path)
+					// A directory moved in from outside the tree already has
+					// contents; its own watch cannot replay them.
+					w.indexTree(path)
 				}
 			case mask&(syscall.IN_DELETE|syscall.IN_MOVED_FROM) != 0:
 				w.remove(path, true)
@@ -245,6 +248,25 @@ func (w *watcher) remove(path string, isDir bool) {
 		return
 	}
 	w.ix.RemovePath(path)
+}
+
+// indexTree adds existing files below root without touching watches.
+func (w *watcher) indexTree(root string) {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && excluded(path, d.Name(), w.excludes) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !excluded(path, d.Name(), w.excludes) {
+			w.upsert(path)
+		}
+		return nil
+	})
 }
 
 func (w *watcher) upsert(path string) {

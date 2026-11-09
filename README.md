@@ -23,6 +23,10 @@ pnpm install
 pnpm build            # TypeScript plugin
 pnpm build:engine     # Go engine for the host platform
 dsh plugin --profile web add /absolute/path/to/dsh-locator
+
+# from a packed tarball (verified install path)
+npm pack
+dsh plugin --profile web add /absolute/path/to/dsh-locator-0.1.0.tgz
 ```
 
 The npm package ships prebuilt engines for `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` and `darwin-arm64`.
