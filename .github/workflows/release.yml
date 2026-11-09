@@ -1,9 +1,7 @@
 name: release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,6 +30,8 @@ jobs:
       - run: pnpm test
       - run: node scripts/verify.mjs
       - name: Publish with provenance
+        # Requires a trusted publisher or the NPM_TOKEN repository secret.
+        # Trigger manually after configuring it; tags do not auto-publish.
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
