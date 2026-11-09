@@ -27,9 +27,10 @@ func TestDarwinWatcherSeesCreateAndDelete(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	runErr := make(chan error, 1)
 	go func() {
 		defer close(done)
-		_ = w.Run(ctx)
+		runErr <- w.Run(ctx)
 	}()
 	defer func() {
 		cancel()
@@ -41,28 +42,36 @@ func TestDarwinWatcherSeesCreateAndDelete(t *testing.T) {
 	if err := os.WriteFile(added, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	waitForDarwin(t, func() bool {
+	if !waitForDarwin(func() bool {
 		res, _ := ix.Search(index.Query{Text: "added", Limit: 5})
 		return res.Total == 1
-	})
+	}) {
+		select {
+		case err := <-runErr:
+			t.Fatalf("create not observed; watcher returned: %v", err)
+		default:
+			t.Fatalf("create not observed; watched dirs: %d", len(w.(*watcher).dirs))
+		}
+	}
 
 	if err := os.Remove(added); err != nil {
 		t.Fatal(err)
 	}
-	waitForDarwin(t, func() bool {
+	if !waitForDarwin(func() bool {
 		res, _ := ix.Search(index.Query{Text: "added", Limit: 5})
 		return res.Total == 0
-	})
+	}) {
+		t.Fatal("delete not observed")
+	}
 }
 
-func waitForDarwin(t *testing.T, predicate func() bool) {
-	t.Helper()
+func waitForDarwin(predicate func() bool) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if predicate() {
-			return
+			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("condition not reached within 5s")
+	return false
 }

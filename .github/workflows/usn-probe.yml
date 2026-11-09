@@ -23,9 +23,9 @@ jobs:
       - name: Engine version
         run: .\indexd.exe version
       - name: USN probe (journal + MFT enumeration)
-        run: .\indexd.exe usn-probe --volume C: --root C:\Windows --limit 5 --journal 5
+        run: '.\indexd.exe usn-probe --volume C: --root C:\Windows --limit 5 --journal 5'
       - name: USN probe (JSON)
-        run: .\indexd.exe usn-probe --volume C: --root C:\Windows --enumerate=false --json
+        run: '.\indexd.exe usn-probe --volume C: --root C:\Windows --enumerate=false --json'
       - name: USN scan end to end
         shell: pwsh
         run: |
