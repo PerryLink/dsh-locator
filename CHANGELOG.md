@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 — 2026-11-09
+
+* Rebuild `lib/` before packing: 0.2.0's npm tarball was built from a stale
+  `lib/` and did not contain `lib/export.js`. No source change.
+
 ## 0.2.0 — 2026-11-09
 
 * `locator_export`: stream the index page by page and write a read-only SQLite mirror (`entries(path, name, dir, size, mtime_ms, ext)`) through Node's built-in `node:sqlite`. The compact snapshot remains the primary store.

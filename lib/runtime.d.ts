@@ -36,6 +36,21 @@ export interface SearchArgs {
     filesOnly: boolean;
     dirsOnly: boolean;
 }
+/** One row of a paginated index dump. */
+export interface DumpEntry {
+    path: string;
+    name: string;
+    size: number;
+    mtime: number;
+    ext: string;
+    dir: boolean;
+}
+/** One page of an index dump. */
+export interface DumpPage {
+    entries: DumpEntry[];
+    next: number;
+    done: boolean;
+}
 /** Engine status as reported by the `status` method and events. */
 export interface EngineStatus {
     version: string;
@@ -103,6 +118,8 @@ export declare class LocatorRuntime {
     request<T>(method: string, params?: Record<string, unknown>): Promise<T>;
     /** Run a search. */
     search(args: SearchArgs): Promise<SearchResult>;
+    /** Read one page of the index for an export. */
+    dump(after: number, limit: number): Promise<DumpPage>;
     /** Read live status from the engine, refreshing the cached event copy. */
     engineStatus(): Promise<EngineStatus | undefined>;
     /** Ask the engine to rebuild the whole index in the background. */
