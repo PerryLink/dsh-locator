@@ -3,3 +3,4 @@ node_modules/
 .DS_Store
 .plugin-market/
 .locator-state/
+_usn-probe.txt
