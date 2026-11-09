@@ -25,6 +25,21 @@ void dsh_locator_info_free(void *info) {
   free(info);
 }
 
+// Pass a real C function pointer to FSEventStreamCreate instead of casting the
+// cgo-exported symbol in place; the bridge also adapts the const-qualified
+// CoreServices signature.
+static void dsh_locator_callback_bridge(ConstFSEventStreamRef stream,
+                                        void *info,
+                                        size_t numEvents,
+                                        void *eventPaths,
+                                        const FSEventStreamEventFlags eventFlags[],
+                                        const FSEventStreamEventId eventIds[]) {
+  dshLocatorFSEventCallback((FSEventStreamRef)stream, info, numEvents,
+                            (char **)eventPaths,
+                            (FSEventStreamEventFlags *)eventFlags,
+                            (FSEventStreamEventId *)eventIds);
+}
+
 CFArrayRef dsh_locator_paths_new(void) {
   return CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
 }
@@ -43,7 +58,7 @@ void dsh_locator_paths_free(CFArrayRef array) {
 
 FSEventStreamRef dsh_locator_stream_create(CFArrayRef paths, void *info, double latency) {
   return FSEventStreamCreate(kCFAllocatorDefault,
-                             (FSEventStreamCallback)dshLocatorFSEventCallback,
+                             dsh_locator_callback_bridge,
                              info, paths, kFSEventStreamEventIdSinceNow, latency,
                              kFSEventStreamCreateFlagFileEvents |
                                  kFSEventStreamCreateFlagNoDefer |
