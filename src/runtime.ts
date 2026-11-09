@@ -44,6 +44,23 @@ export interface SearchArgs {
   dirsOnly: boolean
 }
 
+/** One row of a paginated index dump. */
+export interface DumpEntry {
+  path: string
+  name: string
+  size: number
+  mtime: number
+  ext: string
+  dir: boolean
+}
+
+/** One page of an index dump. */
+export interface DumpPage {
+  entries: DumpEntry[]
+  next: number
+  done: boolean
+}
+
 /** Engine status as reported by the `status` method and events. */
 export interface EngineStatus {
   version: string
@@ -331,6 +348,11 @@ export class LocatorRuntime {
       ...result,
       hits: Array.isArray(result.hits) ? result.hits : [],
     }
+  }
+
+  /** Read one page of the index for an export. */
+  async dump(after: number, limit: number): Promise<DumpPage> {
+    return await this.request<DumpPage>('dump', { after, limit })
   }
 
   /** Read live status from the engine, refreshing the cached event copy. */

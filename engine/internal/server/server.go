@@ -310,6 +310,22 @@ func (s *Server) dispatch(ctx context.Context, req request) (any, error) {
 		return s.rebuild(ctx, p)
 	case "roots":
 		return map[string]any{"roots": s.current().Roots()}, nil
+	case "dump":
+		var p struct {
+			After int32 `json:"after"`
+			Limit int   `json:"limit"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, err
+		}
+		if p.Limit <= 0 {
+			p.Limit = 5000
+		}
+		if p.Limit > 10000 {
+			p.Limit = 10000
+		}
+		entries, next, done := s.current().DumpPage(p.After, p.Limit)
+		return map[string]any{"entries": entries, "next": next, "done": done}, nil
 	default:
 		return nil, fmt.Errorf("unknown method %q", req.Method)
 	}

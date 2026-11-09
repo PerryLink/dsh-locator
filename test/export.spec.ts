@@ -1,0 +1,81 @@
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
+import type { Context } from '@deepseek-ai/cordis'
+import { apply } from '../src/index.ts'
+import type { Config } from '../src/config.ts'
+
+const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, 'indexd')
+
+interface RegisteredTool {
+  name: string
+  execute: (args: unknown, exec: unknown) => Promise<unknown>
+}
+
+const cleanups: Array<() => void> = []
+afterAll(() => {
+  for (const cleanup of cleanups.reverse()) cleanup()
+})
+
+describe.skipIf(!existsSync(binary))('locator_export', () => {
+  it('writes a queryable SQLite mirror of the index', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-export-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-export-state-'))
+    const dbPath = join(root, 'index.sqlite')
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    mkdirSync(join(root, 'docs'))
+    writeFileSync(join(root, 'docs', 'report.pdf'), 'x')
+    writeFileSync(join(root, 'main.go'), 'package main')
+
+    const tools: RegisteredTool[] = []
+    const disposers: Array<() => void> = []
+    const ctx = {
+      logger: () => ({ info: () => {}, warn: () => {}, debug: () => {} }),
+      effect: (factory: () => () => void) => { disposers.push(factory()) },
+      tools: { register: (tool: RegisteredTool) => { tools.push(tool) } },
+    } as unknown as Context
+    const config: Config = {
+      enabled: true,
+      roots: [root],
+      excludes: ['node_modules'],
+      watch: true,
+      refreshIntervalMs: 1_800_000,
+      scanWorkers: 0,
+      windowsUsn: false,
+      stateDir: state,
+      binaryPath: binary,
+      maxResults: 100,
+      startupTimeoutMs: 30_000,
+      requestTimeoutMs: 10_000,
+    }
+    apply(ctx, config)
+    cleanups.push(() => { for (const dispose of disposers.reverse()) dispose() })
+
+    const status = tools.find(tool => tool.name === 'locator_status')
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const value = (await status?.execute({}, { signal: new AbortController().signal })) as { entries?: number; scanning?: boolean }
+      if ((value.entries ?? 0) >= 3 && value.scanning !== true) break
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+
+    const exporter = tools.find(tool => tool.name === 'locator_export')
+    expect(exporter).toBeDefined()
+    const result = (await exporter?.execute({ path: dbPath, overwrite: true }, { signal: new AbortController().signal })) as {
+      ok: boolean
+      rows: number
+      error?: string
+    }
+    expect(result.ok, result.error).toBe(true)
+    expect(result.rows).toBeGreaterThanOrEqual(3)
+
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    const count = db.prepare('SELECT COUNT(*) AS c FROM entries').get() as { c: number }
+    expect(Number(count.c)).toBe(result.rows)
+    const found = db.prepare('SELECT name FROM entries WHERE name = ?').get('report.pdf') as { name: string } | undefined
+    expect(found?.name).toBe('report.pdf')
+    db.close()
+  })
+})

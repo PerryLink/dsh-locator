@@ -7,6 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Config as ConfigSchema } from './config.ts'
 import type { Config } from './config.ts'
+import { makeExportTool } from './export.ts'
 import { registerHttp } from './http.ts'
 import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
@@ -49,6 +50,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(makeSearchTool(rt))
   ctx.tools.register(makeStatusTool(rt))
   ctx.tools.register(makeRebuildTool(rt))
+  ctx.tools.register(makeExportTool(rt))
 
   // The Web GUI panel is optional: profiles without a Web server keep the
   // three tools and never mount an HTTP route.

@@ -408,3 +408,45 @@ func (ix *Index) addLocked(full string, info FileInfo) int32 {
 	ix.gen++
 	return id
 }
+
+// DumpEntry is one row of a paginated export.
+type DumpEntry struct {
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	Mtime int64  `json:"mtime"`
+	Ext   string `json:"ext"`
+	Dir   bool   `json:"dir"`
+}
+
+// DumpPage returns up to limit live entries after the given record id. The
+// cursor is a record id, so callers can stream the whole index without holding
+// the lock between pages.
+func (ix *Index) DumpPage(after int32, limit int) (entries []DumpEntry, next int32, done bool) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	if after < 0 {
+		after = 0
+	}
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	entries = make([]DumpEntry, 0, limit)
+	i := int(after)
+	for ; i < len(ix.recs) && len(entries) < limit; i++ {
+		r := &ix.recs[i]
+		if r.Deleted() {
+			continue
+		}
+		path := ix.pathLocked(int32(i))
+		entries = append(entries, DumpEntry{
+			Path:  path,
+			Name:  filepath.Base(path),
+			Size:  r.Size,
+			Mtime: r.Mtime / int64(1e6),
+			Ext:   ix.extOfID(r.Ext),
+			Dir:   r.IsDir(),
+		})
+	}
+	return entries, int32(i), i >= len(ix.recs)
+}
