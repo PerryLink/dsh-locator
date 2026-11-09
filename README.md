@@ -18,7 +18,7 @@ Everything inspired the *ideas*: a persistent index of file names, a query langu
 ## Install
 
 ```sh
-# from npm (once published)
+# from npm
 dsh plugin --profile web add dsh-locator
 
 # from a checkout

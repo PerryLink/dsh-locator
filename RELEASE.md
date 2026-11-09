@@ -1,6 +1,11 @@
 # Release checklist
 
-Nothing here has been published yet. Do not publish without the owner's explicit approval.
+## Published
+
+`dsh-locator@0.1.0` is live on npm (published 2026-11-09), source at
+<https://github.com/PerryLink/dsh-locator>, CI green on `main`.
+
+Install with `dsh plugin --profile web add dsh-locator`.
 
 ## Current artifact
 

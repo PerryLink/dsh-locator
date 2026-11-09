@@ -18,7 +18,7 @@
 ## 安装
 
 ```sh
-# npm（发布后）
+# npm
 dsh plugin --profile web add dsh-locator
 
 # 从源码
