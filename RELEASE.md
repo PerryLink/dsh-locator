@@ -33,7 +33,7 @@ Install with `dsh plugin --profile web add dsh-locator`.
 
 ## Publish
 
-Prefer a GitHub Actions release workflow with `--provenance`; the token stays in the repository secret, never in a local file or shell history.
+`.github/workflows/release.yml` publishes on `v*` tags with `--provenance` using the `NPM_TOKEN` repository secret and OIDC. Keep the secret in the repository, never in a local file or shell history.
 
 Manual fallback (only with the owner's approval):
 
