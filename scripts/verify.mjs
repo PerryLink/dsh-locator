@@ -36,7 +36,17 @@ requireFile(join(root, 'cordis.patch.yml'), 'bundle patch')
 requireFile(join(root, 'lib', 'index.js'), 'compiled plugin entry', 500)
 requireFile(join(root, 'lib', 'tools.js'), 'compiled tools', 500)
 requireFile(join(root, 'client.js'), 'client bundle', 5_000)
-requireFile(join(root, 'bin', tag, engineName), `engine binary for ${tag}`, 1_000_000)
+for (const target of [
+  ['linux-x64', 'indexd'],
+  ['linux-arm64', 'indexd'],
+  ['win32-x64', 'indexd.exe'],
+  ['win32-arm64', 'indexd.exe'],
+  ['darwin-x64', 'indexd'],
+  ['darwin-arm64', 'indexd'],
+]) {
+  requireFile(join(root, 'bin', target[0], target[1]), `engine binary for ${target[0]}`, 1_000_000)
+}
+if (!existsSync(join(root, 'bin', tag, engineName))) failures.push(`host engine ${tag}/${engineName} is missing`)
 requireFile(join(root, 'README.md'), 'README')
 requireFile(join(root, 'README-zh.md'), 'Chinese README')
 requireFile(join(root, 'LICENSE'), 'LICENSE')

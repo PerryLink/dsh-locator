@@ -98,7 +98,7 @@ func withinAny(path string, roots []string) bool {
 // glob, so a skipped directory also removes its descendants.
 func excludedPath(path string, patterns []string) bool {
 	trimmed := strings.TrimPrefix(path, filepath.VolumeName(path))
-	for _, segment := range strings.Split(trimmed, `\`) {
+	for _, segment := range strings.FieldsFunc(trimmed, func(r rune) bool { return r == '\\' || r == '/' }) {
 		if segment == "" {
 			continue
 		}

@@ -50,7 +50,7 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 		if err != nil {
 			return false, Stats{}, err
 		}
-		journal, err := volume.Journal()
+	journal, err := volume.Journal()
 		if err != nil {
 			_ = volume.Close()
 			return false, Stats{}, err
@@ -73,11 +73,12 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 			}
 			return true
 		})
-		_ = volume.Close()
 		if enumErr != nil {
+			_ = volume.Close()
 			return false, Stats{}, enumErr
 		}
 		if truncated || len(records) == 0 {
+			_ = volume.Close()
 			return false, Stats{}, errors.New("USN enumeration produced too many or no records")
 		}
 		items, buildStats := usn.BuildItems(records, usn.BuildOptions{
@@ -104,7 +105,42 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 		st.Files += buildStats.Files
 		st.Dirs += buildStats.Dirs
 		st.Skipped += buildStats.Skipped
+		startChangeWatcher(ctx, volume, journal, records, group, ix, opt)
 	}
 	st.Took = time.Since(start)
 	return true, st, nil
+}
+
+// startChangeWatcher polls the change journal and applies create/delete/rename
+// records. It owns the volume handle from here on and closes it when ctx ends.
+// Failures are reported once and stop the watcher; the portable watcher and
+// locator_rebuild remain available.
+func startChangeWatcher(ctx context.Context, volume *usn.Volume, journal usn.Journal, records []usn.Record, group *volumeGroup, ix *index.Index, opt Options) {
+	paths := usn.PathsFromRecords(records, group.root)
+	go func() {
+		defer volume.Close()
+		lastUSN := journal.NextUSN
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			var batch []usn.Record
+			if _, err := volume.ReadJournal(journal, lastUSN, func(record usn.Record) bool {
+				batch = append(batch, record)
+				return len(batch) < 20_000
+			}); err != nil {
+				if opt.Warn != nil {
+					opt.Warn(err)
+				}
+				return
+			}
+			if len(batch) == 0 {
+				continue
+			}
+			usn.ApplyChanges(batch, paths, ix, opt.Excludes, group.roots)
+			lastUSN = batch[len(batch)-1].USN + 1
+		}
+	}()
 }

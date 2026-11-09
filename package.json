@@ -86,7 +86,8 @@
     "clean": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "check": "pnpm typecheck && pnpm test && node scripts/verify.mjs"
   },
   "license": "Apache-2.0"
 }

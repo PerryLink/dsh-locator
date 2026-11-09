@@ -26,6 +26,16 @@ function config(overrides: Partial<Config> = {}): Config {
 }
 
 const cleanups: Array<() => void> = []
+
+async function waitForIndex(rt: LocatorRuntime): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const status = await rt.engineStatus()
+    if (status !== undefined && !status.scanning) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new Error('initial scan did not finish')
+}
 afterAll(() => {
   for (const cleanup of cleanups.reverse()) cleanup()
 })
@@ -44,6 +54,7 @@ describe.skipIf(!existsSync(binary))('locator engine integration', () => {
     rt.start()
     cleanups.push(() => void rt.stop())
     await rt.waitReady()
+    await waitForIndex(rt)
 
     const first = await rt.search({
       query: 'report ext:pdf',

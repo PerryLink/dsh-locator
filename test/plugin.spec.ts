@@ -14,6 +14,16 @@ interface RegisteredTool {
 }
 
 const cleanups: Array<() => void> = []
+
+async function waitForIndex(statusTool: RegisteredTool | undefined): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    const status = (await statusTool?.execute({}, { signal: new AbortController().signal })) as { entries?: number; scanning?: boolean }
+    if ((status.entries ?? 0) >= 3 && status.scanning !== true) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new Error('initial scan did not finish')
+}
 afterAll(async () => {
   for (const cleanup of cleanups.reverse()) cleanup()
   // A disposer stops the engine asynchronously; let its final snapshot land
@@ -63,6 +73,8 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
     })
 
     expect(tools.map(tool => tool.name).sort()).toEqual(['locator_rebuild', 'locator_search', 'locator_status'])
+    const statusTool = tools.find(tool => tool.name === 'locator_status')
+    await waitForIndex(statusTool)
     const search = tools.find(tool => tool.name === 'locator_search')
     expect(search).toBeDefined()
     const value = (await search?.execute({ query: 'report ext:pdf', limit: 5 }, { signal: new AbortController().signal })) as {
