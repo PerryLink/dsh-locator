@@ -102,7 +102,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 |---|---|---|---|
 | Linux | 是 | inotify，递归 | 每个目录一个 watch；极大目录树可能撞 `fs.inotify.max_user_watches`。 |
 | Windows | 是 | `ReadDirectoryChangesW`，递归 | 不需要管理员，不需要 Everything。WSL 写 `/mnt/<盘>` 可能不产生 Windows 通知，用 `locator_rebuild` 补。 |
-| macOS | 是 | 周期性重建（v0.1） | FSEvents 后端在下一步；目前靠 `refreshIntervalMs` 保持新鲜。 |
+| macOS | 是 | kqueue vnode 监听（最多 4,096 个目录）+ 周期性重建 | 目录级事件覆盖新建、删除、重命名；文件内容变化不产生 vnode 事件，大小/时间由 `refreshIntervalMs` 或 `locator_rebuild` 刷新。 |
 
 引擎是纯 Go、无 cgo，一台机器交叉编译全部平台；运行时从不需要管理员权限。
 
@@ -171,7 +171,7 @@ pnpm build:engine:all   # 或 build:engine 只构建本机
 * Linux inotify 每个目录一个描述符；几十万目录的主目录可能超过内核上限。插件会报警告，快照仍可用，重建可以补齐。
 * WSL 写 `/mnt/c` 可能不产生 Windows 侧通知（Windows 监听看不到 9p 写入方的变更流），需显式重建。
 * 网络共享只有在能当普通目录访问时才会被扫描；没有 SMB 专用变更源。
-* macOS v0.1 的实时更新是周期性重建。
+* macOS 是目录级监听（kqueue，每目录一个描述符，上限 4,096）：新建/删除/重命名即时生效；文件内容变化靠周期重建。无上限、文件级的 FSEvents 仍在路线图。
 * 还没有 USN/MFT 快速枚举（见上）。
 
 ## 路线图

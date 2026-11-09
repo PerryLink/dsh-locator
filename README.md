@@ -102,7 +102,7 @@ Narrow `roots` if indexing the whole home directory is too much I/O. A small, fo
 |---|---|---|---|
 | Linux | yes | inotify, recursive | Watch descriptors are per directory; very large trees can hit `fs.inotify.max_user_watches`. |
 | Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Changes made by WSL to `/mnt/<drive>` may not raise notifications; use `locator_rebuild` for those. |
-| macOS | yes | periodic rebuild (v0.1) | A native FSEvents backend is next; until then `refreshIntervalMs` keeps the snapshot fresh. |
+| macOS | yes | kqueue vnode watches for up to 4,096 directories, plus periodic rebuild | Directory-level events cover creates, deletes and renames. File content changes do not raise vnode events, so size/mtime refresh comes from `refreshIntervalMs` or `locator_rebuild`. |
 
 The engine is pure Go with no cgo, cross-compiled from one machine. It never needs admin privileges.
 
@@ -171,7 +171,7 @@ The engine is a separate Go module under `engine/`; run its tests with `cd engin
 * Linux inotify watches one descriptor per directory; a home directory with hundreds of thousands of directories can exceed the kernel limit. The plugin reports the warning and the snapshot stays usable; rebuilds catch up.
 * WSL writes into `/mnt/c` may not produce Windows notifications (the Windows watcher cannot see the 9p writer's change stream). Rebuild those roots explicitly.
 * Network shares are scanned only if they are reachable as ordinary directories; no SMB-specific change feed.
-* macOS live updates are periodic rebuilds in v0.1.
+* macOS watches are directory-level (kqueue, one descriptor per directory, capped at 4,096). Creates/deletes/renames land immediately; file content changes rely on the periodic rebuild. FSEvents remains the roadmap item for an uncapped, file-level feed.
 * No USN/MFT fast enumeration yet (see above).
 
 ## Roadmap
