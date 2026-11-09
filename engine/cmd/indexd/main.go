@@ -21,6 +21,7 @@ import (
 	"github.com/PerryLink/dsh-locator/engine/internal/server"
 	"github.com/PerryLink/dsh-locator/engine/internal/store"
 	"github.com/PerryLink/dsh-locator/engine/internal/usn"
+	"github.com/PerryLink/dsh-locator/engine/internal/usnstate"
 )
 
 // version is injected by scripts/build-engine.mjs and the CI build.
@@ -123,6 +124,11 @@ func cmdScan(args []string) error {
 			}
 		},
 		ProgressEvery: 200 * time.Millisecond,
+		OnUSNState: func(cursor scan.USNState) {
+			if err := usnstate.Save(*state, cursor); err != nil {
+				fmt.Fprintf(os.Stderr, "usn state: %v\n", err)
+			}
+		},
 	})
 	fmt.Fprintln(os.Stderr)
 	if st.Entries > 0 {

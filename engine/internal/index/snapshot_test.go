@@ -43,3 +43,27 @@ func TestSaveLoadEmptyIndex(t *testing.T) {
 		t.Fatalf("unexpected search on empty index: %+v %v", res, err)
 	}
 }
+
+func TestSnapshotRoundTripsFRN(t *testing.T) {
+	ix := New()
+	ix.AddRoot("/data")
+	ix.AddBatch([]AddItem{
+		{Path: "/data/a.txt", FRN: 0x000500000000002a, Info: FileInfo{Size: 3}},
+		{Path: "/data/b.txt", Info: FileInfo{Size: 4}},
+	})
+	path := filepath.Join(t.TempDir(), "frn.snap")
+	if err := ix.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := back.FRNPaths()
+	if got := paths[0x000500000000002a]; got != "/data/a.txt" {
+		t.Fatalf("FRN path = %q", got)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("FRN map has %d entries, want 1", len(paths))
+	}
+}

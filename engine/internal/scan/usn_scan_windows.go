@@ -81,6 +81,9 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 			_ = volume.Close()
 			return false, Stats{}, errors.New("USN enumeration produced too many or no records")
 		}
+		if opt.OnUSNState != nil {
+			opt.OnUSNState(USNState{Volume: group.volume, JournalID: journal.ID, NextUSN: journal.NextUSN, Roots: append([]string(nil), group.roots...)})
+		}
 		items, buildStats := usn.BuildItems(records, usn.BuildOptions{
 			VolumeRoot: group.root,
 			Roots:      group.roots,
@@ -141,6 +144,9 @@ func startChangeWatcher(ctx context.Context, volume *usn.Volume, journal usn.Jou
 			}
 			usn.ApplyChanges(batch, paths, ix, opt.Excludes, group.roots)
 			lastUSN = batch[len(batch)-1].USN + 1
+			if opt.OnUSNState != nil {
+				opt.OnUSNState(USNState{Volume: group.volume, JournalID: journal.ID, NextUSN: lastUSN, Roots: append([]string(nil), group.roots...)})
+			}
 		}
 	}()
 }

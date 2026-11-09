@@ -33,6 +33,22 @@ jobs:
           .\indexd.exe scan --usn --state $state --root 'C:\Windows'
           .\indexd.exe status --state $state
           .\indexd.exe query --state $state --limit 3 --sort size --desc '.exe'
+      - name: USN resume after downtime
+        shell: pwsh
+        run: |
+          $root = 'C:\Windows\Temp\dsh-usn-resume'
+          $state = Join-Path $env:RUNNER_TEMP 'usn-resume-state'
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Set-Content -Path (Join-Path $root 'before.txt') -Value 'x'
+          .\indexd.exe scan --usn --state $state --root $root
+          if (-not (Test-Path (Join-Path $state 'usn-state.json'))) { throw 'scan did not persist usn-state.json' }
+          # Created while the engine is stopped; only the journal can know.
+          Set-Content -Path (Join-Path $root 'during.txt') -Value 'x'
+          $request = '{"id":1,"method":"search","params":{"query":"during","limit":5}}'
+          $out = $request | .\indexd.exe serve --usn --state $state --root $root 2>&1
+          $out | Select-String 'during.txt'
+          if (-not ($out -match 'during\.txt')) { throw 'resume did not see during.txt' }
       - name: Portable fallback on a volume without a journal
         shell: pwsh
         run: |

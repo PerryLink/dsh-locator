@@ -95,9 +95,10 @@ func ApplyChanges(records []Record, paths ChangePaths, ix *index.Index, excludes
 				continue
 			}
 			if _, exists := ix.Lookup(path); exists {
+				ix.AddPathFRN(path, index.FileInfo{Mode: modeFor(record.Attributes)}, record.FRN)
 				stats.Updated++
 			} else {
-				ix.AddPath(path, index.FileInfo{Mode: modeFor(record.Attributes)})
+				ix.AddPathFRN(path, index.FileInfo{Mode: modeFor(record.Attributes)}, record.FRN)
 				stats.Added++
 			}
 			paths[record.FRN] = path

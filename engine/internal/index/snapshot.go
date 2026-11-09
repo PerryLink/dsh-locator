@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"unsafe"
 )
 
 const (
 	snapshotMagic   = "DSHLOC01"
 	snapshotVersion = 1
 	headerSize      = 48
-	recordSize      = int(unsafe.Sizeof(Record{}))
+	recordSize      = 40 // FRN reuses the old padding; v1 snapshots load with FRN 0
 )
 
 // Save writes the index to path atomically (temporary file plus rename).
@@ -50,6 +49,7 @@ func (ix *Index) Save(path string) error {
 		binary.LittleEndian.PutUint64(buf[off+20:], uint64(r.Mtime))
 		binary.LittleEndian.PutUint16(buf[off+28:], r.Ext)
 		buf[off+30] = byte(r.Flags)
+		binary.LittleEndian.PutUint64(buf[off+32:], r.FRN)
 		off += recordSize
 	}
 	copy(buf[off:], ix.names)
@@ -118,6 +118,7 @@ func Load(path string) (*Index, error) {
 		r.Mtime = int64(binary.LittleEndian.Uint64(data[off+20:]))
 		r.Ext = binary.LittleEndian.Uint16(data[off+28:])
 		r.Flags = Flags(data[off+30])
+		r.FRN = binary.LittleEndian.Uint64(data[off+32:])
 		if int(r.NameOff)+int(r.NameLen) > nameLen {
 			return nil, errors.New("index snapshot name out of range")
 		}

@@ -80,7 +80,7 @@ func (ix *Index) AddRoot(root string) int32 {
 		ix.roots = append(ix.roots, id)
 		return id
 	}
-	id := ix.appendLocked(root, -1, FileInfo{Mode: fs.ModeDir})
+	id := ix.appendLocked(root, -1, FileInfo{Mode: fs.ModeDir}, 0)
 	ix.roots = append(ix.roots, id)
 	ix.gen++
 	return id
@@ -89,16 +89,22 @@ func (ix *Index) AddRoot(root string) int32 {
 // AddPath indexes one file or directory. info may be zero for directories.
 // It returns the record id and whether a new record was created.
 func (ix *Index) AddPath(full string, info FileInfo) (int32, bool) {
+	return ix.AddPathFRN(full, info, 0)
+}
+
+// AddPathFRN is AddPath with an NTFS file reference number. A non-zero FRN
+// lets a later USN journal batch resolve this path after a restart.
+func (ix *Index) AddPathFRN(full string, info FileInfo, frn uint64) (int32, bool) {
 	full = cleanPath(full)
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	existed := ix.table.get(full, ix) >= 0
-	id := ix.addLocked(full, info)
+	id := ix.addLockedFRN(full, info, frn)
 	return id, !existed
 }
 
 // appendLocked appends one record; the caller holds the write lock.
-func (ix *Index) appendLocked(name string, parent int32, info FileInfo) int32 {
+func (ix *Index) appendLocked(name string, parent int32, info FileInfo, frn uint64) int32 {
 	off := uint32(len(ix.names))
 	ix.names = append(ix.names, name...)
 	rec := Record{
@@ -108,6 +114,7 @@ func (ix *Index) appendLocked(name string, parent int32, info FileInfo) int32 {
 		Size:    info.Size,
 		Mtime:   info.Mtime,
 		Flags:   flagsFor(info.Mode, 0),
+		FRN:     frn,
 	}
 	if !info.Mode.IsDir() {
 		rec.Ext = ix.extLocked(extOf(name))
@@ -374,6 +381,8 @@ func (ix *Index) Generation() uint64 {
 type AddItem struct {
 	Path string
 	Info FileInfo
+	// FRN is the NTFS file reference number for USN scans; zero otherwise.
+	FRN uint64
 }
 
 // AddBatch indexes many entries under one lock. It is used by the parallel
@@ -382,17 +391,24 @@ func (ix *Index) AddBatch(items []AddItem) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	for _, item := range items {
-		ix.addLocked(item.Path, item.Info)
+		ix.addLockedFRN(item.Path, item.Info, item.FRN)
 	}
 }
 
 func (ix *Index) addLocked(full string, info FileInfo) int32 {
+	return ix.addLockedFRN(full, info, 0)
+}
+
+func (ix *Index) addLockedFRN(full string, info FileInfo, frn uint64) int32 {
 	full = cleanPath(full)
 	if id := ix.table.get(full, ix); id >= 0 {
 		r := &ix.recs[id]
 		r.Size = info.Size
 		r.Mtime = info.Mtime
 		r.Flags = flagsFor(info.Mode, r.Flags)
+		if frn != 0 {
+			r.FRN = frn
+		}
 		ix.gen++
 		return id
 	}
@@ -404,9 +420,24 @@ func (ix *Index) addLocked(full string, info FileInfo) int32 {
 	if parent < 0 {
 		name = full
 	}
-	id := ix.appendLocked(name, parent, info)
+	id := ix.appendLocked(name, parent, info, frn)
 	ix.gen++
 	return id
+}
+
+// FRNPaths snapshots the FRN -> current path map for live records. It is used
+// to resolve journal records after a restart.
+func (ix *Index) FRNPaths() map[uint64]string {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	paths := make(map[uint64]string, len(ix.recs))
+	for i := range ix.recs {
+		if ix.recs[i].FRN == 0 || ix.recs[i].Deleted() {
+			continue
+		}
+		paths[ix.recs[i].FRN] = ix.pathLocked(int32(i))
+	}
+	return paths
 }
 
 // DumpEntry is one row of a paginated export.

@@ -61,6 +61,10 @@ type Server struct {
 	started time.Time
 
 	rebuildMu sync.Mutex
+
+	usnMu     sync.Mutex
+	usnCancel context.CancelFunc
+	usnActive bool
 }
 
 // New creates a server; call Run to serve.
@@ -165,6 +169,10 @@ func (s *Server) bootstrap(ctx context.Context) error {
 		s.stats = ix.Stats()
 		s.mu.Unlock()
 		s.logf("loaded %d entries from %s", ix.Stats().Entries, s.opt.StateDir)
+		if s.opt.USN && s.opt.Watch && s.resumeUSN(ctx) {
+			s.logf("resumed the USN change journal")
+			return nil
+		}
 		if s.opt.Watch {
 			if !s.startWatcher() {
 				s.startRefreshFallback(ctx)
@@ -197,8 +205,9 @@ func (s *Server) initialScan(ctx context.Context, ix *index.Index) {
 	}
 	s.mu.Lock()
 	s.meta.Incomplete = false
+	usnActive := s.usnActive
 	s.mu.Unlock()
-	if s.opt.Watch {
+	if s.opt.Watch && !usnActive {
 		if !s.startWatcher() {
 			s.startRefreshFallback(ctx)
 		}
@@ -221,11 +230,13 @@ func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) 
 			s.event("scan", map[string]any{"phase": "progress", "entries": p.Entries, "current": p.Current})
 		},
 		ProgressEvery: time.Second,
+		OnUSNState:    s.saveUSNState,
 	})
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
+	s.usnActive = st.USN
 	s.meta = store.Meta{
 		Version:  s.opt.Version,
 		Roots:    ix.Roots(),
@@ -234,6 +245,9 @@ func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) 
 		Stats:    st,
 	}
 	s.mu.Unlock()
+	if !st.USN {
+		s.clearUSNStates()
+	}
 	s.logf("scanned %d entries in %s", st.Entries, st.Took.Round(time.Millisecond))
 	s.event("scan", map[string]any{"phase": "done", "entries": st.Entries, "tookMs": st.Took.Milliseconds()})
 	return nil
@@ -408,7 +422,10 @@ func (s *Server) rebuild(ctx context.Context, p RebuildParams) (any, error) {
 		if len(p.Excludes) > 0 {
 			s.opt.Excludes = p.Excludes
 		}
-			if s.opt.Watch {
+		s.mu.RLock()
+		usnActive := s.usnActive
+		s.mu.RUnlock()
+		if s.opt.Watch && !usnActive {
 			s.startWatcher()
 		}
 		s.emitStats()
@@ -437,7 +454,10 @@ func (s *Server) rebuildWith(ctx context.Context, roots, excludes []string) {
 	if len(excludes) > 0 {
 		s.opt.Excludes = excludes
 	}
-	if s.opt.Watch {
+	s.mu.RLock()
+	usnActive := s.usnActive
+	s.mu.RUnlock()
+	if s.opt.Watch && !usnActive {
 		s.startWatcher()
 	}
 	s.emitStats()
@@ -542,8 +562,19 @@ func (s *Server) save() {
 }
 
 func (s *Server) shutdown() {
+	s.stopUSN()
 	s.stopWatcher()
 	s.save()
+}
+
+func (s *Server) stopUSN() {
+	s.usnMu.Lock()
+	cancel := s.usnCancel
+	s.usnCancel = nil
+	s.usnMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // fillMissingMetadata stats at most one page of USN-built rows that still have

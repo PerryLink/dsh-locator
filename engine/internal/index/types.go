@@ -41,7 +41,10 @@ type Record struct {
 	Mtime   int64
 	Ext     uint16
 	Flags   Flags
-	_       [5]byte
+	// FRN is the NTFS file reference number when the record came from a USN
+	// scan; zero for portable scans. It fits in the old padding, so the
+	// snapshot record stays 40 bytes and old snapshots load with FRN 0.
+	FRN uint64
 }
 
 // IsDir reports whether the record is a directory.

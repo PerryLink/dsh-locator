@@ -36,6 +36,17 @@ type Options struct {
 	Progress func(Progress)
 	// ProgressEvery is the minimum interval between progress calls.
 	ProgressEvery time.Duration
+	// OnUSNState receives the journal cursor after a USN scan and after each
+	// applied journal batch, so the daemon can resume from it after a restart.
+	OnUSNState func(USNState)
+}
+
+// USNState is the resumable cursor for one volume's change journal.
+type USNState struct {
+	Volume    string   `json:"volume"`
+	JournalID uint64   `json:"journalId"`
+	NextUSN   int64    `json:"nextUsn"`
+	Roots     []string `json:"roots"`
 }
 
 // Progress is one scan progress report.

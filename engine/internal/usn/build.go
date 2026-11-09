@@ -55,6 +55,7 @@ func BuildItems(records []Record, opt BuildOptions) ([]index.AddItem, BuildStats
 		}
 		items = append(items, index.AddItem{
 			Path: path,
+			FRN:  frn,
 			Info: index.FileInfo{
 				Size:  0,
 				Mtime: 0,
