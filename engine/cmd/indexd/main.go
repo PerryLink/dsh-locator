@@ -307,6 +307,10 @@ func cmdUsnProbe(args []string) error {
 	}
 	if *enumerate {
 		fmt.Printf("enumerated  %d records in %d ms (%d/s)%s\n", result.Records, result.ElapsedMS, result.RecordsPerS, map[bool]string{true: " [truncated]"}[result.Truncated])
+		fmt.Printf("tree        %d nodes, %d paths resolved, %d unresolved\n", result.TreeNodes, result.Resolved, result.Unresolved)
+		for _, sample := range result.AnySamples {
+			fmt.Printf("  any: %s\n", sample)
+		}
 		fmt.Printf("under root  %d entries (%d files, %d dirs) below %s\n", result.UnderRoot, result.Files, result.Dirs, result.Root)
 		for _, sample := range result.Samples {
 			fmt.Printf("  %s\n", sample)

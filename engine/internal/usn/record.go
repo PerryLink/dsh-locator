@@ -94,6 +94,10 @@ type ProbeResult struct {
 	UnderRoot   int64    `json:"underRoot"`
 	Truncated   bool     `json:"truncated"`
 	Samples     []string `json:"samples"`
+	TreeNodes   int      `json:"treeNodes"`
+	Resolved    int64    `json:"resolved"`
+	Unresolved  int64    `json:"unresolved"`
+	AnySamples  []string `json:"anySamples"`
 	ElapsedMS   int64    `json:"elapsedMs"`
 	RecordsPerS int64    `json:"recordsPerSecond"`
 	JournalRead int64    `json:"journalRead"`

@@ -254,6 +254,7 @@ func Probe(opt ProbeOptions) (ProbeResult, error) {
 	result.Records = count
 	result.Truncated = truncated
 	tree := NewTree(records)
+	result.TreeNodes = tree.Len()
 	limit := opt.Limit
 	if limit < 0 {
 		limit = 10
@@ -261,7 +262,12 @@ func Probe(opt ProbeOptions) (ProbeResult, error) {
 	for _, record := range records {
 		path, ok := tree.Path(record.FRN, volumeRootPath)
 		if !ok {
+			result.Unresolved++
 			continue
+		}
+		result.Resolved++
+		if len(result.AnySamples) < 5 {
+			result.AnySamples = append(result.AnySamples, path)
 		}
 		if !Within(path, root) {
 			continue
