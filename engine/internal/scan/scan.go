@@ -27,6 +27,11 @@ type Options struct {
 	FollowSymlinks bool
 	// Workers is the number of directory readers; zero uses GOMAXPROCS.
 	Workers int
+	// WindowsUSN tries the NTFS USN/MFT enumeration first (Windows only,
+	// requires administrator rights) and falls back to the portable walk.
+	WindowsUSN bool
+	// Warn receives non-fatal setup errors, such as a USN probe that was denied.
+	Warn func(error)
 	// Progress, when set, is called periodically and once at the end.
 	Progress func(Progress)
 	// ProgressEvery is the minimum interval between progress calls.
@@ -50,6 +55,7 @@ type Stats struct {
 	Skipped int64         `json:"skipped"`
 	Errors  int64         `json:"errors"`
 	Workers int           `json:"workers"`
+	USN     bool          `json:"usn"`
 	Took    time.Duration `json:"tookNs"`
 }
 
@@ -77,6 +83,16 @@ func Run(ctx context.Context, ix *index.Index, opt Options) (Stats, error) {
 		return st, ErrNoRoots
 	}
 	st.Roots = len(valid)
+
+	if opt.WindowsUSN {
+		handled, usnStats, usnErr := tryUSNScan(ctx, ix, opt, valid)
+		if handled {
+			return usnStats, ctx.Err()
+		}
+		if usnErr != nil && opt.Warn != nil {
+			opt.Warn(usnErr)
+		}
+	}
 
 	workers := opt.Workers
 	if workers <= 0 {

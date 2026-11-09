@@ -34,6 +34,10 @@
         # Directory reader concurrency during a scan. 0 uses the CPU count;
         # raise it on fast NVMe arrays, lower it on spinning disks.
         scanWorkers: 0
+        # Windows only: try the NTFS USN/MFT enumeration before the portable
+        # directory walk. Requires DSH to run as administrator; on any failure
+        # the engine falls back to the walk automatically.
+        windowsUsn: false
         # Snapshot directory. Empty means the platform cache directory
         # (%LOCALAPPDATA%\dsh-locator, ~/Library/Application Support/dsh-locator,
         # or $XDG_CACHE_HOME/dsh-locator).

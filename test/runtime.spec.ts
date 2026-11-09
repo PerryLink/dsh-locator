@@ -15,6 +15,7 @@ function config(overrides: Partial<Config> = {}): Config {
     watch: true,
     refreshIntervalMs: 1_800_000,
     scanWorkers: 0,
+    windowsUsn: false,
     stateDir: '',
     binaryPath: '',
     maxResults: 100,

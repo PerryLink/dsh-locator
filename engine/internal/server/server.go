@@ -37,6 +37,8 @@ type Options struct {
 	RefreshInterval time.Duration
 	// ScanWorkers is the directory reader concurrency; zero uses GOMAXPROCS.
 	ScanWorkers int
+	// USN tries the NTFS USN/MFT enumeration before the portable walk.
+	USN bool
 	// Version is reported by status.
 	Version string
 	// Log receives diagnostics; nil means stderr.
@@ -47,11 +49,12 @@ type Options struct {
 type Server struct {
 	opt Options
 
-	mu      sync.RWMutex
-	ix      *index.Index
-	watcher watch.Watcher
-	meta    store.Meta
-	stats   index.Stats
+	mu       sync.RWMutex
+	ix       *index.Index
+	watcher  watch.Watcher
+	meta     store.Meta
+	stats    index.Stats
+	scanning bool
 
 	writeMu sync.Mutex
 	out     io.Writer
@@ -150,31 +153,57 @@ type bootstrapError struct{ err error }
 func (e bootstrapError) Error() string { return e.err.Error() }
 func (e bootstrapError) Unwrap() error { return e.err }
 
+// bootstrap loads a usable snapshot or starts the initial scan in the
+// background. Either way requests are served immediately: a search during the
+// first scan sees the entries indexed so far and carries `indexing: true`.
 func (s *Server) bootstrap(ctx context.Context) error {
 	ix, meta, err := store.Load(s.opt.StateDir)
-	if err == nil && sameRoots(ix.Roots(), s.opt.Roots) {
+	if err == nil && sameRoots(ix.Roots(), s.opt.Roots) && !meta.Incomplete {
 		s.mu.Lock()
 		s.ix = ix
 		s.meta = meta
 		s.stats = ix.Stats()
 		s.mu.Unlock()
 		s.logf("loaded %d entries from %s", ix.Stats().Entries, s.opt.StateDir)
-	} else {
-		ix = index.New()
-		s.mu.Lock()
-		s.ix = ix
-		s.mu.Unlock()
-		if err := s.scanInto(ctx, ix, s.opt.Roots); err != nil {
-			return err
+		if s.opt.Watch {
+			if !s.startWatcher() {
+				s.startRefreshFallback(ctx)
+			}
 		}
-		s.emitStats()
+		return nil
 	}
+
+	ix = index.New()
+	s.mu.Lock()
+	s.ix = ix
+	s.scanning = true
+	s.meta = store.Meta{Version: s.opt.Version, Roots: append([]string(nil), s.opt.Roots...), Incomplete: true}
+	s.mu.Unlock()
+	go s.initialScan(ctx, ix)
+	return nil
+}
+
+func (s *Server) initialScan(ctx context.Context, ix *index.Index) {
+	defer func() {
+		s.mu.Lock()
+		s.scanning = false
+		s.mu.Unlock()
+		s.emitStats()
+	}()
+	if err := s.scanInto(ctx, ix, s.opt.Roots); err != nil {
+		s.logf("initial scan failed: %v", err)
+		s.event("error", map[string]string{"message": "initial scan failed: " + err.Error()})
+		return
+	}
+	s.mu.Lock()
+	s.meta.Incomplete = false
+	s.mu.Unlock()
 	if s.opt.Watch {
 		if !s.startWatcher() {
 			s.startRefreshFallback(ctx)
 		}
 	}
-	return nil
+	s.event("scan", map[string]any{"phase": "done", "entries": ix.Stats().Entries})
 }
 
 func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) error {
@@ -182,7 +211,12 @@ func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) 
 	st, err := scan.Run(ctx, ix, scan.Options{
 		Roots:    roots,
 		Excludes: s.opt.Excludes,
-		Workers:  s.opt.ScanWorkers,
+		Workers:    s.opt.ScanWorkers,
+		WindowsUSN: s.opt.USN,
+		Warn: func(err error) {
+			s.logf("usn: %v (using directory walk)", err)
+			s.event("warning", map[string]string{"message": "USN unavailable: " + err.Error()})
+		},
 		Progress: func(p scan.Progress) {
 			s.event("scan", map[string]any{"phase": "progress", "entries": p.Entries, "current": p.Current})
 		},
@@ -242,6 +276,12 @@ func (s *Server) stopWatcher() {
 	if w != nil {
 		_ = w.Close()
 	}
+}
+
+func (s *Server) isScanning() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scanning
 }
 
 func (s *Server) current() *index.Index {
@@ -306,7 +346,15 @@ func (s *Server) search(p SearchParams) (index.Result, error) {
 	q.WholeWord = q.WholeWord || p.WholeWord
 	q.FilesOnly = q.FilesOnly || p.FilesOnly
 	q.DirsOnly = q.DirsOnly || p.DirsOnly
-	return s.current().Search(q)
+	result, err := s.current().Search(q)
+	if err != nil {
+		return result, err
+	}
+	s.mu.RLock()
+	result.Indexing = s.scanning
+	s.mu.RUnlock()
+	fillMissingMetadata(result.Hits)
+	return result, nil
 }
 
 // RebuildParams is the `rebuild` method payload.
@@ -424,6 +472,8 @@ func (s *Server) statusPayload() map[string]any {
 		"nameBytes": st.NameBytes,
 		"deleted":   st.Deleted,
 		"watching":  watching,
+		"scanning":  s.isScanning(),
+		"usn":       meta.Stats.USN,
 		"uptimeSec": int(time.Since(s.started).Seconds()),
 		"stateDir":  s.opt.StateDir,
 	}
@@ -442,6 +492,9 @@ func (s *Server) autosave(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if s.isScanning() {
+				continue
+			}
 			g := s.current().Generation()
 			if g == last {
 				continue
@@ -454,6 +507,9 @@ func (s *Server) autosave(ctx context.Context) {
 
 func (s *Server) save() {
 	ix := s.current()
+	s.mu.RLock()
+	incomplete := s.scanning || s.meta.Incomplete
+	s.mu.RUnlock()
 	if ix.Stats().Deleted > 10000 && ix.Stats().Deleted*5 > ix.Stats().Entries {
 		ix.Compact()
 	}
@@ -462,6 +518,7 @@ func (s *Server) save() {
 	s.mu.RUnlock()
 	meta.Version = s.opt.Version
 	meta.Excludes = s.opt.Excludes
+	meta.Incomplete = incomplete
 	if err := store.Save(s.opt.StateDir, ix, meta); err != nil {
 		s.logf("save failed: %v", err)
 		return
@@ -471,6 +528,24 @@ func (s *Server) save() {
 func (s *Server) shutdown() {
 	s.stopWatcher()
 	s.save()
+}
+
+// fillMissingMetadata stats at most one page of USN-built rows that still have
+// no size or mtime. The index itself is not rewritten; this only makes the
+// returned page truthful until the next metadata pass.
+func fillMissingMetadata(hits []index.Hit) {
+	for i := range hits {
+		hit := &hits[i]
+		if hit.Dir || hit.Mtime != 0 {
+			continue
+		}
+		info, err := os.Stat(hit.Path)
+		if err != nil {
+			continue
+		}
+		hit.Size = info.Size()
+		hit.Mtime = info.ModTime().UnixMilli()
+	}
 }
 
 func sameRoots(a, b []string) bool {

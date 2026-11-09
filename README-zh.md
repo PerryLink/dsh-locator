@@ -37,7 +37,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 | macOS | `~/Library/Application Support/dsh-locator` |
 | Linux | `$XDG_CACHE_HOME/dsh-locator` 或 `~/.cache/dsh-locator` |
 
-大目录首次扫描会读盘；之后启动直接加载快照。默认排除 `node_modules`、`.git`、`.svn`、`.hg`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`。
+大目录首次扫描会读盘；之后启动直接加载快照。首次扫描**期间也照常响应**：搜索返回已索引的部分并带 `indexing: true`，面板底栏提示索引构建中，不会被冷扫描卡住。默认排除 `node_modules`、`.git`、`.svn`、`.hg`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`。
 
 ## Web 搜索面板
 
@@ -89,6 +89,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 | `watch` | `true` | 启用原生文件系统通知。 |
 | `refreshIntervalMs` | `1800000` | 没有原生监听时（目前是 macOS）的重建周期；0 关闭。 |
 | `scanWorkers` | `0` | 扫描时的目录读取并发；0 = CPU 数。 |
+| `windowsUsn` | `false` | 扫描时先试 NTFS USN/MFT 枚举（Windows，需管理员；失败自动回退）。 |
 | `stateDir` | `''` | 快照目录；空 = 平台缓存目录。 |
 | `binaryPath` | `''` | 覆盖内置引擎路径（开发用）。 |
 | `maxResults` | `100` | 单页硬上限。 |
@@ -102,14 +103,14 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 | 平台 | 扫描 + 快照 | 实时更新 | 说明 |
 |---|---|---|---|
 | Linux | 是 | inotify，递归 | 每个目录一个 watch；极大目录树可能撞 `fs.inotify.max_user_watches`。 |
-| Windows | 是 | `ReadDirectoryChangesW`，递归 | 不需要管理员，不需要 Everything。WSL 写 `/mnt/<盘>` 可能不产生 Windows 通知，用 `locator_rebuild` 补。 |
+| Windows | 是 | `ReadDirectoryChangesW`，递归 | 不需要管理员，不需要 Everything。提权时可选用 USN/MFT 枚举。WSL 写 `/mnt/<盘>` 可能不产生 Windows 通知，用 `locator_rebuild` 补。 |
 | macOS | 是 | kqueue vnode 监听（最多 4,096 个目录）+ 周期性重建 | 目录级事件覆盖新建、删除、重命名；文件内容变化不产生 vnode 事件，大小/时间由 `refreshIntervalMs` 或 `locator_rebuild` 刷新。 |
 
 引擎是纯 Go、无 cgo，一台机器交叉编译全部平台；运行时从不需要管理员权限。
 
 ### Windows 与 USN 日志
 
-引擎里已经有 USN 解码器和探针，但**还没有接进正式索引**：卷 ioctl 需要管理员权限，而当前开发机没有提权，探针就是验收步骤：
+引擎里已经有 USN 解码器、可选的快路径和探针。快路径**默认关闭**（`windowsUsn: false`）：卷 ioctl 需要管理员权限，而当前开发机没有提权，探针就是验收步骤：
 
 ```powershell
 # 管理员 PowerShell（或：Start-Process -Verb RunAs <路径> ...）
@@ -118,7 +119,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 
 它会打印日志 id/USN、枚举 MFT（每秒记录数、根目录下文件/目录数、样例路径），并解码最近几条变更日志。非管理员运行会明确报 `Access is denied`；解析与路径重建在 Linux 上有单元测试覆盖。
 
-在探针验证之前，索引使用可移植的目录遍历（不需要提权、不需要服务、任何文件系统可用）。
+打开 `windowsUsn: true`（或 `indexd scan --usn`）后，引擎用 MFT 枚举代替目录遍历，再按 FRN 父表重建路径。USN 记录**没有大小和修改时间**：名字/路径是准的，`locator_status` 会把这种索引标成 `USN`，守护进程会对返回页现场 stat，所以面板/模型看到的行仍有真实大小和日期；但全库的 `size:`/`dm:` 过滤在元数据补齐前是近似的。任何失败（没提权、卷不支持、记录过多）都会带警告回退到目录遍历，绝不会让搜索不可用。
 
 Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直接读 NTFS 主文件表。`dsh-locator` v0.1 刻意先做可移植的目录遍历 + 变更通知：不需要服务、不需要 UAC、任何文件系统都能用。USN/MFT 枚举会作为可选快路径加入路线图（需要进程对卷持有 `GENERIC_READ`，通常意味着管理员权限），可移植路径始终保留为回退。
 
@@ -129,9 +130,10 @@ Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直�
 | 指标 | 结果 |
 |---|---|
 | 冷扫描（未命中页缓存） | 50.3 s |
-| 热扫描（页缓存命中，8 个读取协程） | 6.5 s（约 190k 条目/秒） |
+| 热扫描（页缓存命中，8 个读取协程） | 4.6–6.5 s（约 190–265k 条目/秒） |
 | 快照大小 | 133 MB |
 | 扫描峰值 RSS | 约 490 MB |
+| 首次扫描进行中的第一次搜索 | 2 ms（部分结果，`indexing: true`） |
 | `locator_search "report"`（981 命中） | 34 ms |
 | `locator_search "package.json"`（1,287 命中） | 25 ms |
 | 查询进程 RSS（120 万条目） | 约 197 MB |

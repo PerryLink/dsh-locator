@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/PerryLink/dsh-locator/engine/internal/index"
 )
 
 func TestServeSearchAndStatus(t *testing.T) {
@@ -31,10 +33,8 @@ func TestServeSearchAndStatus(t *testing.T) {
 
 	scanner := bufio.NewScanner(outR)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	ready := waitForEvent(t, scanner, "ready")
-	if ready["entries"].(float64) < 3 {
-		t.Fatalf("ready entries = %v", ready["entries"])
-	}
+	waitForEvent(t, scanner, "ready")
+	waitForEntries(t, scanner, inW, 3)
 
 	writeLine(t, inW, map[string]any{"id": 1, "method": "search", "params": map[string]any{"query": "report", "limit": 5}})
 	result := waitForID(t, scanner, 1)
@@ -86,6 +86,24 @@ func waitForEvent(t *testing.T, scanner *bufio.Scanner, name string) map[string]
 	return nil
 }
 
+// waitForEntries polls status until the asynchronous initial scan has indexed
+// at least want entries.
+func waitForEntries(t *testing.T, scanner *bufio.Scanner, in io.Writer, want float64) {
+	t.Helper()
+	nextID := 100
+	for attempt := 0; attempt < 100; attempt++ {
+		id := float64(nextID)
+		nextID++
+		writeLine(t, in, map[string]any{"id": id, "method": "status"})
+		status := waitForID(t, scanner, id)
+		if status["entries"].(float64) >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("entries never reached %v", want)
+}
+
 func waitForID(t *testing.T, scanner *bufio.Scanner, id float64) map[string]any {
 	t.Helper()
 	for {
@@ -124,5 +142,17 @@ func writeLine(t *testing.T, w io.Writer, value map[string]any) {
 	}
 	if _, err := w.Write(append(b, '\n')); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFillMissingMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.bin")
+	if err := os.WriteFile(path, []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hits := []index.Hit{{Path: path, Name: "file.bin", Dir: false}}
+	fillMissingMetadata(hits)
+	if hits[0].Size != 3 || hits[0].Mtime == 0 {
+		t.Fatalf("metadata not filled: %+v", hits[0])
 	}
 }

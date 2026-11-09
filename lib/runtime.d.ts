@@ -19,6 +19,7 @@ export interface SearchResult {
     returned: number;
     offset: number;
     truncated: boolean;
+    indexing?: boolean;
     tookNs: number;
     hits: SearchHit[];
 }
@@ -46,6 +47,8 @@ export interface EngineStatus {
     nameBytes: number;
     deleted: number;
     watching: boolean;
+    scanning: boolean;
+    usn: boolean;
     uptimeSec: number;
     stateDir: string;
 }

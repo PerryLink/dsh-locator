@@ -26,6 +26,9 @@ type Meta struct {
 	BuiltAt  time.Time  `json:"builtAt"`
 	Platform string     `json:"platform"`
 	Stats    scan.Stats `json:"stats"`
+	// Incomplete marks a snapshot written while the initial scan was still
+	// running; the next start must scan again.
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 // Paths returns the snapshot and meta file names inside dir.

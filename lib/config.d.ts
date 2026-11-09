@@ -21,6 +21,11 @@ export interface Config {
     refreshIntervalMs: number;
     /** Directory reader concurrency during scans; 0 uses the CPU count. */
     scanWorkers: number;
+    /**
+     * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
+     * requires running DSH as administrator). Falls back automatically.
+     */
+    windowsUsn: boolean;
     /** Snapshot directory. Empty means the platform cache directory. */
     stateDir: string;
     /** Override the engine binary path (development or custom builds). */

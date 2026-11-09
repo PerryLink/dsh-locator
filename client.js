@@ -181,9 +181,18 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         if (!open) return undefined
-        const controller = new AbortController()
-        post('/dsh-locator/status', {}, controller.signal).then(setStatus).catch(() => {})
-        return () => controller.abort()
+        let cancelled = false
+        let timer = 0
+        const load = () => {
+          const controller = new AbortController()
+          post('/dsh-locator/status', {}, controller.signal).then(next => {
+            if (cancelled) return
+            setStatus(next)
+            if (next && next.scanning) timer = setTimeout(load, 1500)
+          }).catch(() => {})
+        }
+        load()
+        return () => { cancelled = true; clearTimeout(timer) }
       }, [open])
 
       useEffect(() => {
@@ -327,7 +336,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsh-locator-status' },
             status === null
               ? '索引状态读取中…'
-              : '索引 ' + (status.entries || 0).toLocaleString() + ' 条 · ' + (status.watching ? '实时监听' : '快照') + ' · ' + (status.roots || []).length + ' 个根目录'),
+              : '索引 ' + (status.entries || 0).toLocaleString() + ' 条 · ' + (status.watching ? '实时监听' : '快照') + (status.usn ? ' · USN' : '') + ' · ' + (status.roots || []).length + ' 个根目录'),
         ),
         h('div', { className: 'dsh-locator-scroll', ref: listRef },
           h('table', { className: 'dsh-locator-table' },
@@ -370,7 +379,8 @@ window.__ModuleLoader__.load({
           h('span', null,
             loading
               ? '搜索中…'
-              : total.toLocaleString() + ' 条结果' + (truncated ? '（显示前 ' + hits.length + ' 条）' : '') + ' · ' + took.toFixed(1) + ' ms'),
+              : total.toLocaleString() + ' 条结果' + (truncated ? '（显示前 ' + hits.length + ' 条）' : '') + ' · ' + took.toFixed(1) + ' ms'
+                + (status && status.scanning ? ' · 索引构建中，结果可能不完整' : '')),
           h('span', { className: 'grow' }),
           toast === '' ? null : h('span', { className: 'dsh-locator-toast' }, toast),
           h('span', null, '↑↓ 选择 · Enter 复制路径 · Esc 关闭'),

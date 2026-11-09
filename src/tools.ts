@@ -30,6 +30,7 @@ const SEARCH_OUTPUT = {
     returned: { type: 'integer' },
     offset: { type: 'integer' },
     truncated: { type: 'boolean' },
+    indexing: { type: 'boolean' },
     tookMs: { type: 'number' },
     hits: { type: 'array', items: HIT_SCHEMA },
     error: { type: 'string' },
@@ -49,6 +50,7 @@ const STATUS_OUTPUT = {
     files: { type: 'integer' },
     dirs: { type: 'integer' },
     watching: { type: 'boolean' },
+    usn: { type: 'boolean' },
     scanning: { type: 'boolean' },
     stateDir: { type: 'string' },
     binary: { type: 'string' },
@@ -103,6 +105,7 @@ export function makeSearchTool(rt: LocatorRuntime) {
           total?: number
           returned?: number
           truncated?: boolean
+          indexing?: boolean
           tookMs?: number
           hits?: SearchHit[]
           error?: string
@@ -112,7 +115,8 @@ export function makeSearchTool(rt: LocatorRuntime) {
         const lines = [
           `locator_search ${JSON.stringify(v.query ?? '')}: ${String(v.total ?? 0)} match(es)` +
             `${v.truncated === true ? `, showing ${String(v.returned ?? 0)}` : ''}` +
-            ` in ${(v.tookMs ?? 0).toFixed(1)} ms`,
+            ` in ${(v.tookMs ?? 0).toFixed(1)} ms` +
+            (v.indexing === true ? ' (initial scan still running; results are partial)' : ''),
         ]
         for (const hit of hits) {
           const suffix = hit.dir ? '/' : ''
@@ -169,6 +173,7 @@ export function makeSearchTool(rt: LocatorRuntime) {
           returned: result.returned,
           offset: result.offset,
           truncated: result.truncated,
+          indexing: result.indexing === true,
           tookMs: result.tookNs / 1e6,
           hits: result.hits.map(hit => ({
             path: hit.path,
@@ -209,6 +214,7 @@ export function makeStatusTool(rt: LocatorRuntime) {
           files?: number
           dirs?: number
           watching?: boolean
+          usn?: boolean
           scanning?: boolean
           stateDir?: string
           binary?: string
@@ -219,7 +225,7 @@ export function makeStatusTool(rt: LocatorRuntime) {
         const lines = [
           `locator_status: ${String(v.entries ?? 0)} entries (${String(v.files ?? 0)} files, ${String(v.dirs ?? 0)} dirs)`,
           `  roots: ${(v.roots ?? []).join(', ') || '(none)'}`,
-          `  watcher: ${v.watching === true ? 'active' : 'inactive'}${v.scanning === true ? '; initial scan running' : ''}`,
+          `  watcher: ${v.watching === true ? 'active' : 'inactive'}${v.usn === true ? '; USN-built index (size/date fill in on display)' : ''}${v.scanning === true ? '; initial scan running' : ''}`,
           `  state: ${v.stateDir ?? ''}`,
           `  engine: ${v.binary ?? ''}${v.version === undefined ? '' : ` (${v.version}, ${v.platform ?? ''})`}`,
         ]
@@ -241,6 +247,7 @@ export function makeStatusTool(rt: LocatorRuntime) {
         files: engine?.files ?? 0,
         dirs: engine?.dirs ?? 0,
         watching: engine?.watching ?? false,
+        usn: engine?.usn ?? false,
         scanning: status.scanning !== undefined,
         stateDir: engine?.stateDir ?? rt.stateDir,
         binary: rt.binary,

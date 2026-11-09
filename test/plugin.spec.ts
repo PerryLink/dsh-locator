@@ -50,6 +50,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       watch: true,
     refreshIntervalMs: 1_800_000,
     scanWorkers: 0,
+    windowsUsn: false,
       stateDir: state,
       binaryPath: binary,
       maxResults: 100,

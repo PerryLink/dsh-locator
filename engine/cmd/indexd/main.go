@@ -93,6 +93,7 @@ func cmdScan(args []string) error {
 	fs.Var(&excludes, "exclude", "base-name glob to skip (repeatable)")
 	follow := fs.Bool("follow", false, "follow directory symlinks")
 	workers := fs.Int("workers", 0, "directory reader concurrency (0 = CPU count)")
+	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -111,6 +112,10 @@ func cmdScan(args []string) error {
 		Excludes:       excludes,
 		FollowSymlinks: *follow,
 		Workers:        *workers,
+		WindowsUSN:     *useUSN,
+		Warn: func(err error) {
+			fmt.Fprintf(os.Stderr, "usn: %v (falling back to directory walk)\n", err)
+		},
 		Progress: func(p scan.Progress) {
 			if p.Current != "" {
 				fmt.Fprintf(os.Stderr, "\r%d entries, %d dirs  %s", p.Entries, p.Dirs, shorten(p.Current, 80))
@@ -232,6 +237,7 @@ func cmdServe(args []string) error {
 	noWatch := fs.Bool("no-watch", false, "disable filesystem watching")
 	refresh := fs.Duration("refresh", 30*time.Minute, "rebuild interval when no native watcher exists (0 disables)")
 	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
+	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -264,6 +270,7 @@ func cmdServe(args []string) error {
 		Watch:           !*noWatch,
 		RefreshInterval: *refresh,
 		ScanWorkers:     *workers,
+		USN:             *useUSN,
 		Version:         version,
 	})
 	return srv.Run(ctx, os.Stdin, os.Stdout)

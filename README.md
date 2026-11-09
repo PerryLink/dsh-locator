@@ -37,7 +37,7 @@ On first mount the engine indexes the configured roots (default: your home direc
 | macOS | `~/Library/Application Support/dsh-locator` |
 | Linux | `$XDG_CACHE_HOME/dsh-locator` or `~/.cache/dsh-locator` |
 
-The first scan of a large home directory reads the disk; later starts load the snapshot instead. A default exclude list skips `node_modules`, `.git`, `.svn`, `.hg`, `.cache`, `__pycache__`, `.venv`, `venv` and `.next`.
+The first scan of a large home directory reads the disk; later starts load the snapshot instead. Requests are served **during** that first scan: search returns the entries indexed so far with `indexing: true`, and the panel footer says the index is still building. Nothing blocks on the cold scan. A default exclude list skips `node_modules`, `.git`, `.svn`, `.hg`, `.cache`, `__pycache__`, `.venv`, `venv` and `.next`.
 
 ## Web search panel
 
@@ -89,6 +89,7 @@ Every field is a Schemastery config field; edit the `dsh-locator` entry in the p
 | `watch` | `true` | Apply native filesystem notifications. |
 | `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher exists (macOS today); `0` disables. |
 | `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
+| `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
 | `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
 | `binaryPath` | `''` | Override the bundled engine (development). |
 | `maxResults` | `100` | Hard cap for one search page. |
@@ -102,14 +103,14 @@ Narrow `roots` if indexing the whole home directory is too much I/O. A small, fo
 | Platform | Scan + snapshot | Live updates | Notes |
 |---|---|---|---|
 | Linux | yes | inotify, recursive | Watch descriptors are per directory; very large trees can hit `fs.inotify.max_user_watches`. |
-| Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Changes made by WSL to `/mnt/<drive>` may not raise notifications; use `locator_rebuild` for those. |
+| Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Optional USN/MFT enumeration when running elevated. Changes made by WSL to `/mnt/<drive>` may not raise notifications; use `locator_rebuild` for those. |
 | macOS | yes | kqueue vnode watches for up to 4,096 directories, plus periodic rebuild | Directory-level events cover creates, deletes and renames. File content changes do not raise vnode events, so size/mtime refresh comes from `refreshIntervalMs` or `locator_rebuild`. |
 
 The engine is pure Go with no cgo, cross-compiled from one machine. It never needs admin privileges.
 
 ### Windows and the USN journal
 
-The engine already carries a USN decoder and a probe. It is **not wired into indexing yet** because the volume ioctl needs administrator rights and the development machine here has no elevation; the probe is the acceptance step:
+The engine carries a USN decoder, an opt-in fast path and a probe. The path is **off by default** (`windowsUsn: false`) because the volume ioctl needs administrator rights and the development machine here has no elevation; the probe is the acceptance step:
 
 ```powershell
 # Elevated PowerShell (or: Start-Process -Verb RunAs <path> ...)
@@ -118,7 +119,7 @@ The engine already carries a USN decoder and a probe. It is **not wired into ind
 
 It prints the journal id/USNs, enumerates the MFT (records per second, files/dirs below the root, sample paths) and decodes the last few change-journal records. A non-elevated run fails with `Access is denied` — the parser and path reconstruction are covered by unit tests on every platform.
 
-Until that probe is verified, indexing uses the portable directory walk (which needs no elevation, no service and works on every filesystem).
+With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows the panel/model sees still show real sizes and dates. `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search.
 
 Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` v0.1 deliberately starts with a portable directory walk plus change notifications: it works without a service, without UAC and on every filesystem. USN/MFT enumeration is on the roadmap as an opt-in fast path for volumes where the process holds `GENERIC_READ` (admin) — the portable path stays the fallback.
 
@@ -129,9 +130,10 @@ Measured on a developer WSL2 machine with a Linux home directory (1,234,757 entr
 | Metric | Result |
 |---|---|
 | Cold scan (uncached I/O) | 50.3 s |
-| Warm scan (page cache, 8 readers) | 6.5 s (~190k entries/s) |
+| Warm scan (page cache, 8 readers) | 4.6–6.5 s (~190–265k entries/s) |
 | Snapshot size | 133 MB |
 | Peak scan RSS | ~490 MB |
+| First search during the initial scan | 2 ms (partial, `indexing: true`) |
 | `locator_search "report"` (981 matches) | 34 ms |
 | `locator_search "package.json"` (1,287 matches) | 25 ms |
 | Query process RSS (1.2 M entries) | ~197 MB |

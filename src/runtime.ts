@@ -24,6 +24,7 @@ export interface SearchResult {
   returned: number
   offset: number
   truncated: boolean
+  indexing?: boolean
   tookNs: number
   hits: SearchHit[]
 }
@@ -53,6 +54,8 @@ export interface EngineStatus {
   nameBytes: number
   deleted: number
   watching: boolean
+  scanning: boolean
+  usn: boolean
   uptimeSec: number
   stateDir: string
 }
@@ -127,6 +130,7 @@ export class LocatorRuntime {
     if (!this.config.watch) args.push('--no-watch')
     if (this.config.refreshIntervalMs > 0) args.push('--refresh', `${String(this.config.refreshIntervalMs)}ms`)
     if (this.config.scanWorkers > 0) args.push('--workers', String(this.config.scanWorkers))
+    if (this.config.windowsUsn) args.push('--usn')
 
     let child: ChildProcessWithoutNullStreams
     try {
@@ -229,6 +233,8 @@ export class LocatorRuntime {
       nameBytes: numberOr(params.nameBytes, 0),
       deleted: numberOr(params.deleted, 0),
       watching: params.watching === true,
+      scanning: params.scanning === true,
+      usn: params.usn === true,
       uptimeSec: numberOr(params.uptimeSec, 0),
       stateDir: typeof params.stateDir === 'string' ? params.stateDir : this.stateDir,
     }

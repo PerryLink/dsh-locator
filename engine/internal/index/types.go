@@ -82,6 +82,7 @@ type Result struct {
 	Returned  int   `json:"returned"`
 	Offset    int   `json:"offset"`
 	Truncated bool  `json:"truncated"`
+	Indexing  bool  `json:"indexing,omitempty"`
 	TookNanos int64 `json:"tookNs"`
 	Hits      []Hit `json:"hits"`
 }
