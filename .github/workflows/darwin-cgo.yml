@@ -1,0 +1,32 @@
+name: darwin-cgo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+      - name: Build darwin/arm64 with FSEvents
+        working-directory: engine
+        run: |
+          mkdir -p ../dist/darwin-arm64
+          CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -ldflags '-s -w' -o ../dist/darwin-arm64/indexd ./cmd/indexd
+          file ../dist/darwin-arm64/indexd
+      - name: Build darwin/amd64 with FSEvents
+        working-directory: engine
+        continue-on-error: true
+        run: |
+          mkdir -p ../dist/darwin-x64
+          CGO_ENABLED=1 GOARCH=amd64 CC='clang -arch x86_64' go build -trimpath -ldflags '-s -w' -o ../dist/darwin-x64/indexd ./cmd/indexd
+          file ../dist/darwin-x64/indexd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-locator-darwin-cgo
+          path: dist
+          if-no-files-found: warn
