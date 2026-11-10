@@ -128,6 +128,7 @@ Every field is a Schemastery config field; edit the `dsh-locator` entry in the p
 | `watch` | `true` | Apply native filesystem notifications. |
 | `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher is active (kqueue fallback or a watcher failure); `0` disables. |
 | `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
+| `memoryLimitMB` | `0` | Soft Go heap limit for the engine in MiB; `0` leaves it to `GOMEMLIMIT`/`GOGC`. |
 | `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
 | `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
 | `binaryPath` | `''` | Override the bundled engine (development). |

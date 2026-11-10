@@ -26,7 +26,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
-      - run: pnpm build:engine:all
       - run: pnpm test
       - run: node scripts/verify.mjs
       - name: Publish with provenance

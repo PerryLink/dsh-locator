@@ -467,7 +467,7 @@ window.__ModuleLoader__.load({
             'aria-label': t('searchLabel'),
           }),
           h('span', { className: 'dsh-locator-kbd' }, 'Ctrl+Shift+F'),
-          h('button', { className: 'dsh-locator-close', onClick: close, title: t('closeTitle'), 'aria-label': t('closeLabel') }, '✕'),
+          h('button', { className: 'dsh-locator-close', onClick: close, title: t('closeTitle'), 'aria-label': t('closeLabel') }, '×'),
         ),
         h('div', { className: 'dsh-locator-bar' },
           h('label', { className: 'dsh-locator-check' },

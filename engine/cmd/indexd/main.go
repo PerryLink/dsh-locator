@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -96,9 +97,11 @@ func cmdScan(args []string) error {
 	follow := fs.Bool("follow", false, "follow directory symlinks")
 	workers := fs.Int("workers", 0, "directory reader concurrency (0 = CPU count)")
 	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
+	memoryLimitMB := fs.Int("memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	applyMemoryLimit(*memoryLimitMB)
 	if fs.NArg() > 0 {
 		roots = append(roots, fs.Args()...)
 	}
@@ -242,6 +245,12 @@ func cmdStatus(args []string) error {
 	return nil
 }
 
+func applyMemoryLimit(mb int) {
+	if mb > 0 {
+		debug.SetMemoryLimit(int64(mb) << 20)
+	}
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	state := fs.String("state", store.DefaultDir(), "state directory")
@@ -252,9 +261,11 @@ func cmdServe(args []string) error {
 	refresh := fs.Duration("refresh", 30*time.Minute, "rebuild interval when no native watcher exists (0 disables)")
 	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
 	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
+	memoryLimitMB := fs.Int("memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	applyMemoryLimit(*memoryLimitMB)
 	if fs.NArg() > 0 {
 		roots = append(roots, fs.Args()...)
 	}

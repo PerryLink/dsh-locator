@@ -128,6 +128,7 @@ npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwi
 | `watch` | `true` | 启用原生文件系统通知。 |
 | `refreshIntervalMs` | `1800000` | 没有原生监听时（kqueue 回退或监听失败）的重建周期；0 关闭。 |
 | `scanWorkers` | `0` | 扫描时的目录读取并发；0 = CPU 数。 |
+| `memoryLimitMB` | `0` | 引擎的 Go 软堆上限（MiB）；0 = 交给 `GOMEMLIMIT`/`GOGC`。 |
 | `windowsUsn` | `false` | 扫描时先试 NTFS USN/MFT 枚举（Windows，需管理员；失败自动回退）。 |
 | `stateDir` | `''` | 快照目录；空 = 平台缓存目录。 |
 | `binaryPath` | `''` | 覆盖内置引擎路径（开发用）。 |

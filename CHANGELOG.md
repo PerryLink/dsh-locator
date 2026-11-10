@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3 — 2026-11-10
+
+* `memoryLimitMB` config (and `indexd --memory-limit-mb`) applies a soft Go heap limit; 0 leaves `GOMEMLIMIT`/`GOGC` in charge.
+* Panel close glyph is `×` instead of the missing `✕` symbol.
+* Published through the provenance workflow (`npm publish --provenance`).
+
 ## 0.5.2 — 2026-11-10
 
 * Replaced both README screenshots with demo data (`/tmp/demo`); the previous images exposed a home-directory path and have been withdrawn (npm 0.5.1 unpublished, tag/history rewritten).

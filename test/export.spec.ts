@@ -43,6 +43,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
       watch: true,
       refreshIntervalMs: 1_800_000,
       scanWorkers: 0,
+      memoryLimitMB: 0,
       windowsUsn: false,
       stateDir: state,
       binaryPath: binary,

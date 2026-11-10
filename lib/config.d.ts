@@ -21,6 +21,8 @@ export interface Config {
     refreshIntervalMs: number;
     /** Directory reader concurrency during scans; 0 uses the CPU count. */
     scanWorkers: number;
+    /** Soft Go heap limit in MiB for the engine; 0 leaves it to GOMEMLIMIT/GOGC. */
+    memoryLimitMB: number;
     /**
      * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
      * requires running DSH as administrator). Falls back automatically.

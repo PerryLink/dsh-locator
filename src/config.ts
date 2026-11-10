@@ -23,6 +23,8 @@ export interface Config {
   refreshIntervalMs: number
   /** Directory reader concurrency during scans; 0 uses the CPU count. */
   scanWorkers: number
+  /** Soft Go heap limit in MiB for the engine; 0 leaves it to GOMEMLIMIT/GOGC. */
+  memoryLimitMB: number
   /**
    * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
    * requires running DSH as administrator). Falls back automatically.
@@ -58,6 +60,7 @@ export const Config: Schema<Config> = Schema.object({
   watch: Schema.boolean().default(true),
   refreshIntervalMs: Schema.number().default(1_800_000),
   scanWorkers: Schema.number().default(0),
+  memoryLimitMB: Schema.number().default(0),
   windowsUsn: Schema.boolean().default(false),
   stateDir: Schema.string().default(''),
   binaryPath: Schema.string().default(''),
