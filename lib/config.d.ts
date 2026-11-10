@@ -27,6 +27,8 @@ export interface Config {
     contentIndex: boolean;
     /** Maximum bytes read from one text file. */
     contentMaxFileBytes: number;
+    /** Stop adding content after this many body bytes; 0 means unlimited. */
+    contentMaxTotalBytes: number;
     /** Maximum text files indexed per build; 0 means no cap. */
     contentMaxFiles: number;
     /** Most recent session logs indexed; 0 means all. */

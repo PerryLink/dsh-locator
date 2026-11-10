@@ -51,6 +51,7 @@ export function makeFindTool(content: ContentIndex) {
               files: { type: 'integer' },
               sessions: { type: 'integer' },
               messages: { type: 'integer' },
+              truncated: { type: 'boolean' },
               updatedAt: { type: 'integer' },
               error: { type: 'string' },
             },

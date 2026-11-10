@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3 — 2026-11-10
+
+* Content-index defaults enlarged 4×: `contentMaxFileBytes` 1MB → 4MB, `contentMaxFiles` 50k → 200k, `contentMaxSessions` 50 → 200. All remain configurable.
+* New `contentMaxTotalBytes` (default 2GB) stops the build before the content database can grow without bound; `locator_find`/`/content` report `truncated`.
+* README defaults/table updated.
+
 ## 0.6.2 — 2026-11-10
 
 * Content database now creates `stateDir` before opening SQLite; a fresh profile with no engine snapshot yet no longer fails with `unable to open database file`.

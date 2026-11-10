@@ -29,6 +29,8 @@ export interface Config {
   contentIndex: boolean
   /** Maximum bytes read from one text file. */
   contentMaxFileBytes: number
+  /** Stop adding content after this many body bytes; 0 means unlimited. */
+  contentMaxTotalBytes: number
   /** Maximum text files indexed per build; 0 means no cap. */
   contentMaxFiles: number
   /** Most recent session logs indexed; 0 means all. */
@@ -72,9 +74,10 @@ export const Config: Schema<Config> = Schema.object({
   scanWorkers: Schema.number().default(0),
   memoryLimitMB: Schema.number().default(0),
   contentIndex: Schema.boolean().default(true),
-  contentMaxFileBytes: Schema.number().default(1_000_000),
-  contentMaxFiles: Schema.number().default(50_000),
-  contentMaxSessions: Schema.number().default(50),
+  contentMaxFileBytes: Schema.number().default(4_000_000),
+  contentMaxTotalBytes: Schema.number().default(2_000_000_000),
+  contentMaxFiles: Schema.number().default(200_000),
+  contentMaxSessions: Schema.number().default(200),
   contentSessionDirs: Schema.array(Schema.string()).default([]),
   windowsUsn: Schema.boolean().default(false),
   stateDir: Schema.string().default(''),

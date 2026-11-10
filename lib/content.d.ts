@@ -24,6 +24,7 @@ export interface ContentState {
     files: number;
     sessions: number;
     messages: number;
+    truncated: boolean;
     error: string;
     updatedAt: number;
 }
@@ -38,6 +39,7 @@ export declare class ContentIndex {
         stateDir: string;
         sessionDirs: string[];
         maxFileBytes: number;
+        maxTotalBytes?: number;
         maxFiles: number;
         maxSessions: number;
     });
@@ -47,6 +49,9 @@ export declare class ContentIndex {
     /** Build in the background; stale generations stop at their next checkpoint. */
     start(): void;
     private build;
+    private totalBytes;
+    /** Account one body against the total cap; false means the cap was reached. */
+    private account;
     private indexSessions;
     private indexFiles;
     private sessionRoots;

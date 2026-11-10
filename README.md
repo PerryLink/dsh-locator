@@ -57,7 +57,7 @@ dsh plugin --profile web add /绝对路径/dsh-locator
 
 # 从 tarball
 npm pack
-dsh plugin --profile web add /绝对路径/dsh-locator-0.6.0.tgz
+dsh plugin --profile web add /绝对路径/dsh-locator-0.6.3.tgz
 ```
 
 npm 包里已经带了六个平台的预编译引擎：`linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64`。
@@ -92,7 +92,7 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 - 会话命中带 `sessionId` 和 `messageId`，可以跳回那次对话；
 - 中文和英文子串都能搜，不要求分词。
 
-内容索引在后台构建，刚启动时可能只覆盖了一部分，工具和面板都会显示构建状态。默认只索引 1MB 以内的文本文件，最多 5 万个文件、最近 50 个会话；这些都能在配置里改。
+内容索引在后台构建，刚启动时可能只覆盖了一部分，工具和面板都会显示构建状态。默认只索引 4MB 以内的文本文件，最多 20 万个文件、最近 200 个会话，内容总量上限 2GB；这些都能在配置里改。
 
 ## Web 面板
 
@@ -147,9 +147,10 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `windowsUsn` | `false` | Windows 上尝试 USN/MFT 快路径，需要管理员权限。 |
 | `memoryLimitMB` | 0 | 引擎的 Go 软堆上限；0 表示交给 `GOMEMLIMIT`/`GOGC`。 |
 | `contentIndex` | `true` | 是否构建文件正文/会话内容索引。 |
-| `contentMaxFileBytes` | 1000000 | 单个文本文件最多读多少字节。 |
-| `contentMaxFiles` | 50000 | 最多索引多少个文件；0 表示不限制。 |
-| `contentMaxSessions` | 50 | 最多索引最近多少个会话；0 表示全部。 |
+| `contentMaxFileBytes` | 4000000 | 单个文本文件最多读多少字节。 |
+| `contentMaxTotalBytes` | 2000000000 | 内容库总量上限；0 表示不限制。 |
+| `contentMaxFiles` | 200000 | 最多索引多少个文件；0 表示不限制。 |
+| `contentMaxSessions` | 200 | 最多索引最近多少个会话；0 表示全部。 |
 | `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
 | `stateDir` | 系统缓存 | 快照和内容数据库的位置。 |
 

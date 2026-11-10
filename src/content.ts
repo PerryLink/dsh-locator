@@ -40,6 +40,7 @@ export interface ContentState {
   files: number
   sessions: number
   messages: number
+  truncated: boolean
   error: string
   updatedAt: number
 }
@@ -47,13 +48,14 @@ export interface ContentState {
 /** The content store; one instance per plugin. */
 export class ContentIndex {
   private db: import('node:sqlite').DatabaseSync | null = null
-  private readonly state: ContentState = { building: false, files: 0, sessions: 0, messages: 0, error: '', updatedAt: 0 }
+  private readonly state: ContentState = { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', updatedAt: 0 }
   private generation = 0
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: {
     stateDir: string
     sessionDirs: string[]
     maxFileBytes: number
+    maxTotalBytes?: number
     maxFiles: number
     maxSessions: number
   }) {}
@@ -72,6 +74,7 @@ export class ContentIndex {
   start(): void {
     const generation = ++this.generation
     this.state.building = true
+    this.state.truncated = false
     this.state.error = ''
     void this.build(generation).catch(error => {
       if (generation !== this.generation) return
@@ -111,12 +114,26 @@ export class ContentIndex {
       }
     }
 
+    this.state.truncated = false
     await this.indexSessions(flush, generation)
     if (generation !== this.generation) return
     await this.indexFiles(flush, generation)
     if (generation !== this.generation) return
     this.state.building = false
     this.state.updatedAt = Date.now()
+  }
+
+  private totalBytes = 0
+
+  /** Account one body against the total cap; false means the cap was reached. */
+  private account(body: string): boolean {
+    const cap = this.options.maxTotalBytes ?? 0
+    if (cap > 0 && this.totalBytes + body.length > cap) {
+      this.state.truncated = true
+      return false
+    }
+    this.totalBytes += body.length
+    return true
   }
 
   private async indexSessions(flush: (rows: Array<[string, string, string, string, string | null, string | null]>) => void, generation: number): Promise<void> {
@@ -141,10 +158,13 @@ export class ContentIndex {
         const extracted = messageText(event)
         if (extracted === undefined) continue
         if (title === '') title = extracted.text.replace(/\s+/g, ' ').slice(0, 90)
-        batch.push([extracted.text.slice(0, 8_000), 'session', file.path, title || sessionId, sessionId, extracted.id])
+        const body = extracted.text.slice(0, 8_000)
+        if (!this.account(body)) break
+        batch.push([body, 'session', file.path, title || sessionId, sessionId, extracted.id])
         messages++
         if (batch.length >= 200) { flush(batch); batch = [] }
       }
+      if (this.state.truncated) { flush(batch); return }
       this.state.sessions++
       this.state.messages += messages
     }
@@ -162,12 +182,14 @@ export class ContentIndex {
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
         if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
         if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) break
-        let body: string
-        try { body = readFileSync(entry.path, 'utf8') } catch { continue }
-        if (body.includes('\u0000')) continue
+        let raw: string
+        try { raw = readFileSync(entry.path, 'utf8') } catch { continue }
+        if (raw.includes('\u0000')) continue
+        const body = raw.slice(0, this.options.maxFileBytes)
+        if (!this.account(body)) { flush(batch); return }
         seen++
         this.state.files++
-        batch.push([body.slice(0, this.options.maxFileBytes), 'file', entry.path, entry.name, null, null])
+        batch.push([body, 'file', entry.path, entry.name, null, null])
         if (batch.length >= 200) { flush(batch); batch = [] }
       }
       after = page.next

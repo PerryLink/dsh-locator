@@ -41,6 +41,7 @@ export function apply(ctx: Context, config: Config): void {
         stateDir,
         sessionDirs: config.contentSessionDirs,
         maxFileBytes: config.contentMaxFileBytes,
+        maxTotalBytes: config.contentMaxTotalBytes,
         maxFiles: config.contentMaxFiles,
         maxSessions: config.contentMaxSessions,
       })

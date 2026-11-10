@@ -98,7 +98,7 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 
 ### Content search
 
-`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and scroll to the matched text. The index is built in the background after the name scan; text files are capped by `contentMaxFileBytes`, and the most recent `contentMaxSessions` session logs are indexed by default.
+`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and scroll to the matched text. The index is built in the background after the name scan; text files are capped by `contentMaxFileBytes`, the total body store by `contentMaxTotalBytes`, and the most recent `contentMaxSessions` session logs are indexed by default.
 
 ### Query language
 
