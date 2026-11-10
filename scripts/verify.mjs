@@ -48,7 +48,9 @@ for (const target of [
 }
 if (!existsSync(join(root, 'bin', tag, engineName))) failures.push(`host engine ${tag}/${engineName} is missing`)
 requireFile(join(root, 'README.md'), 'README')
-requireFile(join(root, 'README-zh.md'), 'Chinese README')
+requireFile(join(root, 'README.en.md'), 'English README')
+requireFile(join(root, 'docs', 'assets', 'panel-zh.png'), 'panel screenshot')
+requireFile(join(root, 'docs', 'assets', 'architecture.svg'), 'architecture diagram')
 requireFile(join(root, 'LICENSE'), 'LICENSE')
 
 const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')

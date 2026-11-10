@@ -1,6 +1,6 @@
 {
   "name": "dsh-locator",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index, an Everything-style query language, agent tools and a Web search panel (Ctrl+Shift+F). Windows, macOS and Linux.",
   "author": "PerryLink contributors",
   "repository": {
@@ -33,9 +33,13 @@
     "cordis.patch.yml",
     "CHANGELOG.md",
     "README.md",
-    "README-zh.md",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "README.en.md",
+    "README-es.md",
+    "README-pt.md",
+    "README-hi.md",
+    "docs/assets"
   ],
   "sideEffects": false,
   "dsh": {

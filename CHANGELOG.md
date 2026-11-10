@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2 — 2026-11-10
+
+* Replaced both README screenshots with demo data (`/tmp/demo`); the previous images exposed a home-directory path and have been withdrawn (npm 0.5.1 unpublished, tag/history rewritten).
+* No code change.
+
+## 0.5.1 — 2026-11-10
+
+* README is now Chinese-primary (`README.md`) with full English (`README.en.md`), Spanish, Portuguese and Hindi translations; the old `README-zh.md` was replaced.
+* Added a real panel screenshot (zh/en) and an architecture SVG under `docs/assets/`.
+* Added the same centered header, install-channel matrix, mirror badges, official-repository note and star CTA used by the rest of the family.
+
 ## 0.5.0 — 2026-11-09
 
 * **USN restart catch-up**: index records carry the NTFS FRN (in the old snapshot padding, so v1 snapshots still load), `scan --usn` persists `usn-state.json` (journal id, next USN, roots), and `serve --usn` replays the journal before serving. A file created while the daemon is stopped is found after restart without a full scan; a wrapped/mismatched journal falls back to the portable watcher. Validated on a Windows CI runner.
