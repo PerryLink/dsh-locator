@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 — 2026-11-10
+
+* The client now injects `uiWorkspace`, so double-clicking a session content hit actually calls `openSession(sessionId)` instead of falling back to copying the log path.
+* Removed a temporary jump debug log.
+
 ## 0.6.0 — 2026-11-10
 
 * Content search: text-file bodies and DSH session messages are indexed into a local SQLite FTS5 database; `locator_find` returns snippets plus `sessionId`/`messageId`.

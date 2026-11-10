@@ -613,9 +613,9 @@ window.__ModuleLoader__.load({
     // ── plugin ──────────────────────────────────────────────────────────────
     const plugin = {
       name: 'dsh-locator-client',
-      inject: ['slots'],
+      inject: ['slots', 'uiWorkspace'],
       apply(ctx) {
-        workspaceService = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
+        workspaceService = ctx.uiWorkspace ?? (typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null)
         ensureStyles()
         ctx.effect(() => {
           const onKey = event => {
