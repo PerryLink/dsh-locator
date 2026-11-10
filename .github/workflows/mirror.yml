@@ -1,0 +1,50 @@
+name: mirror
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to Gitee
+        env:
+          TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::GITEE_TOKEN is not configured; skipping the Gitee mirror"
+            exit 0
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push "https://perrylink:${TOKEN}@gitee.com/PerryLink/dsh-locator.git" "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          else
+            git push "https://perrylink:${TOKEN}@gitee.com/PerryLink/dsh-locator.git" "HEAD:refs/heads/main" --tags
+          fi
+      - name: Push to GitCode
+        env:
+          TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::GITCODE_TOKEN is not configured; skipping the GitCode mirror"
+            exit 0
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push "https://oauth2:${TOKEN}@gitcode.com/PerryLink/dsh-locator.git" "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          else
+            git push "https://oauth2:${TOKEN}@gitcode.com/PerryLink/dsh-locator.git" "HEAD:refs/heads/main" --tags
+          fi
