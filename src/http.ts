@@ -15,6 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
+import type { ContentIndex } from './content.ts'
 import { openWithDefaultApp, revealInFileManager, withinRoots } from './reveal.ts'
 import { statSync } from 'node:fs'
 
@@ -46,7 +47,7 @@ interface SearchBody {
 const BODY_LIMIT = 64 * 1024
 
 /** Mount the panel's routes when this profile runs a Web server. */
-export function registerHttp(ctx: Context, rt: LocatorRuntime): void {
+export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex): void {
   const inject = (ctx as unknown as {
     inject?: (deps: string[], callback: (scoped: Context) => void) => void
   }).inject
@@ -69,6 +70,17 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime): void {
       path: '/dsh-locator/reveal',
       handler: handler(scoped, async body => await reveal(rt, body)),
     }))
+    if (content !== undefined) {
+      scoped.effect(() => server.register({
+        kind: 'exact',
+        path: '/dsh-locator/content',
+        handler: handler(scoped, async body => {
+          const query = typeof body.query === 'string' ? body.query : ''
+          const limit = typeof body.limit === 'number' ? body.limit : 30
+          return { ok: true, query, hits: content.search(query, limit), state: content.status() }
+        }),
+      }))
+    }
     scoped.effect(() => server.register({
       kind: 'exact',
       path: '/dsh-locator/open',

@@ -13,6 +13,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { LocatorRuntime } from './runtime.ts';
+import type { ContentIndex } from './content.ts';
 /** Mount the panel's routes when this profile runs a Web server. */
-export declare function registerHttp(ctx: Context, rt: LocatorRuntime): void;
+export declare function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex): void;
 //# sourceMappingURL=http.d.ts.map

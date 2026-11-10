@@ -108,6 +108,7 @@ window.__ModuleLoader__.load({
     // ── i18n ────────────────────────────────────────────────────────────────
     const STRINGS = {
       en: {
+        contentMode: 'Content', sessionBadge: 'CHAT', jumped: 'Opened session',
         placeholder: 'Search file names or paths… e.g. ext:pdf size:>10mb dm:thisweek path:src !tmp',
         searchLabel: 'Search files', dialog: 'Local file search', closeTitle: 'Close (Esc)', closeLabel: 'Close',
         filesOnly: 'Files only', dirsOnly: 'Directories only', statusLoading: 'Reading index status…',
@@ -121,6 +122,7 @@ window.__ModuleLoader__.load({
         justNow: 'just now', minutesAgo: '{n} min ago', hoursAgo: '{n} h ago',
       },
       zh: {
+        contentMode: '搜内容', sessionBadge: '会话', jumped: '已打开会话',
         placeholder: '搜索文件名或路径… 支持 ext:pdf size:>10mb dm:thisweek path:src !tmp',
         searchLabel: '文件搜索', dialog: '本地文件搜索', closeTitle: '关闭 (Esc)', closeLabel: '关闭',
         filesOnly: '只看文件', dirsOnly: '只看目录', statusLoading: '索引状态读取中…',
@@ -134,6 +136,7 @@ window.__ModuleLoader__.load({
         justNow: '刚刚', minutesAgo: '{n} 分钟前', hoursAgo: '{n} 小时前',
       },
       es: {
+        contentMode: 'Contenido', sessionBadge: 'CHAT', jumped: 'Sesión abierta',
         placeholder: 'Busca nombres o rutas… p. ej. ext:pdf size:>10mb dm:thisweek path:src !tmp',
         searchLabel: 'Buscar archivos', dialog: 'Búsqueda local de archivos', closeTitle: 'Cerrar (Esc)', closeLabel: 'Cerrar',
         filesOnly: 'Solo archivos', dirsOnly: 'Solo carpetas', statusLoading: 'Leyendo el estado del índice…',
@@ -147,6 +150,7 @@ window.__ModuleLoader__.load({
         justNow: 'ahora', minutesAgo: 'hace {n} min', hoursAgo: 'hace {n} h',
       },
       pt: {
+        contentMode: 'Conteúdo', sessionBadge: 'CHAT', jumped: 'Sessão aberta',
         placeholder: 'Busque nomes ou caminhos… ex. ext:pdf size:>10mb dm:thisweek path:src !tmp',
         searchLabel: 'Buscar arquivos', dialog: 'Busca local de arquivos', closeTitle: 'Fechar (Esc)', closeLabel: 'Fechar',
         filesOnly: 'Somente arquivos', dirsOnly: 'Somente pastas', statusLoading: 'Lendo o estado do índice…',
@@ -160,6 +164,7 @@ window.__ModuleLoader__.load({
         justNow: 'agora', minutesAgo: 'há {n} min', hoursAgo: 'há {n} h',
       },
       hi: {
+        contentMode: 'सामग्री', sessionBadge: 'चैट', jumped: 'सत्र खुला',
         placeholder: 'फ़ाइल नाम या पथ खोजें… जैसे ext:pdf size:>10mb dm:thisweek path:src !tmp',
         searchLabel: 'फ़ाइल खोज', dialog: 'स्थानीय फ़ाइल खोज', closeTitle: 'बंद करें (Esc)', closeLabel: 'बंद करें',
         filesOnly: 'केवल फ़ाइलें', dirsOnly: 'केवल फ़ोल्डर', statusLoading: 'इंडेक्स स्थिति पढ़ी जा रही है…',
@@ -270,6 +275,29 @@ window.__ModuleLoader__.load({
     }
 
     // ── panel ───────────────────────────────────────────────────────────────
+    let workspaceService = null
+
+    function jumpHighlight(snippet) {
+      const phrase = String(snippet || '').replace(/\u0001|\u0002/g, '').replace(/…/g, ' ').trim().split(/\s+/).slice(0, 8).join(' ')
+      if (phrase.length < 2) return false
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+      let node
+      while ((node = walker.nextNode())) {
+        const text = node.nodeValue || ''
+        const index = text.toLowerCase().indexOf(phrase.toLowerCase())
+        if (index < 0) continue
+        const element = node.parentElement
+        if (!element) continue
+        element.scrollIntoView({ block: 'center' })
+        const previous = element.style.outline
+        element.style.outline = '2px solid #4f7cff'
+        element.style.outlineOffset = '4px'
+        setTimeout(() => { element.style.outline = previous; element.style.outlineOffset = '' }, 2400)
+        return true
+      }
+      return false
+    }
+
     const PAGE = 100
 
     function Panel() {
@@ -279,6 +307,7 @@ window.__ModuleLoader__.load({
       const [desc, setDesc] = useState(true)
       const [filesOnly, setFilesOnly] = useState(false)
       const [dirsOnly, setDirsOnly] = useState(false)
+      const [contentMode, setContentMode] = useState(false)
       const [hits, setHits] = useState([])
       const [total, setTotal] = useState(0)
       const [took, setTook] = useState(0)
@@ -325,18 +354,23 @@ window.__ModuleLoader__.load({
           abortRef.current = controller
           setLoading(true)
           setError('')
-          post('/dsh-locator/search', {
-            query,
-            limit: PAGE,
-            offset: 0,
-            sort,
-            desc,
-            filesOnly,
-            dirsOnly,
-          }, controller.signal).then(data => {
+          const request = contentMode
+            ? post('/dsh-locator/content', { query, limit: PAGE }, controller.signal)
+            : post('/dsh-locator/search', { query, limit: PAGE, offset: 0, sort, desc, filesOnly, dirsOnly }, controller.signal)
+          request.then(data => {
             if (controller.signal.aborted) return
-            setHits(Array.isArray(data.hits) ? data.hits : [])
-            setTotal(typeof data.total === 'number' ? data.total : 0)
+            const nextHits = contentMode
+              ? (Array.isArray(data.hits) ? data.hits : []).map(hit => ({
+                  ...hit,
+                  name: hit.title || String(hit.path).split('/').pop() || hit.path,
+                  dir: false,
+                  size: 0,
+                  mtime: 0,
+                  content: true,
+                }))
+              : (Array.isArray(data.hits) ? data.hits : []).map(hit => ({ ...hit, content: false }))
+            setHits(nextHits)
+            setTotal(typeof data.total === 'number' ? data.total : nextHits.length)
             setTook(typeof data.tookMs === 'number' ? data.tookMs : 0)
             setTruncated(data.truncated === true)
             setSelected(0)
@@ -350,7 +384,7 @@ window.__ModuleLoader__.load({
           })
         }, 110)
         return () => clearTimeout(timer)
-      }, [open, query, sort, desc, filesOnly, dirsOnly])
+      }, [open, query, sort, desc, filesOnly, dirsOnly, contentMode])
 
       const toggleSort = useCallback(key => {
         if (sort === key) {
@@ -375,6 +409,34 @@ window.__ModuleLoader__.load({
         if (!hit) return
         post('/dsh-locator/reveal', { path: hit.path }).then(() => notify(t('revealed'))).catch(() => copy(hit))
       }, [copy, notify])
+
+      const jumpSession = useCallback(hit => {
+        if (!hit || hit.kind !== 'session' || !hit.sessionId) return
+        close()
+        if (!workspaceService || typeof workspaceService.openSession !== 'function') {
+          copy(hit)
+          return
+        }
+        try {
+          workspaceService.openSession(hit.sessionId)
+          notify(t('jumped'))
+        } catch {
+          copy(hit)
+          return
+        }
+        const snippet = hit.snippet
+        let tries = 0
+        const timer = setInterval(() => {
+          tries++
+          if (jumpHighlight(snippet) || tries > 40) clearInterval(timer)
+        }, 150)
+      }, [close, copy, notify])
+
+      const activate = useCallback(hit => {
+        if (!hit) return
+        if (hit.kind === 'session') jumpSession(hit)
+        else reveal(hit)
+      }, [jumpSession, reveal])
 
       const openFile = useCallback(hit => {
         if (!hit || hit.dir) return
@@ -476,6 +538,9 @@ window.__ModuleLoader__.load({
           h('label', { className: 'dsh-locator-check' },
             h('input', { type: 'checkbox', checked: dirsOnly, onChange: event => { setDirsOnly(event.target.checked); if (event.target.checked) setFilesOnly(false) } }),
             t('dirsOnly')),
+          h('label', { className: 'dsh-locator-check' },
+            h('input', { type: 'checkbox', checked: contentMode, onChange: event => setContentMode(event.target.checked) }),
+            t('contentMode')),
           h('span', { className: 'dsh-locator-status' },
             status === null
               ? t('statusLoading')
@@ -509,11 +574,12 @@ window.__ModuleLoader__.load({
                     className: 'dsh-locator-row' + (index === selected ? ' sel' : ''),
                     title: hit.path,
                     onClick: () => setSelected(index),
-                    onDoubleClick: () => reveal(hit),
+                    onDoubleClick: () => activate(hit),
                   },
                   h('td', null, h('div', { className: 'dsh-locator-name' },
-                    h('span', { className: 'dsh-locator-badge' }, hit.dir ? t('dirBadge') : (hit.ext || t('fileBadge')).toUpperCase()),
-                    h('span', null, highlight(hit.name, query)),
+                    h('span', { className: 'dsh-locator-badge' }, hit.kind === 'session' ? t('sessionBadge') : (hit.ext || t('fileBadge')).toUpperCase()),
+                    h('span', null, hit.content ? hit.name : highlight(hit.name, query)),
+                    hit.content && hit.snippet ? h('span', { className: 'dsh-locator-snippet' }, hit.snippet.slice(0, 180)) : null,
                   )),
                   h('td', { className: 'dsh-locator-size' }, hit.dir ? '' : formatSize(hit.size)),
                   h('td', { className: 'dsh-locator-time' }, formatTime(hit.mtime)),
@@ -549,6 +615,7 @@ window.__ModuleLoader__.load({
       name: 'dsh-locator-client',
       inject: ['slots'],
       apply(ctx) {
+        workspaceService = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
         ensureStyles()
         ctx.effect(() => {
           const onKey = event => {

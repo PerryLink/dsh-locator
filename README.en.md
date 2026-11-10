@@ -96,6 +96,10 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 | `locator_rebuild` | Replace the index with a fresh background scan. Searches keep using the old index until the new one is ready. |
 | `locator_export` | Write a read-only SQLite mirror of the index (`entries` table) for external SQL tools. Streams page by page; the binary snapshot stays primary. |
 
+### Content search
+
+`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and scroll to the matched text. The index is built in the background after the name scan; text files are capped by `contentMaxFileBytes`, and the most recent `contentMaxSessions` session logs are indexed by default.
+
 ### Query language
 
 Bare words are ANDed substrings of the file name. Everything-style filters combine with them:

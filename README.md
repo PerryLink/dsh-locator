@@ -2,9 +2,9 @@
 
 # 🔎 dsh-locator
 
-**不依赖 Everything 的全盘毫秒级文件搜索，给 DeepSeek Harness。**
+**给 DeepSeek Harness 的全盘文件搜索：先按名字找，再按内容找，找到就能打开。**
 
-自建跨平台索引（Windows USN/MFT · macOS FSEvents · Linux inotify），四个 agent 工具 + 可排序 Web 面板。
+索引由插件自己维护，不装 Everything，也不依赖 `es.exe`。Windows、macOS、Linux 用同一套工具和同一个面板。
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -24,19 +24,21 @@ dsh plugin --profile web add dsh-locator
 
 </div>
 
-> **官方仓库**：[GitHub `PerryLink/dsh-locator`](https://github.com/PerryLink/dsh-locator)。Gitee / GitCode 是自动同步的镜像，以 GitHub 为准。
->
-> 这是 [DSH 插件家族](https://github.com/PerryLink) 的一员（Apache-2.0）。如果它帮到了你，**给个 ⭐**——不会解锁任何功能，但会让下一个人更容易找到它。
+> 官方仓库是 [GitHub `PerryLink/dsh-locator`](https://github.com/PerryLink/dsh-locator)，Gitee 和 GitCode 是自动同步的镜像。这个插件属于 [DSH 插件家族](https://github.com/PerryLink)，Apache-2.0；如果它帮你省了时间，点个 ⭐ 就行。
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的全盘毫秒级文件搜索，**自建索引**：不装 Everything、不用 `es.exe`、不需要 Everything 服务。
+## 它解决什么问题
 
-`dsh-locator` 扫描你指定的目录，把文件名、路径、大小、修改时间写进一个紧凑的快照；之后按文件系统事件增量更新，百万条目上的名字/路径查询在几十毫秒内返回。模型拿到 `locator_search`、`locator_status`、`locator_rebuild`、`locator_export` 四个工具；人则有一个 Web GUI 全局**搜索面板**（`Ctrl+Shift+F`，或侧栏底部的放大镜），支持列排序、过滤、键盘操作和一键复制路径。
+找文件通常分两种情况。
 
-思路借鉴 Everything：常驻的文件名索引、带 `ext:` / `size:` / `dm:` 过滤的查询语法、直接消费文件系统的变更流。实现是独立的，并且跨平台。
+一种是你记得名字，但不记得放在哪。`glob` 和 `grep` 每次都要重新遍历工作区，知道目录时很快，只记得半个文件名时就很慢。Everything 在 Windows 上很好用，可惜只支持 Windows；把它包一层，macOS、Linux、WSL 和远程机器仍然用不了。
 
-## 为什么再做一个
+另一种是你记得某句话、某个结论、某段代码，却想不起在哪个文件、哪次对话里。这时只搜文件名没有用。
 
-`glob` / `grep` 每次调用都要遍历工作区——知道目录时很快，只记得名字的一部分时很慢。Everything 在 Windows 上很好用，但它只支持 Windows；包一层 Everything 仍然覆盖不了 macOS、Linux、WSL 和远程主机。`dsh-locator` 自己拥有索引，所以同一套工具在哪都能用。
+`dsh-locator` 把这两件事放在一起：
+
+- 一份常驻的文件名/路径索引，百万条记录也能在几十毫秒内返回；
+- 一份内容索引，覆盖文本文件和 DSH 会话消息，支持中文和子串；
+- 找到之后可以直接打开文件、定位到文件夹，或者跳到对应的会话。
 
 ## 安装
 
@@ -44,174 +46,140 @@ dsh plugin --profile web add dsh-locator
 # npm（推荐）
 dsh plugin --profile web add dsh-locator
 
-# GitHub 主仓（最新 main）
+# 直接跟 GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
 
 # 从源码
 pnpm install
-pnpm build            # TypeScript 插件
-pnpm build:engine     # 本机平台的 Go 引擎
+pnpm build
+pnpm build:engine
 dsh plugin --profile web add /绝对路径/dsh-locator
 
-# 从打包 tarball（已实测的安装路径）
+# 从 tarball
 npm pack
-dsh plugin --profile web add /绝对路径/dsh-locator-0.5.0.tgz
+dsh plugin --profile web add /绝对路径/dsh-locator-0.6.0.tgz
 ```
 
-npm 包内置 `linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64` 六个平台的预编译引擎。
+npm 包里已经带了六个平台的预编译引擎：`linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64`。
 
-装进**已经在运行**的 Web profile 后，请**刷新页面**（`F5`）：宿主工具可能立即热挂载，但浏览器面板（`client.js`）是在页面加载时从 boot graph 取的。headless/TUI profile 不会挂面板。
+如果装进一个**正在运行**的 Web profile，装完刷新一下页面（F5）。宿主工具可能会热挂载，但浏览器面板是页面加载时从 boot graph 里取的。headless/TUI profile 不会显示面板。
 
-## 首次运行
+## 第一次运行
 
-首次挂载时引擎扫描配置的根目录（默认：用户主目录），快照写到平台缓存目录：
+默认索引你的主目录，快照放在系统缓存目录：
 
-| 平台 | 默认状态目录 |
+| 平台 | 默认位置 |
 |---|---|
 | Windows | `%LOCALAPPDATA%\dsh-locator` |
 | macOS | `~/Library/Application Support/dsh-locator` |
 | Linux | `$XDG_CACHE_HOME/dsh-locator` 或 `~/.cache/dsh-locator` |
 
-大目录首次扫描会读盘；之后启动直接加载快照。首次扫描**期间也照常响应**：搜索返回已索引的部分并带 `indexing: true`，面板底栏提示索引构建中，不会被冷扫描卡住。默认排除 `node_modules`、`.git`、`.svn`、`.hg`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`。
+第一次扫描要读盘，之后启动直接加载快照。扫描期间搜索照常可用：返回已经索引的部分，并带 `indexing: true`，面板底栏也会提示“索引构建中”。
 
-## Web 搜索面板
+默认跳过 `node_modules`、`.git`、`.svn`、`.hg`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`。
 
-![dsh-locator 搜索面板：按路径过滤 Markdown，显示命中数、耗时和排序](docs/assets/panel-zh.png)
+## 两种搜索
 
-在 Web GUI 里按 `Ctrl+Shift+F`，或点侧栏底部的放大镜。浮层通过两个同源宿主路由（`POST /dsh-locator/search`、`POST /dsh-locator/status`）查询同一个索引，不另起服务、不加端口。
+### 按名字找：`locator_search`
 
-* 空查询按修改时间倒序列出最近条目；输入后 110 ms 防抖，走和工具完全相同的 Everything 风格语法。
-* 点列头按名称、大小、修改时间、路径排序，再点切换升降序。
-* `只看文件` / `只看目录` 过滤类型；底栏显示命中数、分页上限和查询耗时。
-* `↑`/`↓` 选择，`Enter` 复制选中路径，`Ctrl+O` 打开，`Ctrl+Enter` 把带引号的 `@"路径"` 插入输入框，**双击在文件管理器中定位**（Explorer / Finder / `xdg-open`），`Esc` 关闭。
-* 面板跟随 `navigator.language`（中/英/西/葡/印地语）。
-* 面板是可选的：没有 Web server 的 profile 不会挂载它，三个工具照常工作。
+Everything 风格的查询语法，返回路径、大小、修改时间、扩展名、类型。适合“我记得文件名里有 report”“找上周改过的 PDF”这类问题。
 
-## 工具
+### 按内容找：`locator_find`
+
+在文本文件和 DSH 会话消息里搜正文，返回命中片段，以及来源信息。
+
+- 文件命中带路径，直接打开或定位；
+- 会话命中带 `sessionId` 和 `messageId`，可以跳回那次对话；
+- 中文和英文子串都能搜，不要求分词。
+
+内容索引在后台构建，刚启动时可能只覆盖了一部分，工具和面板都会显示构建状态。默认只索引 1MB 以内的文本文件，最多 5 万个文件、最近 50 个会话；这些都能在配置里改。
+
+## Web 面板
+
+![搜索面板：按路径过滤 Markdown，显示命中数、耗时和排序](docs/assets/panel-zh.png)
+
+在 Web GUI 里按 `Ctrl+Shift+F`，或者点侧栏底部的放大镜。
+
+- 空查询按修改时间列出最近的条目；输入后 110ms 防抖，和工具用同一套语法。
+- 点列头可以按名称、大小、修改时间、路径排序。
+- 勾选“只看文件”“只看目录”过滤类型；勾选“搜内容”切换到正文/会话搜索。
+- `↑`/`↓` 选择，`Enter` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 把 `@"路径"` 插进输入框。
+- 双击文件结果会在文件管理器里定位；双击会话结果会打开对应会话，并尝试滚动到命中的那句话。
+- 面板文案跟随 `navigator.language`（中/英/西/葡/印地语）。
+
+面板通过几个同源路由工作：`/dsh-locator/search`、`/dsh-locator/content`、`/dsh-locator/status`、`/dsh-locator/reveal`、`/dsh-locator/open`。不另起服务，也不占额外端口。
+
+## 工具一览
 
 | 工具 | 作用 |
 |---|---|
-| `locator_search` | 查询索引，返回路径、大小、修改时间、扩展名、类型，并给出 total/truncated，截断页面不会被当成完整结果。 |
-| `locator_status` | 根目录、条目数、监听状态、状态目录与引擎路径。用来解释覆盖范围或排查结果过期。 |
-| `locator_rebuild` | 后台重建索引；新索引就绪前，搜索继续用旧索引。 |
-| `locator_export` | 把索引导出成只读 SQLite（`entries` 表），供外部 SQL 工具查询；逐页流式导出，二进制快照仍是主存储。 |
+| `locator_search` | 按文件名/路径搜索，支持 `ext:`、`size:`、`dm:`、`path:` 等过滤。 |
+| `locator_find` | 按文件正文和会话内容搜索，返回片段与 `sessionId`/`messageId`。 |
+| `locator_status` | 查看根目录、条目数、监听状态、内容索引进度和引擎版本。 |
+| `locator_rebuild` | 后台重建索引；新索引就绪前，搜索继续使用旧的。 |
+| `locator_export` | 把文件名索引导出成只读 SQLite，方便外部工具查询。 |
 
 ### 查询语法
 
-裸词是文件名子串，多个词取 AND；可叠加 Everything 风格过滤：
-
-| 例子 | 含义 |
-|---|---|
-| `report` | 文件名含 `report` |
-| `report ext:pdf` | 且扩展名是 `pdf` |
-| `ext:ts,js` / `ext:!tmp` | 包含/排除扩展名 |
-| `*.sln` / `?ata` | `*`、`?` 通配 |
-| `"annual report"` | 带空格的短语 |
-| `!archive` | 取反 |
-| `path:src` | 完整路径含 `src` |
-| `size:>10mb` / `size:1kb..2mb` | 大小比较 |
-| `dm:today` / `dm:thisweek` / `dm:2026-01-01` | 修改时间 |
-| `folder:` / `file:` | 只看目录 / 只看文件 |
-| `case:1` / `wholeword:1` | 区分大小写 / 全词匹配 |
-
-`locator_search` 还接受 `sort`（`name`、`path`、`size`、`mtime`、`ext`）、`desc`、`offset`、`limit`、`regex`、`caseSensitive`、`wholeWord`。
+```text
+report                  文件名里同时包含这些词
+"two words"             完整短语
+*.go  ?                 通配符
+ext:pdf,docx            按扩展名
+ext:!tmp                排除某类扩展名
+path:src                路径里包含 src
+size:>10mb  1kb..2mb    按大小
+dm:today  dm:thisweek   按修改日期
+folder:  file:          只看目录 / 只看文件
+!tmp                    排除包含 tmp 的
+case:1  wholeword:1     区分大小写 / 全词匹配
+```
 
 ## 配置
 
-所有字段都是 Schemastery 配置；改 profile patch 里的 `dsh-locator` 条目，或改包内 `cordis.patch.yml` 的默认值。
-
-| 键 | 默认 | 含义 |
+| 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `enabled` | `true` | 关掉后不挂工具、不起引擎。 |
-| `roots` | `[]` | 要索引的目录；空 = 用户主目录。 |
-| `excludes` | 开发/缓存目录 | 扫描与监听都跳过的基础名 glob。 |
-| `watch` | `true` | 启用原生文件系统通知。 |
-| `refreshIntervalMs` | `1800000` | 没有原生监听时（kqueue 回退或监听失败）的重建周期；0 关闭。 |
-| `scanWorkers` | `0` | 扫描时的目录读取并发；0 = CPU 数。 |
-| `memoryLimitMB` | `0` | 引擎的 Go 软堆上限（MiB）；0 = 交给 `GOMEMLIMIT`/`GOGC`。 |
-| `windowsUsn` | `false` | 扫描时先试 NTFS USN/MFT 枚举（Windows，需管理员；失败自动回退）。 |
-| `stateDir` | `''` | 快照目录；空 = 平台缓存目录。 |
-| `binaryPath` | `''` | 覆盖内置引擎路径（开发用）。 |
-| `maxResults` | `100` | 单页硬上限。 |
-| `startupTimeoutMs` | `120000` | 冷启动建索引的容忍时间。 |
-| `requestTimeoutMs` | `15000` | 单次请求超时。 |
-
-主目录太大就收窄 `roots`：`~/Documents`、`~/Downloads` 加一两棵代码树，通常比全盘更划算。
+| `roots` | 主目录 | 要索引的目录。 |
+| `excludes` | `node_modules` 等 | 按目录名或路径跳过的 glob。 |
+| `watch` | `true` | 是否监听文件系统变化。 |
+| `refreshIntervalMs` | 30 分钟 | 没有原生监听时的重建周期。 |
+| `scanWorkers` | 0 | 扫描并发；0 表示按 CPU 数。 |
+| `windowsUsn` | `false` | Windows 上尝试 USN/MFT 快路径，需要管理员权限。 |
+| `memoryLimitMB` | 0 | 引擎的 Go 软堆上限；0 表示交给 `GOMEMLIMIT`/`GOGC`。 |
+| `contentIndex` | `true` | 是否构建文件正文/会话内容索引。 |
+| `contentMaxFileBytes` | 1000000 | 单个文本文件最多读多少字节。 |
+| `contentMaxFiles` | 50000 | 最多索引多少个文件；0 表示不限制。 |
+| `contentMaxSessions` | 50 | 最多索引最近多少个会话；0 表示全部。 |
+| `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
+| `stateDir` | 系统缓存 | 快照和内容数据库的位置。 |
 
 ## 平台支持
 
-| 平台 | 扫描 + 快照 | 实时更新 | 说明 |
-|---|---|---|---|
-| Linux | 是 | inotify，递归 | 每个目录一个 watch；极大目录树可能撞 `fs.inotify.max_user_watches`。 |
-| Windows | 是 | `ReadDirectoryChangesW`，递归 | 不需要管理员，不需要 Everything。提权时可选用 USN/MFT 枚举。WSL 写 `/mnt/<盘>` 可能不产生 Windows 通知，用 `locator_rebuild` 补。 |
-| macOS | 是 | 随包发布的 cgo 二进制使用 FSEvents（递归、无上限） | `CGO_ENABLED=0` 构建回退到 kqueue（最多 4,096 个目录）；回退模式下内容变化仍由 `refreshIntervalMs` 或 `locator_rebuild` 刷新。 |
+| 平台 | 扫描 | 实时更新 |
+|---|---|---|
+| Linux | 并行遍历 | inotify，递归监听 |
+| Windows | 并行遍历，或管理员下的 USN/MFT | `ReadDirectoryChangesW`；USN 模式下重启会补日志 |
+| macOS | 并行遍历 | 发布版二进制用 FSEvents；`CGO_ENABLED=0` 构建回退到 kqueue |
 
-引擎是纯 Go、无 cgo，一台机器交叉编译全部平台；运行时从不需要管理员权限。
-
-### Windows 与 USN 日志
-
-引擎里已经有 USN 解码器、可选的快路径和探针。快路径**默认关闭**（`windowsUsn: false`）：卷 ioctl 需要管理员权限；它已经在 GitHub Actions 的 Windows runner（管理员、真实 NTFS 卷）上端到端验证：
-- 读取 1,345,546 条 MFT 记录，解析出 1,345,539 条路径
-- `C:\Windows` 下 164,209 条（122,915 文件、41,294 目录）
-- `scan --usn --root C:\Windows` 建索引 164,216 条用 7.8 秒；查询 9.6 ms
-- 变更日志可读（某次运行读到 8,233 条）；`D:` 卷日志未启用时带警告回退目录遍历
-
-你也可以自己跑同一个探针：
-
-```powershell
-# 管理员 PowerShell（或：Start-Process -Verb RunAs <路径> ...）
-& ".\bin\win32-x64\indexd.exe" usn-probe --volume C: --root "C:\Windows" --limit 5 --journal 5
-```
-
-它会打印日志 id/USN、枚举 MFT（每秒记录数、根目录下文件/目录数、样例路径），并解码最近几条变更日志。非管理员运行会明确报 `Access is denied`；解析与路径重建在 Linux 上有单元测试覆盖。
-
-打开 `windowsUsn: true`（或 `indexd scan --usn`）后，引擎用 MFT 枚举代替目录遍历，再按 FRN 父表重建路径。成功的 USN 扫描会写 `usn-state.json`（日志 id、next USN、根目录），并把 FRN 存进索引记录；下次 `serve --usn` 会先从该游标重放日志再提供服务，停机期间新建的文件无需全量重扫即可出现。日志回绕/被删/不匹配时回退到可移植监听。引擎保留卷句柄，每 2 秒轮询变更日志，按同一张 FRN 表就地应用新建、删除、重命名（`usn.ApplyChanges`）。USN 记录**没有大小和修改时间**：名字/路径是准的，`locator_status` 会把这种索引标成 `USN`，守护进程会对返回页现场 stat，所以面板/模型看到的行仍有真实大小和日期；但全库的 `size:`/`dm:` 过滤在元数据补齐前是近似的。任何失败（没提权、卷不支持、记录过多）都会带警告回退到目录遍历，绝不会让搜索不可用。运行中日志轮询失败会报警并停止该监视器，可移植的 `ReadDirectoryChangesW` 监听和 `locator_rebuild` 仍然可用。变更应用逻辑有合成记录测试，ioctl 路径由 Windows CI job 验证。
-
-Everything 之所以首次索引近乎瞬时，是因为它通过 USN 日志直接读 NTFS 主文件表。`dsh-locator` v0.1 刻意先做可移植的目录遍历 + 变更通知：不需要服务、不需要 UAC、任何文件系统都能用。USN/MFT 枚举会作为可选快路径加入路线图（需要进程对卷持有 `GENERIC_READ`，通常意味着管理员权限），可移植路径始终保留为回退。
+Windows 的 USN 快路径默认关闭（`windowsUsn: true`）。它需要管理员权限和启用中的卷变更日志；任何一步失败都会回退到普通遍历，不会让搜索不可用。USN 扫描成功后会记下日志游标，重启时先补上停机期间的变更，再开始服务。
 
 ## 性能
 
-开发者 WSL2 机器、Linux 主目录实测（1,234,757 条目：1,128,288 文件、106,469 目录，排除 `node_modules`、`.git`、`.cache`、`.venv`）：
-
-| 指标 | 结果 |
-|---|---|
-| 冷扫描（未命中页缓存） | 50.3 s |
-| 热扫描（页缓存命中，8 个读取协程） | 4.6–6.5 s（约 190–265k 条目/秒） |
-| 快照大小 | 133 MB |
-| 扫描峰值 RSS | 约 490 MB |
-| 首次扫描进行中的第一次搜索 | 2 ms（部分结果，`indexing: true`） |
-| `locator_search "report"`（981 命中） | 34 ms |
-| `locator_search "package.json"`（1,287 命中） | 25 ms |
-| 查询进程 RSS（120 万条目） | 约 197 MB |
-| 小目录树（3.9 万条目）扫描 | 0.47 s |
-
-查询阶段按记录分片并行；冷扫描慢在磁盘。数字随文件系统、缓存和 CPU 变化。
+- 约 124 万条记录：热查询 25–35ms；扫描进行中查询约 2ms。
+- Windows CI 上 `C:\Windows` 16.4 万条用 USN 索引约 7.8 秒，查询 9.6ms。
+- 导出 124 万行 SQLite：约 477MB，6.4 秒。
+- 内容索引是后台任务，首次构建时间取决于文本文件数量和会话日志大小。
 
 ## 设计
 
-![dsh-locator 架构：文件系统 → 扫描/监听 → 紧凑快照 → 查询引擎 → agent 工具 / Web 面板](docs/assets/architecture.svg)
+![架构：文件系统 → 扫描/监听 → 紧凑快照 → 查询引擎 → agent 工具 / Web 面板](docs/assets/architecture.svg)
 
-```
-DeepSeek Harness
-  └─ dsh-locator（TypeScript 插件）
-       ├─ locator_search / locator_status / locator_rebuild
-       ├─ client.js：Ctrl+Shift+F 浮层（shell.overlay slot）
-       ├─ POST /dsh-locator/{search,status}（同源、仅回环宿主）
-       └─ 子进程：indexd serve（Go，stdio 上的 NDJSON）
-            ├─ 扫描器：递归遍历、排除、进度
-            ├─ 索引：名字 arena + 定长记录 + 开放寻址路径表
-            ├─ 查询：解析、匹配、Top-K 选择、排序、分页
-            ├─ 监听：inotify（Linux）/ ReadDirectoryChangesW（Windows）
-            └─ 快照：单文件、原子重命名
-```
-
-* **并行扫描**：目录读取协程消费一个有界任务队列，每个目录批量调用 `AddBatch` 落库，保证父记录先于子记录；队列满时改为在当前协程内联扫描，永不阻塞。
-* **内存布局**：记录只存名字在 arena 中的偏移/长度和父记录 id，完整路径只在结果页和 `path:` 过滤时重建，避免每个文件一个字符串头。
-* **路径表**：开放寻址、槽位存 `id+1`，每条约 12 字节，而 `map[string]int32` 约 50 字节。
-* **查询引擎**：裸词与过滤只编译一次，分片并行匹配，再用有界大顶堆选出 `offset+limit` 行，不排序上百万命中。
-* **持久化**：先写临时文件再重命名；generation 计数让守护进程只在索引变化时自动保存；墓碑超过阈值后压缩。
-* **协议**：stdio 上一行一个 JSON 请求/响应，另有 `scan`、`stats`、`warning`、`error`、`rebuilt` 事件。不开端口、无网络监听面。
-* **只读**：引擎只读元数据，绝不修改被索引的文件。
+- **文件名索引**：Go 引擎维护一份紧凑快照。记录只存名字在 arena 里的偏移和父记录 id，完整路径在返回结果时重建。
+- **并行扫描**：目录读取协程消费有界队列，每个目录批量写入，保证父目录先于子目录。
+- **查询**：解析一次查询，分片并行匹配，用有界堆选出前 `offset+limit` 条，不排序全部命中。
+- **内容索引**：宿主侧 SQLite FTS5，trigram 分词，支持中文和子串；文件清单来自引擎已有的扫描结果，会话日志用 Node 自带的 zstd 解压。
+- **跳转**：文件走 `/reveal` 和 `/open`；会话通过 `uiWorkspace.openSession(sessionId)` 打开，再在页面里定位命中文字。
+- **协议**：引擎通过 stdio 上的 NDJSON 通信，不监听端口；Web 面板只走同源宿主路由。
 
 ## 从源码构建
 
@@ -219,38 +187,25 @@ DeepSeek Harness
 
 ```sh
 pnpm install
-pnpm typecheck
-pnpm test
 pnpm build
-pnpm build:engine:all   # 或 build:engine 只构建本机
+pnpm build:engine:all
+pnpm check
 ```
 
-引擎是 `engine/` 下的独立 Go module；`cd engine && go test ./...`。
+Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 FSEvents 版本需要 cgo，由 macOS CI 构建。
 
 ## 限制
 
-* 只索引文件名、路径、大小、修改时间，**不索引内容**；内容检索请用 `grep`。
-* 只覆盖配置的根目录，不是文件系统驱动。
-* Linux inotify 每个目录一个描述符；几十万目录的主目录可能超过内核上限。插件会报警告，快照仍可用，重建可以补齐。
-* WSL 写 `/mnt/c` 可能不产生 Windows 侧通知（Windows 监听看不到 9p 写入方的变更流），需显式重建。
-* 网络共享只有在能当普通目录访问时才会被扫描；没有 SMB 专用变更源。
-* macOS 随包二进制使用 FSEvents（递归）；`CGO_ENABLED=0` 构建回退到 kqueue（每目录一个描述符，上限 4,096）。两种模式的内容变更都靠周期重建兜底。
-
-## 路线图
-
-1. macOS FSEvents 监听。
-2. 有卷读取权限时的 Windows USN/MFT 快速枚举；停机后按 USN 日志补齐。
-3. 专用 Web GUI 面板（表格、列排序、过滤、预览、插入为 `@file`）。
-4. 可选的小写名字 arena 与 trigram 预筛。
-5. 增量快照压缩与按根目录的日志。
-
-## 内存
-
-引擎是单个 Go 进程，遵循标准 `GOMEMLIMIT` / `GOGC` 环境变量。124 万条索引在默认 GC 下峰值约 700–800MB RSS；内存紧张时设 `GOMEMLIMIT=600MiB`（软上限，运行时用 CPU 换内存）或 `GOGC=50`。都不改变快照格式。
+- 内容索引只处理文本类文件；PDF、Word、图片里的文字暂时不提取。
+- 文件名索引不是文件系统驱动，只覆盖配置的根目录。
+- Linux inotify 每个目录占一个描述符，目录特别多时可能碰到内核上限；插件会报警，快照仍然可用。
+- 通过 WSL 写入 `/mnt/c` 的文件，Windows 端可能收不到通知，需要重建对应根目录。
+- 会话内容来自本地日志；如果会话还没落盘，搜不到最新几条消息。
+- macOS 的发布版二进制用 FSEvents；`CGO_ENABLED=0` 构建只有 kqueue，目录上限 4096。
 
 ## 安全与隐私
 
-索引完全本地：不联网、不埋点、不上传。快照里是文件名和路径，请把状态目录当私有数据；介意的话别把它纳入备份。插件绝不修改、移动或删除被索引的文件。
+索引完全在本地，不联网、不上传、不埋点。快照和内容数据库里有文件名、路径和正文，请把它们当作私有数据。插件不会修改、移动或删除被索引的文件。
 
 ## 许可证
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 — 2026-11-10
+
+* Content search: text-file bodies and DSH session messages are indexed into a local SQLite FTS5 database; `locator_find` returns snippets plus `sessionId`/`messageId`.
+* The panel has a “搜内容 / Content” mode. File hits open/reveal; session hits call `uiWorkspace.openSession(sessionId)` and scroll to the matched text.
+* New `/dsh-locator/content` route; content build runs after the name scan and reports progress.
+* Chinese README rewritten from scratch in natural Chinese, with the new content/jump behaviour documented.
+
 ## 0.5.3 — 2026-11-10
 
 * `memoryLimitMB` config (and `indexd --memory-limit-mb`) applies a soft Go heap limit; 0 leaves `GOMEMLIMIT`/`GOGC` in charge.

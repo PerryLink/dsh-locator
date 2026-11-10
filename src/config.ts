@@ -25,6 +25,16 @@ export interface Config {
   scanWorkers: number
   /** Soft Go heap limit in MiB for the engine; 0 leaves it to GOMEMLIMIT/GOGC. */
   memoryLimitMB: number
+  /** Index text-file bodies and DSH session messages into the content database. */
+  contentIndex: boolean
+  /** Maximum bytes read from one text file. */
+  contentMaxFileBytes: number
+  /** Maximum text files indexed per build; 0 means no cap. */
+  contentMaxFiles: number
+  /** Most recent session logs indexed; 0 means all. */
+  contentMaxSessions: number
+  /** Extra session directories; empty means $DSH_HOME/sessions. */
+  contentSessionDirs: string[]
   /**
    * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
    * requires running DSH as administrator). Falls back automatically.
@@ -61,6 +71,11 @@ export const Config: Schema<Config> = Schema.object({
   refreshIntervalMs: Schema.number().default(1_800_000),
   scanWorkers: Schema.number().default(0),
   memoryLimitMB: Schema.number().default(0),
+  contentIndex: Schema.boolean().default(true),
+  contentMaxFileBytes: Schema.number().default(1_000_000),
+  contentMaxFiles: Schema.number().default(50_000),
+  contentMaxSessions: Schema.number().default(50),
+  contentSessionDirs: Schema.array(Schema.string()).default([]),
   windowsUsn: Schema.boolean().default(false),
   stateDir: Schema.string().default(''),
   binaryPath: Schema.string().default(''),
