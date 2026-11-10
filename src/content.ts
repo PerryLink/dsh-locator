@@ -127,9 +127,9 @@ export class ContentIndex {
   private async full(generation: number): Promise<void> {
     this.open(true)
     this.totalBytes = 0
-    await this.indexFiles(generation)
-    if (generation !== this.generation) return
     await this.indexSessions(generation)
+    if (generation !== this.generation) return
+    await this.indexFiles(generation)
     if (generation !== this.generation) return
     this.finish()
   }
@@ -208,7 +208,7 @@ export class ContentIndex {
       const page = await this.rt.dump(after, 2_000)
       for (const entry of page.entries) {
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
-        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path)) continue
         if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) break
         const row = this.readFileDoc(entry.path, entry.name, entry.mtime)
         if (row === null) continue
@@ -231,7 +231,7 @@ export class ContentIndex {
       const page = await this.rt.dump(after, 2_000)
       for (const entry of page.entries) {
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
-        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path)) continue
         if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) break
         const key = `file:${entry.path}`
         seen.add(key)
@@ -376,6 +376,10 @@ function sessionFiles(roots: string[]): Array<{ path: string; mtime: number }> {
   for (const root of roots) walk(root, 0)
   out.sort((a, b) => b.mtime - a.mtime)
   return out
+}
+
+function contentSkipPath(path: string): boolean {
+  return path.includes('/.dsh/') || path.includes('\\.dsh\\')
 }
 
 function messageOf(error: unknown): string {

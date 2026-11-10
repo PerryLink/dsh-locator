@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 — 2026-11-10
+
+* Content full builds index session messages **before** the much larger file set, so conversation search and jumps become available early.
+* Content indexing skips the `.dsh` directory itself; it was re-indexing session projection caches and config as ordinary files.
+* Incremental refresh keeps the same order.
+
 ## 0.7.0 — 2026-11-10
 
 * Incremental content refresh: `docs_meta`/`sources` store each file/session mtime, so the 2-minute background refresh only re-reads changed sources.
