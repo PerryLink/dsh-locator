@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 — 2026-11-10
+
+* Incremental content refresh: `docs_meta`/`sources` store each file/session mtime, so the 2-minute background refresh only re-reads changed sources.
+* `locator_reindex` tool and `/dsh-locator/content/rebuild` route: incremental by default, `full: true` drops and rebuilds the database.
+* `contentRefreshMs` config (default 120000; 0 disables auto refresh).
+* Empty `contentSessionDirs` in tests no longer falls back to the real `$DSH_HOME/sessions`; an explicit empty list means no sessions.
+* Engine rebuilt at 0.7.0 so `locator_status` no longer reports 0.5.3.
+
 ## 0.6.3 — 2026-11-10
 
 * Content-index defaults enlarged 4×: `contentMaxFileBytes` 1MB → 4MB, `contentMaxFiles` 50k → 200k, `contentMaxSessions` 50 → 200. All remain configurable.

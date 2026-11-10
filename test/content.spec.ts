@@ -58,4 +58,27 @@ describe('ContentIndex', () => {
     const hits = content.search('launch friday', 5)
     expect(hits.some(hit => hit.kind === 'session' && hit.sessionId === 'session-abc' && hit.messageId === 'msg-2')).toBe(true)
   })
+
+  it('refreshes only changed files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-delta-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-delta-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'delta.md')
+    writeFileSync(path, 'first generation content')
+    let mtime = Date.now()
+    let entries = [{ path, name: 'delta.md', size: 24, mtime, ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    for (let i = 0; i < 200 && content.status().building; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    expect(content.search('first generation', 5).length).toBeGreaterThan(0)
+    writeFileSync(path, 'second generation content')
+    mtime += 1_000
+    entries = [{ path, name: 'delta.md', size: 25, mtime, ext: 'md', dir: false }]
+    content.refresh()
+    for (let i = 0; i < 200 && content.status().building; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    expect(content.search('second generation', 5).length).toBeGreaterThan(0)
+    expect(content.search('first generation', 5).length).toBe(0)
+  })
 })

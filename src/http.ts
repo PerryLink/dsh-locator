@@ -73,6 +73,15 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
     if (content !== undefined) {
       scoped.effect(() => server.register({
         kind: 'exact',
+        path: '/dsh-locator/content/rebuild',
+        handler: handler(scoped, async body => {
+          const full = body.full === true
+          const started = full ? content.rebuild() : content.refreshNow()
+          return started ? { ok: true, started: true, full } : { ok: false, error: 'a content build is already running' }
+        }),
+      }))
+      scoped.effect(() => server.register({
+        kind: 'exact',
         path: '/dsh-locator/content',
         handler: handler(scoped, async body => {
           const query = typeof body.query === 'string' ? body.query : ''

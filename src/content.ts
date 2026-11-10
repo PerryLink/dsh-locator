@@ -1,10 +1,11 @@
 /**
  * Content search: text files and DSH session messages in SQLite FTS5.
  *
- * The file-name index stays in the Go engine. This store is built beside it:
- * the engine's `dump` RPC supplies the already-scanned file list, Node reads
- * text files and decompresses `session.v4.jsonl.zstd` logs, and SQLite's
- * trigram tokenizer gives substring/CJK search with snippets.
+ * File names stay in the Go engine. This store is built from the engine's
+ * `dump` RPC plus the session logs: Node reads text bodies, decompresses
+ * `session.v4.jsonl.zstd`, and SQLite's trigram tokenizer gives substring and
+ * CJK search. A meta table stores each source's mtime so refresh() only
+ * re-reads what changed; rebuild() drops and rebuilds everything.
  * @module dsh-locator/content
  */
 
@@ -12,6 +13,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
+import { DatabaseSync } from 'node:sqlite'
 import type { LocatorRuntime } from './runtime.ts'
 
 const TEXT_EXTENSIONS = new Set([
@@ -23,7 +25,6 @@ const TEXT_EXTENSIONS = new Set([
   '.sql', '.graphql', '.proto', '.tex', '.org', '.adoc',
 ])
 
-/** One searchable document. */
 export interface ContentHit {
   kind: 'file' | 'session'
   path: string
@@ -34,7 +35,6 @@ export interface ContentHit {
   score: number
 }
 
-/** Build progress shown by the panel/status. */
 export interface ContentState {
   building: boolean
   files: number
@@ -45,135 +45,163 @@ export interface ContentState {
   updatedAt: number
 }
 
-/** The content store; one instance per plugin. */
+export interface ContentOptions {
+  stateDir: string
+  sessionDirs?: string[] | undefined
+  maxFileBytes: number
+  maxTotalBytes?: number
+  maxFiles: number
+  maxSessions: number
+}
+
+interface DocRow {
+  key: string
+  body: string
+  kind: 'file' | 'session'
+  path: string
+  title: string
+  sessionId: string | null
+  messageId: string | null
+  mtime: number
+}
+
 export class ContentIndex {
-  private db: import('node:sqlite').DatabaseSync | null = null
+  private db: DatabaseSync | null = null
   private readonly state: ContentState = { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', updatedAt: 0 }
   private generation = 0
+  private totalBytes = 0
+  private timer: NodeJS.Timeout | undefined
 
-  constructor(private readonly rt: LocatorRuntime, private readonly options: {
-    stateDir: string
-    sessionDirs: string[]
-    maxFileBytes: number
-    maxTotalBytes?: number
-    maxFiles: number
-    maxSessions: number
-  }) {}
+  constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
 
   status(): ContentState { return { ...this.state } }
 
-  /** Close the database when the plugin unmounts. */
+  /** Start periodic incremental refreshes; 0 disables. */
+  startAutoRefresh(ms: number): void {
+    if (ms <= 0 || this.timer !== undefined) return
+    this.timer = setInterval(() => this.refresh(), ms)
+  }
+
+  /** Queue a full rebuild; false when one is already running. */
+  rebuild(): boolean {
+    if (this.state.building) return false
+    this.start()
+    return true
+  }
+
+  /** Queue an incremental refresh; false when one is already running. */
+  refreshNow(): boolean {
+    if (this.state.building) return false
+    this.refresh()
+    return true
+  }
+
   close(): void {
+    if (this.timer !== undefined) { clearInterval(this.timer); this.timer = undefined }
     this.generation++
     this.db?.close()
     this.db = null
     this.state.building = false
   }
 
-  /** Build in the background; stale generations stop at their next checkpoint. */
-  start(): void {
+  /** Build everything from scratch. */
+  start(): void { this.begin('full') }
+
+  /** Re-read changed files/sessions; open the DB when this is the first run. */
+  refresh(): void { this.begin(this.db === null ? 'full' : 'incremental') }
+
+  private begin(mode: 'full' | 'incremental'): void {
+    if (this.state.building) return
     const generation = ++this.generation
     this.state.building = true
-    this.state.truncated = false
     this.state.error = ''
-    void this.build(generation).catch(error => {
+    this.state.truncated = false
+    const run = mode === 'full' ? this.full(generation) : this.incremental(generation)
+    void run.catch(error => {
       if (generation !== this.generation) return
       this.state.error = messageOf(error)
       this.state.building = false
     })
   }
 
-  private async build(generation: number): Promise<void> {
-    const { DatabaseSync } = await import('node:sqlite')
-    const path = join(this.options.stateDir, 'content.db')
+  private async full(generation: number): Promise<void> {
+    this.open(true)
+    this.totalBytes = 0
+    await this.indexFiles(generation)
+    if (generation !== this.generation) return
+    await this.indexSessions(generation)
+    if (generation !== this.generation) return
+    this.finish()
+  }
+
+  private async incremental(generation: number): Promise<void> {
+    this.open(false)
+    this.totalBytes = Number((this.db!.prepare('SELECT COALESCE(SUM(length(body)), 0) AS n FROM docs').get() as { n: number }).n)
+    await this.refreshFiles(generation)
+    if (generation !== this.generation) return
+    await this.refreshSessions(generation)
+    if (generation !== this.generation) return
+    this.finish()
+  }
+
+  private open(fresh: boolean): void {
     mkdirSync(this.options.stateDir, { recursive: true })
     this.db?.close()
-    this.db = new DatabaseSync(path)
+    this.db = new DatabaseSync(join(this.options.stateDir, 'content.db'))
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = OFF')
-    this.db.exec('DROP TABLE IF EXISTS docs')
-    this.db.exec(`CREATE VIRTUAL TABLE docs USING fts5(
-      body,
-      kind UNINDEXED,
-      path UNINDEXED,
-      title UNINDEXED,
-      session_id UNINDEXED,
-      message_id UNINDEXED,
-      tokenize = 'trigram'
-    )`)
-    const insert = this.db.prepare('INSERT INTO docs (body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?)')
-    const flush = (rows: Array<[string, string, string, string, string | null, string | null]>) => {
-      if (rows.length === 0) return
-      this.db!.exec('BEGIN')
-      try {
-        for (const row of rows) insert.run(...row)
-        this.db!.exec('COMMIT')
-      } catch (error) {
-        this.db!.exec('ROLLBACK')
-        throw error
-      }
+    if (fresh) {
+      this.db.exec('DROP TABLE IF EXISTS docs')
+      this.db.exec('DROP TABLE IF EXISTS docs_meta')
+      this.db.exec('DROP TABLE IF EXISTS sources')
     }
+    this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
+      body, kind UNINDEXED, path UNINDEXED, title UNINDEXED,
+      session_id UNINDEXED, message_id UNINDEXED, tokenize = 'trigram'
+    )`)
+    this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT)')
+    this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
+  }
 
-    this.state.truncated = false
-    await this.indexSessions(flush, generation)
-    if (generation !== this.generation) return
-    await this.indexFiles(flush, generation)
-    if (generation !== this.generation) return
+  private finish(): void {
+    const counts = this.db!.prepare("SELECT kind, COUNT(*) AS n FROM docs_meta GROUP BY kind").all() as Array<{ kind: string; n: number }>
+    this.state.files = Number(counts.find(row => row.kind === 'file')?.n ?? 0)
+    this.state.messages = Number(counts.find(row => row.kind === 'session')?.n ?? 0)
+    this.state.sessions = Number((this.db!.prepare('SELECT COUNT(*) AS n FROM sources').get() as { n: number }).n)
     this.state.building = false
     this.state.updatedAt = Date.now()
   }
 
-  private totalBytes = 0
-
-  /** Account one body against the total cap; false means the cap was reached. */
-  private account(body: string): boolean {
+  private addDoc(row: DocRow): boolean {
     const cap = this.options.maxTotalBytes ?? 0
-    if (cap > 0 && this.totalBytes + body.length > cap) {
+    if (cap > 0 && this.totalBytes + row.body.length > cap) {
       this.state.truncated = true
       return false
     }
-    this.totalBytes += body.length
+    this.deleteDoc(row.key)
+    const meta = this.db!.prepare('INSERT INTO docs_meta (doc_key, path, mtime, kind) VALUES (?, ?, ?, ?)').run(row.key, row.path, row.mtime, row.kind)
+    const rowid = meta.lastInsertRowid
+    this.db!.prepare('INSERT INTO docs (rowid, body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(rowid, row.body, row.kind, row.path, row.title, row.sessionId, row.messageId)
+    this.totalBytes += row.body.length
     return true
   }
 
-  private async indexSessions(flush: (rows: Array<[string, string, string, string, string | null, string | null]>) => void, generation: number): Promise<void> {
-    const files: Array<{ path: string; mtime: number }> = []
-    for (const root of this.sessionRoots()) {
-      walkSessions(root, files, 0)
-    }
-    files.sort((a, b) => b.mtime - a.mtime)
-    const limit = this.options.maxSessions > 0 ? this.options.maxSessions : files.length
-    let batch: Array<[string, string, string, string, string | null, string | null]> = []
-    for (const file of files.slice(0, limit)) {
-      if (generation !== this.generation) return
-      let text: string
-      try { text = zstdDecompressSync(readFileSync(file.path)).toString('utf8') } catch { continue }
-      const sessionId = basename(dirname(file.path))
-      let title = ''
-      let messages = 0
-      for (const line of text.split('\n')) {
-        if (!line) continue
-        let event: { type?: string; data?: Record<string, unknown> }
-        try { event = JSON.parse(line) } catch { continue }
-        const extracted = messageText(event)
-        if (extracted === undefined) continue
-        if (title === '') title = extracted.text.replace(/\s+/g, ' ').slice(0, 90)
-        const body = extracted.text.slice(0, 8_000)
-        if (!this.account(body)) break
-        batch.push([body, 'session', file.path, title || sessionId, sessionId, extracted.id])
-        messages++
-        if (batch.length >= 200) { flush(batch); batch = [] }
-      }
-      if (this.state.truncated) { flush(batch); return }
-      this.state.sessions++
-      this.state.messages += messages
-    }
-    flush(batch)
+  private deleteDoc(key: string): void {
+    const row = this.db!.prepare('SELECT rowid FROM docs_meta WHERE doc_key = ?').get(key) as { rowid: number } | undefined
+    if (row === undefined) return
+    this.db!.prepare('DELETE FROM docs WHERE rowid = ?').run(row.rowid)
+    this.db!.prepare('DELETE FROM docs_meta WHERE rowid = ?').run(row.rowid)
   }
 
-  private async indexFiles(flush: (rows: Array<[string, string, string, string, string | null, string | null]>) => void, generation: number): Promise<void> {
+  private deletePath(path: string): void {
+    const rows = this.db!.prepare('SELECT rowid FROM docs_meta WHERE path = ?').all(path) as Array<{ rowid: number }>
+    const delDoc = this.db!.prepare('DELETE FROM docs WHERE rowid = ?')
+    const delMeta = this.db!.prepare('DELETE FROM docs_meta WHERE rowid = ?')
+    for (const row of rows) { delDoc.run(row.rowid); delMeta.run(row.rowid) }
+  }
+
+  private async indexFiles(generation: number): Promise<void> {
     let after = 0
-    let batch: Array<[string, string, string, string, string | null, string | null]> = []
     let seen = 0
     for (;;) {
       if (generation !== this.generation) return
@@ -182,29 +210,104 @@ export class ContentIndex {
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
         if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
         if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) break
-        let raw: string
-        try { raw = readFileSync(entry.path, 'utf8') } catch { continue }
-        if (raw.includes('\u0000')) continue
-        const body = raw.slice(0, this.options.maxFileBytes)
-        if (!this.account(body)) { flush(batch); return }
+        const row = this.readFileDoc(entry.path, entry.name, entry.mtime)
+        if (row === null) continue
         seen++
-        this.state.files++
-        batch.push([body, 'file', entry.path, entry.name, null, null])
-        if (batch.length >= 200) { flush(batch); batch = [] }
+        if (!this.addDoc(row)) return
       }
       after = page.next
       if (page.done || page.entries.length === 0) break
     }
-    flush(batch)
   }
 
-  private sessionRoots(): string[] {
-    if (this.options.sessionDirs.length > 0) return this.options.sessionDirs
-    const home = process.env.DSH_HOME || join(homedir(), '.dsh')
-    return [join(home, 'sessions')]
+  private async refreshFiles(generation: number): Promise<void> {
+    const meta = new Map<string, number>()
+    for (const row of this.db!.prepare("SELECT doc_key, mtime FROM docs_meta WHERE kind = 'file'").all() as Array<{ doc_key: string; mtime: number }>) meta.set(row.doc_key, row.mtime)
+    const seen = new Set<string>()
+    let after = 0
+    let indexed = 0
+    for (;;) {
+      if (generation !== this.generation) return
+      const page = await this.rt.dump(after, 2_000)
+      for (const entry of page.entries) {
+        if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
+        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+        if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) break
+        const key = `file:${entry.path}`
+        seen.add(key)
+        indexed++
+        if (meta.get(key) === entry.mtime) continue
+        this.deleteDoc(key)
+        const row = this.readFileDoc(entry.path, entry.name, entry.mtime)
+        if (row !== null && !this.addDoc(row)) return
+      }
+      after = page.next
+      if (page.done || page.entries.length === 0) break
+    }
+    for (const key of meta.keys()) if (!seen.has(key)) this.deleteDoc(key)
   }
 
-  /** Query the FTS table; short queries fall back to LIKE because trigram needs 3 chars. */
+  private readFileDoc(path: string, name: string, mtime: number): DocRow | null {
+    let raw: string
+    try { raw = readFileSync(path, 'utf8') } catch { return null }
+    if (raw.includes('\u0000')) return null
+    return { key: `file:${path}`, body: raw.slice(0, this.options.maxFileBytes), kind: 'file', path, title: name, sessionId: null, messageId: null, mtime }
+  }
+
+  private async indexSessions(generation: number): Promise<void> {
+    const files = sessionFiles(this.sessionRoots()).slice(0, this.options.maxSessions > 0 ? this.options.maxSessions : undefined)
+    for (const file of files) {
+      if (generation !== this.generation) return
+      this.deletePath(file.path)
+      if (!this.indexSessionFile(file)) return
+      this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+    }
+  }
+
+  private async refreshSessions(generation: number): Promise<void> {
+    const known = new Map<string, number>()
+    for (const row of this.db!.prepare('SELECT path, mtime FROM sources').all() as Array<{ path: string; mtime: number }>) known.set(row.path, row.mtime)
+    const files = sessionFiles(this.sessionRoots()).slice(0, this.options.maxSessions > 0 ? this.options.maxSessions : undefined)
+    const present = new Set<string>()
+    for (const file of files) {
+      if (generation !== this.generation) return
+      present.add(file.path)
+      if (known.get(file.path) === file.mtime) continue
+      this.deletePath(file.path)
+      if (!this.indexSessionFile(file)) return
+      this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+    }
+    for (const path of known.keys()) {
+      if (present.has(path)) continue
+      this.deletePath(path)
+      this.db!.prepare('DELETE FROM sources WHERE path = ?').run(path)
+    }
+  }
+
+  private indexSessionFile(file: { path: string; mtime: number }): boolean {
+    let text: string
+    try { text = zstdDecompressSync(readFileSync(file.path)).toString('utf8') } catch { return true }
+    const sessionId = basename(dirname(file.path))
+    let title = ''
+    for (const line of text.split('\n')) {
+      if (!line) continue
+      let event: { type?: string; data?: Record<string, unknown> }
+      try { event = JSON.parse(line) } catch { continue }
+      const extracted = messageText(event)
+      if (extracted === undefined) continue
+      if (title === '') title = extracted.text.replace(/\s+/g, ' ').slice(0, 90)
+      const body = extracted.text.slice(0, 8_000)
+      const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, mtime: file.mtime }
+      if (!this.addDoc(row)) return false
+    }
+    return true
+  }
+
+  sessionRoots(): string[] {
+    if (this.options.sessionDirs !== undefined) return this.options.sessionDirs
+    return [join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'sessions')]
+  }
+
   search(query: string, limit: number): ContentHit[] {
     if (this.db === null) return []
     const text = query.trim()
@@ -253,22 +356,26 @@ function messageText(event: { type?: string; data?: Record<string, unknown> }): 
     .join('\n')
     .trim()
   if (text === '') return undefined
-  const id = event.type === 'user/message'
-    ? String(data.id ?? '')
-    : String(message.id ?? '')
+  const id = event.type === 'user/message' ? String(data.id ?? '') : String(message.id ?? '')
   return { text, id: id || `seq-${String(data.seq ?? '')}` }
 }
 
-function walkSessions(root: string, out: Array<{ path: string; mtime: number }>, depth: number): void {
-  if (depth > 4 || !existsSync(root)) return
-  let entries
-  try { entries = readdirSync(root, { withFileTypes: true }) } catch { return }
-  for (const entry of entries) {
-    const path = join(root, entry.name)
-    if (entry.isDirectory()) { walkSessions(path, out, depth + 1); continue }
-    if (!entry.isFile() || !entry.name.endsWith('.v4.jsonl.zstd')) continue
-    try { out.push({ path, mtime: statSync(path).mtimeMs }) } catch { /* ignore */ }
+function sessionFiles(roots: string[]): Array<{ path: string; mtime: number }> {
+  const out: Array<{ path: string; mtime: number }> = []
+  const walk = (root: string, depth: number): void => {
+    if (depth > 4 || !existsSync(root)) return
+    let entries
+    try { entries = readdirSync(root, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      const path = join(root, entry.name)
+      if (entry.isDirectory()) { walk(path, depth + 1); continue }
+      if (!entry.isFile() || !entry.name.endsWith('.v4.jsonl.zstd')) continue
+      try { out.push({ path, mtime: statSync(path).mtimeMs }) } catch { /* ignore */ }
+    }
   }
+  for (const root of roots) walk(root, 0)
+  out.sort((a, b) => b.mtime - a.mtime)
+  return out
 }
 
 function messageOf(error: unknown): string {

@@ -10,6 +10,7 @@ import type { Config } from './config.ts'
 import { ContentIndex } from './content.ts'
 import { makeExportTool } from './export.ts'
 import { makeFindTool } from './find.ts'
+import { makeReindexTool } from './reindex.ts'
 import { registerHttp } from './http.ts'
 import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
@@ -39,7 +40,7 @@ export function apply(ctx: Context, config: Config): void {
   const content = config.contentIndex
     ? new ContentIndex(rt, {
         stateDir,
-        sessionDirs: config.contentSessionDirs,
+        sessionDirs: config.contentSessionDirs.length > 0 ? config.contentSessionDirs : undefined,
         maxFileBytes: config.contentMaxFileBytes,
         maxTotalBytes: config.contentMaxTotalBytes,
         maxFiles: config.contentMaxFiles,
@@ -52,7 +53,7 @@ export function apply(ctx: Context, config: Config): void {
     const timer = setTimeout(() => {
       rt.start()
       logger.info(`index roots: ${roots.join(', ')} (state ${stateDir})`)
-      if (content !== undefined) void startContent(rt, content, logger)
+      if (content !== undefined) void startContent(rt, content, logger, config.contentRefreshMs)
     }, 1500)
     return () => {
       clearTimeout(timer)
@@ -65,14 +66,17 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(makeStatusTool(rt))
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
-  if (content !== undefined) ctx.tools.register(makeFindTool(content))
+  if (content !== undefined) {
+    ctx.tools.register(makeFindTool(content))
+    ctx.tools.register(makeReindexTool(content))
+  }
 
   // The Web GUI panel is optional: profiles without a Web server keep the
   // three tools and never mount an HTTP route.
   registerHttp(ctx, rt, content)
 }
 
-async function startContent(rt: LocatorRuntime, content: ContentIndex, logger: { info(message: string): void }): Promise<void> {
+async function startContent(rt: LocatorRuntime, content: ContentIndex, logger: { info(message: string): void }, refreshMs: number): Promise<void> {
   try {
     await rt.waitReady()
     for (let i = 0; i < 900; i++) {
@@ -81,6 +85,7 @@ async function startContent(rt: LocatorRuntime, content: ContentIndex, logger: {
       await new Promise(resolve => setTimeout(resolve, 2_000))
     }
     content.start()
+    content.startAutoRefresh(refreshMs)
     logger.info('content index started')
   } catch (error) {
     logger.info(`content index skipped: ${error instanceof Error ? error.message : String(error)}`)

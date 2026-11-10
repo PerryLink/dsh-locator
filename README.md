@@ -57,7 +57,7 @@ dsh plugin --profile web add /绝对路径/dsh-locator
 
 # 从 tarball
 npm pack
-dsh plugin --profile web add /绝对路径/dsh-locator-0.6.3.tgz
+dsh plugin --profile web add /绝对路径/dsh-locator-0.7.0.tgz
 ```
 
 npm 包里已经带了六个平台的预编译引擎：`linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64`。
@@ -91,12 +91,13 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 - 文件命中带路径，直接打开或定位；
 - 会话命中带 `sessionId` 和 `messageId`，可以跳回那次对话；
 - 中文和英文子串都能搜，不要求分词。
+- 启动后每 2 分钟做一次增量刷新，只重读 mtime 变化的文件/会话；也可以手动触发全量重建。
 
 内容索引在后台构建，刚启动时可能只覆盖了一部分，工具和面板都会显示构建状态。默认只索引 4MB 以内的文本文件，最多 20 万个文件、最近 200 个会话，内容总量上限 2GB；这些都能在配置里改。
 
 ## Web 面板
 
-![搜索面板：按路径过滤 Markdown，显示命中数、耗时和排序](docs/assets/panel-zh.png)
+![搜索面板：勾选“搜内容”后在文件正文中搜索，显示命中片段和路径](docs/assets/panel-zh.png)
 
 在 Web GUI 里按 `Ctrl+Shift+F`，或者点侧栏底部的放大镜。
 
@@ -116,7 +117,8 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 | `locator_search` | 按文件名/路径搜索，支持 `ext:`、`size:`、`dm:`、`path:` 等过滤。 |
 | `locator_find` | 按文件正文和会话内容搜索，返回片段与 `sessionId`/`messageId`。 |
 | `locator_status` | 查看根目录、条目数、监听状态、内容索引进度和引擎版本。 |
-| `locator_rebuild` | 后台重建索引；新索引就绪前，搜索继续使用旧的。 |
+| `locator_rebuild` | 后台重建文件名索引；新索引就绪前，搜索继续使用旧的。 |
+| `locator_reindex` | 重建/刷新内容索引：默认增量，`full: true` 全量。 |
 | `locator_export` | 把文件名索引导出成只读 SQLite，方便外部工具查询。 |
 
 ### 查询语法
@@ -151,6 +153,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentMaxTotalBytes` | 2000000000 | 内容库总量上限；0 表示不限制。 |
 | `contentMaxFiles` | 200000 | 最多索引多少个文件；0 表示不限制。 |
 | `contentMaxSessions` | 200 | 最多索引最近多少个会话；0 表示全部。 |
+| `contentRefreshMs` | 120000 | 内容增量刷新周期；0 关闭自动刷新。 |
 | `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
 | `stateDir` | 系统缓存 | 快照和内容数据库的位置。 |
 

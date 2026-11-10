@@ -76,7 +76,7 @@ The first scan of a large home directory reads the disk; later starts load the s
 
 ## Web search panel
 
-![dsh-locator search panel: path-filtered Markdown results with hit count, timing and sortable columns](docs/assets/panel-en.png)
+![dsh-locator search panel: content mode checked, showing body matches and snippets](docs/assets/panel-en.png)
 
 Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot. The overlay queries the same index through two same-origin host routes (`POST /dsh-locator/search`, `POST /dsh-locator/status`), so it needs no second server and no extra port.
 
@@ -98,7 +98,7 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 
 ### Content search
 
-`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and scroll to the matched text. The index is built in the background after the name scan; text files are capped by `contentMaxFileBytes`, the total body store by `contentMaxTotalBytes`, and the most recent `contentMaxSessions` session logs are indexed by default.
+`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and scroll to the matched text. The index is built in the background after the name scan; text files are capped by `contentMaxFileBytes`, the total body store by `contentMaxTotalBytes`, and the most recent `contentMaxSessions` session logs are indexed by default. An incremental refresh runs every `contentRefreshMs` (2 minutes) and only re-reads changed files/sessions; `locator_reindex` triggers it manually (`full: true` rebuilds everything).
 
 ### Query language
 

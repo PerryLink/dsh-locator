@@ -31,6 +31,8 @@ export interface Config {
   contentMaxFileBytes: number
   /** Stop adding content after this many body bytes; 0 means unlimited. */
   contentMaxTotalBytes: number
+  /** Incremental content refresh cadence; 0 disables it. */
+  contentRefreshMs: number
   /** Maximum text files indexed per build; 0 means no cap. */
   contentMaxFiles: number
   /** Most recent session logs indexed; 0 means all. */
@@ -76,6 +78,7 @@ export const Config: Schema<Config> = Schema.object({
   contentIndex: Schema.boolean().default(true),
   contentMaxFileBytes: Schema.number().default(4_000_000),
   contentMaxTotalBytes: Schema.number().default(2_000_000_000),
+  contentRefreshMs: Schema.number().default(120_000),
   contentMaxFiles: Schema.number().default(200_000),
   contentMaxSessions: Schema.number().default(200),
   contentSessionDirs: Schema.array(Schema.string()).default([]),

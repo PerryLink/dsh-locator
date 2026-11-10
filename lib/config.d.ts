@@ -29,6 +29,8 @@ export interface Config {
     contentMaxFileBytes: number;
     /** Stop adding content after this many body bytes; 0 means unlimited. */
     contentMaxTotalBytes: number;
+    /** Incremental content refresh cadence; 0 disables it. */
+    contentRefreshMs: number;
     /** Maximum text files indexed per build; 0 means no cap. */
     contentMaxFiles: number;
     /** Most recent session logs indexed; 0 means all. */

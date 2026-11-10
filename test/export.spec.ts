@@ -47,6 +47,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
       contentIndex: false,
       contentMaxFileBytes: 1_000_000,
     contentMaxTotalBytes: 0,
+    contentRefreshMs: 120_000,
       contentMaxFiles: 0,
       contentMaxSessions: 0,
       contentSessionDirs: [],
