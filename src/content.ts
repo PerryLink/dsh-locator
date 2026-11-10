@@ -8,7 +8,7 @@
  * @module dsh-locator/content
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
@@ -83,6 +83,7 @@ export class ContentIndex {
   private async build(generation: number): Promise<void> {
     const { DatabaseSync } = await import('node:sqlite')
     const path = join(this.options.stateDir, 'content.db')
+    mkdirSync(this.options.stateDir, { recursive: true })
     this.db?.close()
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')

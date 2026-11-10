@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2 — 2026-11-10
+
+* Content database now creates `stateDir` before opening SQLite; a fresh profile with no engine snapshot yet no longer fails with `unable to open database file`.
+* No other change.
+
 ## 0.6.1 — 2026-11-10
 
 * The client now injects `uiWorkspace`, so double-clicking a session content hit actually calls `openSession(sessionId)` instead of falling back to copying the log path.
