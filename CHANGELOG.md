@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.7 — 2026-11-11
+
+Documentation release.
+
+* README (zh/en) rewritten against the 0.7.x behaviour and measurements: stale content defaults (1 MB / 1 GB / 100 sessions, previously documented as 4 MB / 2 GB / 200), refreshed performance tables, corrected `locator_status` scope, comparison with Everything/Spotlight/grep, resource tuning, troubleshooting, version compatibility and roadmap.
+* Spanish, Portuguese and Hindi READMEs brought to the same structure and section set.
+* The npm package page therefore receives the current documentation; no runtime changes.
+
 ## 0.7.6 — 2026-11-11
 
 Remaining-risk pass: sharing a cache directory, engine re-scans, and platform coverage.
