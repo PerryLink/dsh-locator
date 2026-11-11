@@ -2,9 +2,9 @@
 
 # 🔎 dsh-locator
 
-**Whole-disk, millisecond file search for DeepSeek Harness — without Everything.**
+**Search names when you remember the name, contents when you remember the phrase — then open the file or jump back to the conversation.**
 
-A self-built cross-platform index (Windows USN/MFT · macOS FSEvents · Linux inotify), six agent tools — names, contents and sessions — and a sortable Web panel.
+Whole-disk file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) with its **own** index: no Everything install, no `es.exe`, one set of tools and one panel across Windows, macOS and Linux.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -12,7 +12,8 @@ A self-built cross-platform index (Windows USN/MFT · macOS FSEvents · Linux in
 [![version](https://img.shields.io/github/v/tag/PerryLink/dsh-locator?label=version)](https://github.com/PerryLink/dsh-locator/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![DSH plugin](https://img.shields.io/badge/dsh--plugin-✅-green)](https://github.com/topics/dsh-plugin)
-[![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-brightgreen.svg)](#)
+[![Awesome DSH](https://img.shields.io/badge/awesome--dsh--plugin-listed-2ea44f)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
+[![Node](https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%3E%3D24-brightgreen.svg)](#version-and-compatibility)
 [![Gitee](https://img.shields.io/badge/Gitee-mirror-c71d23?logo=gitee)](https://gitee.com/perrylink/dsh-locator)
 [![GitCode](https://img.shields.io/badge/GitCode-mirror-1f6feb)](https://gitcode.com/PerryLink/dsh-locator)
 
@@ -24,19 +25,62 @@ dsh plugin --profile web add dsh-locator
 
 </div>
 
-> **Official repository:** [GitHub `PerryLink/dsh-locator`](https://github.com/PerryLink/dsh-locator). Gitee and GitCode are automatically synced mirrors; GitHub is the source of truth.
->
-> Part of the [DSH plugin family](https://github.com/PerryLink) (Apache-2.0). If it helps, **a ⭐ helps the next person find it** — nothing is gated behind it.
+> **Official repository:** [GitHub `PerryLink/dsh-locator`](https://github.com/PerryLink/dsh-locator); Gitee and GitCode are automatically synced mirrors, GitHub is the source of truth. Part of the [DSH plugin family](https://github.com/PerryLink) (Apache-2.0) and listed on [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin). A ⭐ helps the next person find it — nothing is gated behind it.
 
-A whole-disk, millisecond file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) that builds its **own** index. No Everything installation, no `es.exe`, no Everything service.
+## Contents
 
-`dsh-locator` scans the directories you choose once, keeps the result in a compact snapshot, applies filesystem changes as they happen, and answers name/path queries in tens of milliseconds across a million entries. The agent gets `locator_search`, `locator_status`, `locator_rebuild` and `locator_export`; people get a global **search panel** in the Web GUI (`Ctrl+Shift+F` or the magnifier at the sidebar foot) with sortable columns, filters, keyboard navigation and one-key path copy.
+- [At a glance](#at-a-glance)
+- [How it differs from Everything / Spotlight / grep](#how-it-differs-from-everything--spotlight--grep)
+- [Install](#install)
+- [First run](#first-run)
+- [Two searches](#two-searches)
+- [Web panel](#web-panel)
+- [Tools](#tools)
+- [Query language](#query-language)
+- [Configuration](#configuration)
+- [Performance and resources](#performance-and-resources)
+- [Platform support](#platform-support)
+- [Troubleshooting](#troubleshooting)
+- [Build from source](#build-from-source)
+- [Design](#design)
+- [Limitations](#limitations)
+- [Memory](#memory)
+- [Security and privacy](#security-and-privacy)
+- [Version and compatibility](#version-and-compatibility)
+- [Roadmap](#roadmap)
+- [License](#license)
 
-Everything inspired the *ideas*: a persistent index of file names, a query language with `ext:` / `size:` / `dm:` filters, and an updater that consumes the filesystem's own change stream. The implementation is independent and cross-platform.
+## At a glance
 
-## Why another file search
+File lookup has two shapes:
 
-`glob` and `grep` walk the workspace on every call — fine when you know the directory, slow when you remember only part of a name. Everything is excellent on Windows but is Windows-only, and wrapping it leaves macOS, Linux, WSL and remote hosts uncovered. `dsh-locator` owns the index, so the same tools work everywhere Node and Go run.
+- **You remember the name but not the location.** `glob`/`grep` walk the workspace on every call — fine when you know the directory, painful when you remember half a filename.
+- **You remember a sentence, a decision or a snippet, not the file or conversation.** A name index cannot help, and DSH session logs are first-class data too.
+
+`dsh-locator` puts both in one plugin:
+
+| Capability | How you use it |
+|---|---|
+| File name / path search | `locator_search`, or the panel's default mode |
+| File body search | `locator_find`, or the panel's **Search content** mode |
+| DSH session search | Same tools; hits carry `sessionId` / `messageId`, so the panel can jump back to the conversation |
+| Open / reveal | Tools return paths; the panel double-click reveals, `Ctrl+O` opens, `Ctrl+Enter` inserts a quoted `@"path"` into the composer |
+| External consumption | `locator_export` writes a read-only SQLite mirror |
+
+The index is local: no network calls, no telemetry, no uploads, and the plugin never modifies, moves or deletes indexed files.
+
+## How it differs from Everything / Spotlight / grep
+
+| | dsh-locator | Everything | Spotlight | `glob` / `grep` |
+|---|---|---|---|---|
+| Platforms | Windows / macOS / Linux / WSL | Windows | macOS | Cross-platform |
+| Index | Persistent, self-built | Persistent (NTFS USN) | System metadata/content index | Re-walk per call |
+| Body search | Text files + DSH session messages | Names only by default | Yes, varies by system | Yes, unindexed |
+| Session jump | Hits carry `sessionId` / `messageId` | No | No | No |
+| Agent tools | Six tools, one query language | Needs a CLI/service | Needs glue scripts | Native, no persistent index |
+| Windows speed | Close to Everything (USN optional) | Fastest and lightest | N/A | Slower than an index |
+
+In short: the **idea** behind Everything (persistent index + structured query) is implemented independently and cross-platform, with DSH sessions added on top. It is not a wrapper around Everything.
 
 ## Install
 
@@ -44,27 +88,32 @@ Everything inspired the *ideas*: a persistent index of file names, a query langu
 # npm (recommended)
 dsh plugin --profile web add dsh-locator
 
+# pin a version
+dsh plugin --profile web add dsh-locator@0.7.6
+
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
 
 # from a checkout
 pnpm install
-pnpm build            # TypeScript plugin
-pnpm build:engine     # Go engine for the host platform
+pnpm build
+pnpm build:engine        # Go engine for the host platform
 dsh plugin --profile web add /absolute/path/to/dsh-locator
 
-# from a packed tarball (verified install path)
+# from a packed tarball (npm pack output; substitute the real version)
 npm pack
-dsh plugin --profile web add /absolute/path/to/dsh-locator-0.5.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-locator-0.7.6.tgz
 ```
 
-The npm package ships prebuilt engines for `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` and `darwin-arm64`.
-
-After installing into a Web profile that is already running, **reload the page** (`F5`): the host tools may mount immediately, but the browser panel (`client.js`) is loaded from the boot graph at page load. Headless/TUI profiles never mount the panel.
+- The package ships prebuilt engines for `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` and `darwin-arm64`; no local Go is needed.
+- If your npm mirror lags behind, add `--registry=https://registry.npmjs.org` to the install command.
+- After installing into a **running** Web profile, **reload the page** (`F5`): host tools may mount immediately, but the browser panel is loaded from the boot graph at page load. Headless/TUI profiles get the tools only.
+- Upgrade: `dsh plugin --profile web add dsh-locator@latest`, then `F5`. A content-schema change rebuilds the database once.
+- Uninstall: `dsh plugin --profile web remove dsh-locator`; to keep the config but disable it, set `enabled: false`.
 
 ## First run
 
-On first mount the engine indexes the configured roots (default: your home directory) and writes a snapshot to the platform cache directory:
+On first mount the engine indexes the configured roots (default: your home directory) and writes the snapshot and content database to the platform cache directory:
 
 | Platform | Default state directory |
 |---|---|
@@ -72,38 +121,73 @@ On first mount the engine indexes the configured roots (default: your home direc
 | macOS | `~/Library/Application Support/dsh-locator` |
 | Linux | `$XDG_CACHE_HOME/dsh-locator` or `~/.cache/dsh-locator` |
 
-The first scan of a large home directory reads the disk; later starts load the snapshot instead. Requests are served **during** that first scan: search returns the entries indexed so far with `indexing: true`, and the panel footer says the index is still building. Nothing blocks on the cold scan. A default exclude list skips `node_modules`, `.git`, `.svn`, `.hg`, `.cache`, `__pycache__`, `.venv`, `venv` and `.next`.
+The first scan of a large home directory reads the disk; later starts load the snapshot. Requests are served **during** the first scan: search returns the entries indexed so far with `indexing: true`, and the panel footer says the index is still building.
 
-## Web search panel
+Defaults skip `node_modules`, `.git`, `.hg`, `.svn`, `.cache`, `__pycache__`, `.venv`, `venv` and `.next` by name; `excludes` changes the list.
+
+Things to try:
+
+```text
+Find the PDFs I changed last week
+Where was "contentRefreshMs" discussed?
+Which conversation settled this design?
+```
+
+## Two searches
+
+### By name: `locator_search`
+
+Everything-style syntax returning path, size, modification time, extension and kind. Suited to “the file name contains report”, “PDFs changed this week”, “videos over 50 MB”.
+
+Sorting, pagination and `limit`/`offset` happen in the host engine; common queries over 1.51 M entries return in tens of milliseconds.
+
+### By content: `locator_find`
+
+Searches the **bodies** of text files and DSH session messages and returns snippets plus their source:
+
+- file hits carry a path and can be opened or revealed;
+- session hits carry `sessionId` and `messageId`, so the panel can open the conversation and outline the matched message;
+- Chinese and English substrings both work (trigram tokenizer, no word segmentation needed).
+
+How the content index behaves:
+
+- **Lazy by default.** Nothing is built at plugin start; the first content search (`locator_find` or the panel's content mode) starts the build in the background, and `contentLazy: false` restores the eager build. The first query reports `building: true` instead of an empty result with no hint.
+- **Restart reuses the database.** An existing database is refreshed incrementally; a full build (session logs first, then file bodies) runs only when the database is missing, has a stale schema, was left unfinished by an interrupted build, or cannot be opened.
+- **Incremental refresh** every `contentRefreshMs` (5 minutes by default) re-reads only files and sessions whose mtime changed; `0` disables it.
+- **Archived and active sessions.** Archived sessions are skipped unless `contentIncludeArchived: true`; a session log that is still being written is indexed after it has been quiet for `contentActiveSessionDelayMs` (2 minutes), so the current log is not decompressed on every refresh. Deleted sessions leave the index when their files disappear.
+- **Budget and truncation.** Defaults: 1 MB per text file, 200,000 files, 1 GB of body bytes, the 100 most recent sessions. Once the byte budget is reached, files later in scan order are skipped; `locator_find` reports `content budget reached` and the HTTP state carries `truncated: true`. Raise `contentMaxTotalBytes` or narrow `contentExcludes`.
+- **Dependency trees are not read.** `node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, … are skipped by `contentExcludes` by default — otherwise library code would exhaust the budget before your own documents; the name index still covers them.
+
+The build runs inside the DSH host process, but file reads and zstd decoding are asynchronous and both build loops yield about every 8 ms: on a 28.6 MB corpus the longest event-loop stall dropped from 968 ms to about 20 ms, so session loading and switching stay responsive. Content **queries** run in a worker thread with a read-only connection — common words take roughly 100 ms, rare terms a few milliseconds, and the host is never blocked.
+
+## Web panel
 
 ![dsh-locator search panel: content mode checked, showing body matches and snippets](docs/assets/panel-en.png)
 
-Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot. The overlay queries the same index through two same-origin host routes (`POST /dsh-locator/search`, `POST /dsh-locator/status`), so it needs no second server and no extra port.
+Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot.
 
-* Empty query lists the most recently modified entries; typing runs the same Everything-style syntax as the tool after a 110 ms debounce.
-* Click a column header to sort by name, size, modification time or path; toggle ascending/descending.
-* `只看文件` / `只看目录` filter the kind; the footer reports matches, the page cap and query latency.
-* Tick **Search content** (`搜内容`) to switch from names to file bodies and session messages; hits show a one-line snippet, and a session hit carries its conversation.
-* `↑`/`↓` select, `Enter` copies the selected path, `Ctrl+O` opens it, `Ctrl+Enter` inserts a quoted `@"path"` into the composer, **double-click reveals a file** in Explorer/Finder/`xdg-open`, and **double-click opens a session hit** at the matched message, outlined for a moment, `Esc` closes.
-* The panel follows `navigator.language` (zh/en/es/pt/hi).
-* The panel is optional: profiles without a Web server never mount it, and the three tools keep working.
+- Empty query lists the most recently modified entries; typing runs the same Everything-style syntax after a 110 ms debounce.
+- Click a column header to sort by name, size, modification time or path.
+- Toggle **files only** / **directories only** to filter the kind.
+- Tick **Search content** to switch from names to file bodies and session messages; while the index builds the footer shows the state and the panel re-polls.
+- `↑`/`↓` select, `Enter` copies the path, `Ctrl+O` opens, `Ctrl+Enter` inserts a quoted `@"path"` into the composer, `Esc` closes.
+- Double-click a file hit to reveal it in Explorer/Finder/`xdg-open`; double-click a session hit to open the conversation at the matched message.
+- Panel text follows `navigator.language` (zh/en/es/pt/hi).
+
+The panel talks to same-origin host routes — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — so it needs no second server and no extra port. Profiles without a Web server never mount it.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `locator_search` | Query the index. Returns path, size, modification time, extension and kind, plus total/truncated so a capped page is never presented as complete. |
-| `locator_find` | Search file bodies and DSH session messages. Hits return a snippet plus `sessionId`/`messageId` for conversations. |
-| `locator_status` | Roots, entry counts, watcher state, state directory and engine path. Use it to explain coverage or diagnose a stale result. |
-| `locator_rebuild` | Replace the index with a fresh background scan. Searches keep using the old index until the new one is ready. |
+| `locator_search` | Query names and paths, with `ext:`, `size:`, `dm:`, `path:` filters plus sorting and pagination. |
+| `locator_find` | Search file bodies and session messages; hits carry snippets and `sessionId`/`messageId`, plus the content-index state. |
+| `locator_status` | Roots, name-index counts, watcher state, state directory and engine path. (Content progress is reported by `locator_find` and the panel, not here.) |
+| `locator_rebuild` | Replace the name index with a fresh background scan; searches keep using the old index until the new one is ready. |
 | `locator_reindex` | Refresh or rebuild the content index: incremental by default, `full: true` drops and rebuilds it. |
-| `locator_export` | Write a read-only SQLite mirror of the index (`entries` table) for external SQL tools. Streams page by page; the binary snapshot stays primary. |
+| `locator_export` | Write a read-only SQLite mirror of the name index (`entries` table) for external SQL tools. |
 
-### Content search
-
-`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and outline the matched message. The content index is **lazy by default**: nothing is built at plugin start, and the first body/session search (`locator_find` or the panel's content mode) starts the build in the background — `contentLazy: false` restores the eager build. A restart with an existing database refreshes it incrementally on first use; a full build (session logs first, then file bodies) only runs when the database is missing, carries a stale schema version or cannot be opened. An incremental refresh then follows every `contentRefreshMs` (5 minutes), re-reading only files and sessions whose mtime changed; `locator_reindex` triggers either mode manually (`full: true` drops and rebuilds the database). While a build runs, searches keep answering from what is already indexed and `state.building` reports progress. Text files are capped by `contentMaxFileBytes`, the total body store by `contentMaxTotalBytes`, and only the most recent `contentMaxSessions` session logs are indexed. Dependency and toolchain trees (`node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, …) are skipped by default — otherwise they exhaust the byte budget before your own documents — and `contentExcludes` changes that list. The index runs inside the DSH host process, but file reads and zstd decoding are asynchronous and both build loops yield about every 8 ms: on a 28.6 MB corpus the longest event-loop stall dropped from 968 ms to 19 ms, so session loading and switching stay responsive. Content queries themselves run in a worker thread with a read-only connection, so a slow search cannot freeze the host while you type. Sessions deleted from disk leave the index on the next refresh; archived sessions are skipped unless `contentIncludeArchived: true`; a session log that is still being written is deferred until it has been quiet for `contentActiveSessionDelayMs`, instead of being fully decompressed on every refresh.
-
-### Query language
+## Query language
 
 Bare words are ANDed substrings of the file name. Everything-style filters combine with them:
 
@@ -125,56 +209,92 @@ Bare words are ANDed substrings of the file name. Everything-style filters combi
 
 ## Configuration
 
-Every field is a Schemastery config field; edit the `dsh-locator` entry in the profile patch (or the bundled `cordis.patch.yml` defaults).
+Every field is a Schemastery config field; override the `dsh-locator` entry in the profile patch, for example:
+
+```yaml
+- id: dsh-locator
+  name: dsh-locator
+  config:
+    roots: ['/home/me/Documents', '/home/me/notes']
+    contentMaxTotalBytes: 2000000000
+    contentExcludes: ['node_modules', '.git', '.cargo', 'site-packages']
+```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Mount no tools and start no engine when `false`. |
-| `roots` | `[]` | Directories to index; empty means the home directory. |
-| `excludes` | dev/cache directories | Base-name globs skipped by scanner and watcher. |
+| `enabled` | `true` | Master switch; `false` mounts no tools and starts no engine. |
+| `roots` | home directory | Directories to index; several may be given. |
+| `excludes` | dev/cache names | Base-name globs skipped by the name index. |
 | `watch` | `true` | Apply native filesystem notifications. |
 | `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher is active (kqueue fallback or a watcher failure); `0` disables. |
 | `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
+| `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
 | `memoryLimitMB` | `0` | Soft Go heap limit for the engine in MiB; `0` leaves it to `GOMEMLIMIT`/`GOGC`. |
-| `contentIndex` | `true` | Build the file-body and session-message index at all. |
-| `contentLazy` | `true` | Build the content index on the first content search instead of at plugin start; `false` builds it eagerly in the background. |
+| `contentIndex` | `true` | Build the file-body and session-message index at all; `false` leaves name search with near-zero content overhead. |
+| `contentLazy` | `true` | Build the content index on the first content search instead of at plugin start. |
 | `contentMaxFileBytes` | `1000000` | Bytes read from one text file. |
 | `contentMaxTotalBytes` | `1000000000` | Total body bytes kept in the content database; `0` means unlimited. |
 | `contentMaxFiles` | `200000` | Text files indexed per build; `0` means unlimited. |
 | `contentMaxSessions` | `100` | Most recent session logs indexed; `0` means all. |
 | `contentRefreshMs` | `300000` | Incremental content refresh cadence; `0` disables it. |
-| `contentIncludeArchived` | `false` | Index archived sessions as well; off by default. |
+| `contentIncludeArchived` | `false` | Index archived sessions as well. |
 | `contentActiveSessionDelayMs` | `120000` | Only index a session log after it has been quiet this long. |
 | `contentSessionDirs` | `[]` | Extra session directories; empty means `$DSH_HOME/sessions`. |
 | `contentExcludes` | dependency/toolchain names | Path segments or substrings the content index skips; the name index still covers them. |
-| `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
-| `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
-| `binaryPath` | `''` | Override the bundled engine (development). |
-| `maxResults` | `100` | Hard cap for one search page. |
-| `startupTimeoutMs` | `120000` | How long a cold build may take before the plugin reports failure. |
-| `requestTimeoutMs` | `15000` | Per-request deadline. |
+| `stateDir` | `''` | Snapshot and content database directory; empty means the platform cache directory. Use a separate value per DSH process. |
 
-Narrow `roots` if indexing the whole home directory is too much I/O. A small, focused set (`~/Documents`, `~/Downloads`, one code tree) is usually the best trade-off.
+`binaryPath`, `maxResults`, `startupTimeoutMs` and `requestTimeoutMs` are also available for custom engines, page caps and deadlines; the defaults are fine for most setups.
+
+## Performance and resources
+
+Measured on a WSL2 development machine (Linux, warm page cache) and a real home directory; your machine will differ with disk, file count, cache state and GC.
+
+**Name index**
+
+| Metric | Result |
+|---|---|
+| Cold scan | ~1.51 M entries in 11–12 s |
+| Snapshot size | ~171 MB for 1.51 M entries |
+| Hot query (`locator_search`) | 6–25 ms for common queries; `path:` prefix scans ~70 ms |
+| Search while a rebuild runs | The old index keeps serving until the new one is ready |
+| Peak scan memory | Hundreds of MB; the engine is a child process and honours `memoryLimitMB` / `GOMEMLIMIT` |
+
+**Content index** (real home, 1 GB budget)
+
+| Metric | Result (0.7.x, real home) |
+|---|---|
+| Coverage | ~95.8 k text files / 95 sessions / 1,050 messages |
+| Full rebuild | ~3.5 min in the background; host p95 14 ms / max 115 ms during it |
+| Incremental refresh (no change) | ~12 s (dominated by the engine dump of 1.51 M entries) |
+| Idle host latency | p50 2 ms / p95 3 ms / max 6 ms |
+| Database size | ~3.1 GB (about 3× the body budget) |
+| Content query | ~100 ms for common words, a few ms for rare terms (worker thread, host unaffected) |
+
+**Cheaper configurations**
+
+- Name search only: `contentIndex: false` drops content work to zero.
+- Keep content but use less disk: lower `contentMaxTotalBytes` (e.g. 256000000) or `contentMaxFileBytes`, or raise `contentRefreshMs`.
+- Cover more files: raise `contentMaxTotalBytes` / `contentMaxFiles` and check that `contentExcludes` does not exclude real document trees.
+- The content database is a cache: deleting `stateDir` rebuilds it and never touches the source files.
 
 ## Platform support
 
 | Platform | Scan + snapshot | Live updates | Notes |
 |---|---|---|---|
 | Linux | yes | inotify, recursive | Watch descriptors are per directory; very large trees can hit `fs.inotify.max_user_watches`. |
-| Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Optional USN/MFT enumeration when running elevated. Changes made by WSL to `/mnt/<drive>` may not raise notifications; use `locator_rebuild` for those. |
-| macOS | yes | FSEvents in the shipped cgo binaries, recursive and uncapped | kqueue is the `CGO_ENABLED=0` fallback (up to 4,096 directories). File content changes do not raise vnode events in the fallback, so size/mtime refresh comes from `refreshIntervalMs` or `locator_rebuild`. |
-
-The engine is pure Go except the macOS FSEvents backend, which uses cgo and is built on a macOS runner. Linux, Windows and the kqueue fallback build with `CGO_ENABLED=0`; USN is optional and needs admin rights, everything else does not.
+| Windows | yes | `ReadDirectoryChangesW`, recursive | No admin rights and no Everything needed. Optional USN/MFT enumeration when running elevated. Changes made by WSL to `/mnt/<drive>` may not raise notifications; rebuild those roots. |
+| macOS | yes | FSEvents in the shipped cgo binaries, recursive and uncapped | kqueue is the `CGO_ENABLED=0` fallback (up to 4,096 directories); content changes rely on the periodic rebuild. |
 
 ### Windows and the USN journal
 
 The engine carries a USN decoder, an opt-in fast path and a probe. The path is **off by default** (`windowsUsn: false`) because the volume ioctl needs administrator rights; it has been validated end to end on a GitHub Actions Windows runner (administrator, real NTFS volume):
+
 - 1,345,546 MFT records read, 1,345,539 paths resolved
 - 164,209 entries under `C:\Windows` (122,915 files, 41,294 dirs)
 - `scan --usn --root C:\Windows` indexed 164,216 entries in 7.8 s; a query returned in 9.6 ms
 - the change journal was read (8,233 records on one run) and an inactive journal on `D:` fell back to the walk with a warning
 
-You can still run the same probe yourself:
+Probe it yourself:
 
 ```powershell
 # Elevated PowerShell (or: Start-Process -Verb RunAs <path> ...)
@@ -183,41 +303,42 @@ You can still run the same probe yourself:
 
 It prints the journal id/USNs, enumerates the MFT (records per second, files/dirs below the root, sample paths) and decodes the last few change-journal records. A non-elevated run fails with `Access is denied` — the parser and path reconstruction are covered by unit tests on every platform.
 
-With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. A successful USN scan also writes `usn-state.json` (journal id, next USN, roots) and keeps the FRN in each record; on the next `serve --usn` the engine replays the journal from that cursor before answering, so files created while it was stopped appear without a full scan. A wrapped, deleted or mismatched journal falls back to the portable watcher. It keeps the volume handle and polls the change journal every two seconds, applying creates, deletes and renames through `usn.ApplyChanges` (the same FRN map, updated in place). USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows the panel/model sees still show real sizes and dates. `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search. If journal polling fails mid-session, the watcher reports it and stops; the portable `ReadDirectoryChangesW` watcher and `locator_rebuild` are still there. The journal applier is covered by synthetic-record tests and the ioctl path by the Windows CI job.
+With `windowsUsn: true` (or `indexd scan --usn`) the engine enumerates the MFT instead of walking directories, then builds paths from the FRN parent map. A successful USN scan also writes `usn-state.json` (journal id, next USN, roots) and keeps the FRN in each record; on the next `serve --usn` the engine replays the journal from that cursor before answering, so files created while it was stopped appear without a full scan. A wrapped, deleted or mismatched journal falls back to the portable watcher. It keeps the volume handle and polls the change journal every two seconds, applying creates, deletes and renames through `usn.ApplyChanges` (the same FRN map, updated in place). USN records carry **no size or modification time**: results are correct for names and paths, `locator_status` marks such an index with `USN`, and the daemon stats the returned page so the rows still show real sizes and dates; `size:`/`dm:` filters over the whole index stay approximate until a metadata pass runs. Any failure (no elevation, unsupported volume, too many records) falls back to the portable walk with a warning; it never disables search.
 
 Everything reads the NTFS Master File Table through the USN journal, which is why its first index is nearly instant. `dsh-locator` keeps a portable directory walk as the default (no service, no UAC, any filesystem) and uses USN/MFT as an opt-in fast path where the process holds `GENERIC_READ` (admin), with journal replay across restarts. The portable path stays the fallback.
 
-## Performance
+## Troubleshooting
 
-Measured on a developer WSL2 machine with a Linux home directory (1,234,757 entries: 1,128,288 files, 106,469 directories), excluding `node_modules`, `.git`, `.cache` and `.venv`:
+**The panel does not appear after installing.**
+Reload the page (`F5`); confirm you installed into the `web` profile and that the panel is loaded from the boot graph. Headless/TUI profiles never mount a panel.
 
-| Metric | Result |
-|---|---|
-| Cold scan (uncached I/O) | 50.3 s |
-| Warm scan (page cache, 8 readers) | 4.6–6.5 s (~190–265k entries/s) |
-| Snapshot size | 133 MB |
-| Peak scan RSS | ~490 MB |
-| First search during the initial scan | 2 ms (partial, `indexing: true`) |
-| `locator_search "report"` (981 matches) | 34 ms |
-| `locator_search "package.json"` (1,287 matches) | 25 ms |
-| Query process RSS (1.2 M entries) | ~197 MB |
-| Small tree (39k entries) scan | 0.47 s |
+**A file created a moment ago is not found.**
+Notifications may not have arrived yet (common for WSL writes into `/mnt/c`, network shares and some container overlays). Wait a moment or run `locator_rebuild` for that root. USN mode replays the journal on restart.
 
-Search is parallel over the record array; the slower cold scan is disk-bound. Numbers vary with the filesystem, cache state and CPU.
+**Content search returns nothing.**
+Check `building` in the `locator_find` result: the first search triggers the lazy build and results may be partial until it finishes (the panel re-polls automatically). Also confirm the file extension is a text type, the file is under `contentMaxFileBytes`, it is not excluded by `contentExcludes`, and the session is not archived (archived sessions are skipped by default).
 
-### Content search
+**The content database is huge / disk grows fast.**
+See [Performance and resources](#performance-and-resources): lower the budget or set `contentIndex: false`. Deleting `stateDir` triggers a rebuild.
 
-Measured on the same machine, warm page cache:
+**An `inotify` warning appears.**
+Too many directories hit the kernel watch limit; the index stays usable and changes rely on periodic rebuilds. Raise `fs.inotify.max_user_watches` or reduce `roots`.
 
-| Corpus | Full build | `content.db` | Incremental (no change) | Query p50 / p95 |
-|---|---|---|---|---|
-| 20k files / 40 MB of bodies | 15.1 s | 71 MB | 0.17 s | 5 / 17 ms |
-| 200k files / 331 MB of bodies | 31.5 s | 711 MB | 1.3 s | 5 / 156 ms |
-| Real home, 177k documents at the 2 GB cap | 7.4 min | 5.99 GB | 2.9 s | — |
+**Behaviour changed after an upgrade.**
+Run `dsh plugin --profile web add dsh-locator@latest`, then `F5`. A content-schema change rebuilds the database once. See [CHANGELOG](CHANGELOG.md).
 
-* The database is roughly 2–3× the indexed body bytes; leave disk headroom. Dependency and toolchain trees (`contentExcludes`) are skipped by default — otherwise they eat the byte budget before your own documents.
-* A restart reuses `content.db` and refreshes incrementally (63.4 s → 4.6 s on the 200k corpus). A full rebuild only runs on the first start after an upgrade, a stale schema or an unreadable database.
-* When `contentMaxTotalBytes` is reached, `locator_find` says “content budget reached”; raise the cap or narrow `contentExcludes`.
+## Build from source
+
+Requirements: Node `^22.19 || >=24.9`, pnpm, Go 1.22+ for the engine.
+
+```sh
+pnpm install
+pnpm build
+pnpm build:engine:all   # or build:engine for the host target
+pnpm check              # typecheck + tests + packaging/install verification
+```
+
+The engine is a separate Go module under `engine/`; run its tests with `cd engine && go test ./...`. The macOS FSEvents backend needs cgo and is built on macOS CI. Node tests run on Linux, Windows and macOS in CI.
 
 ## Design
 
@@ -226,9 +347,12 @@ Measured on the same machine, warm page cache:
 ```
 DeepSeek Harness
   └─ dsh-locator (TypeScript plugin)
-       ├─ locator_search / locator_status / locator_rebuild
+       ├─ locator_search / locator_find / locator_status / locator_rebuild /
+       │  locator_reindex / locator_export
        ├─ client.js: Ctrl+Shift+F overlay (shell.overlay slot)
-       ├─ POST /dsh-locator/{search,status} (same-origin, loopback-hosted)
+       ├─ POST /dsh-locator/{search,content,status,reveal,open} (same-origin)
+       ├─ content store: SQLite FTS5 (trigram) in the host process,
+       │  queries in a worker thread
        └─ child process: indexd serve  (Go, NDJSON over stdio)
             ├─ scanner: recursive walk, excludes, progress
             ├─ index:   names arena + fixed records + open-addressing path table
@@ -237,57 +361,55 @@ DeepSeek Harness
             └─ snapshot: single file, mmap-friendly, atomic rename
 ```
 
-* **Parallel scanner.** Directory readers drain a bounded work queue and flush one batch per directory (`AddBatch`), so a parent record exists before its children are enqueued. The queue never blocks: a full queue falls back to scanning that subtree inline.
-* **Memory layout.** Records store a name offset/length into one byte arena plus a parent id; full paths are reconstructed only for the result page and for `path:` filters. That avoids one string header per file.
-* **Path table.** An open-addressing table of `id+1` slots keeps lookup/update near 12 bytes per entry instead of the ~50 bytes a `map[string]int32` costs.
-* **Query engine.** Bare terms and filters are compiled once, matched in parallel chunks, then reduced with a bounded max-heap: the top `offset+limit` rows are selected without sorting a million matches.
-* **Persistence.** The snapshot is written to a temporary file and renamed; a generation counter lets the daemon autosave only when the index changed. Tombstones are compacted when deletions exceed a threshold.
-* **Protocol.** One JSON request/response per line on stdio, with unsolicited `scan`, `stats`, `warning`, `error` and `rebuilt` events. No ports, no auth surface, no network listeners.
-* **Read-only.** The engine opens files for metadata only; it never writes to indexed paths.
-
-## Build from source
-
-Requirements: Node `^22.19 || >=24.9`, pnpm, Go 1.22+ for the engine.
-
-```sh
-pnpm install
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm build:engine:all   # or build:engine for the host target
-```
-
-The engine is a separate Go module under `engine/`; run its tests with `cd engine && go test ./...`.
+- **Parallel scanner.** Directory readers drain a bounded work queue and flush one batch per directory (`AddBatch`), so a parent record exists before its children are enqueued. The queue never blocks: a full queue falls back to scanning that subtree inline.
+- **Memory layout.** Records store a name offset/length into one byte arena plus a parent id; full paths are reconstructed only for the result page and for `path:` filters. That avoids one string header per file.
+- **Path table.** An open-addressing table of `id+1` slots keeps lookup/update near 12 bytes per entry instead of the ~50 bytes a `map[string]int32` costs.
+- **Query engine.** Bare terms and filters are compiled once, matched in parallel chunks, then reduced with a bounded max-heap: the top `offset+limit` rows are selected without sorting a million matches.
+- **Content index.** Host-side SQLite FTS5 with the trigram tokenizer (UTF-8 substrings, CJK); the file list comes from the engine's own scan, session logs are decompressed with Node's zstd.
+- **Content consistency.** A per-process build lock serializes writers sharing a `stateDir`, a completion flag forces a rebuild after an interrupted build, and a stale open handle is detected via device+inode so another process's rebuild cannot leave the host reading an unlinked database.
+- **Persistence.** The snapshot is written to a temporary file and renamed; a generation counter lets the daemon autosave only when the index changed. Tombstones are compacted when deletions exceed a threshold.
+- **Protocol.** One JSON request/response per line on stdio, with unsolicited `scan`, `stats`, `warning`, `error` and `rebuilt` events. No ports, no auth surface, no network listeners.
+- **Read-only.** The engine opens files for metadata only; it never writes to indexed paths.
 
 ## Limitations
 
-* Content search reads text files (by extension) and DSH session logs only; PDFs, Office documents and images are not text-extracted. The body store is capped at 2 GB / 200,000 files by default, so a huge home directory keeps only the first slice it reaches.
-* The index covers configured roots; it is not a filesystem driver.
-* Linux inotify watches one descriptor per directory; a home directory with hundreds of thousands of directories can exceed the kernel limit. The plugin reports the warning and the snapshot stays usable; rebuilds catch up.
-* WSL writes into `/mnt/c` may not produce Windows notifications (the Windows watcher cannot see the 9p writer's change stream). Rebuild those roots explicitly.
-* Network shares are scanned only if they are reachable as ordinary directories; no SMB-specific change feed.
-* macOS uses FSEvents (recursive) in the shipped binaries; a `CGO_ENABLED=0` build falls back to kqueue, capped at 4,096 directories. Content-only changes rely on the periodic rebuild either way.
-* Windows USN/MFT is optional and only used when the process can read the volume and the journal is active; otherwise the portable walk is used.
-
-## Roadmap
-
-1. Electron desktop runtime check on a real Windows install.
-2. Richer previews and result grouping in the panel.
-3. Windows on ARM / Linux ARM runtime coverage.
-4. Optional lowercase-name arena and trigram prefilter for large indexes.
-5. Incremental snapshot compaction and per-root journals.
+- Content search reads text files (by extension) and DSH session logs only; PDFs, Office documents and images are not text-extracted.
+- The content budget is consumed in scan order, not by file importance; files later in that order are not searchable once the cap is reached (`truncated` is true).
+- The index covers configured roots; it is not a filesystem driver.
+- Linux inotify watches one descriptor per directory; a home directory with hundreds of thousands of directories can exceed the kernel limit. The plugin reports the warning and the snapshot stays usable; rebuilds catch up.
+- WSL writes into `/mnt/c` may not produce Windows notifications (the Windows watcher cannot see the 9p writer's change stream). Rebuild those roots explicitly.
+- Network shares are scanned only if they are reachable as ordinary directories; no SMB-specific change feed.
+- Session content comes from local logs; messages not yet flushed to disk are not searchable.
+- Two DSH processes sharing one `stateDir` should be avoided: the build lock serializes writers but cannot share one open database handle.
+- macOS uses FSEvents (recursive) in the shipped binaries; a `CGO_ENABLED=0` build falls back to kqueue, capped at 4,096 directories, with content changes relying on the periodic rebuild.
+- Windows USN/MFT is optional and only used when the process can read the volume and the journal is active; otherwise the portable walk is used.
 
 ## Memory
 
-The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables. A 1.24 M-entry index peaks around 700–800 MB RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format.
+The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
 ## Security and privacy
 
-If two DSH processes run at once (for example `dsh web` and `dsh tui`), give them separate `stateDir` values: the build lock serializes writers but cannot share one open database handle.
+- The index is local: no network calls, no telemetry, no uploads. The plugin never modifies, moves or deletes indexed files.
+- The content database and build lock are created `0600` and the state directory `0700`, so other local users cannot read indexed documents or session text.
+- The snapshot and content database contain file names, paths and bodies; treat the state directory as private data. Deleting it clears the cache.
+- Give concurrent DSH processes separate `stateDir` values.
 
-The content database and build lock are created `0600` and the state directory `0700`, so other local users cannot read indexed documents or session text.
+## Version and compatibility
 
-The index is local: no network calls, no telemetry, no uploads. The snapshot contains file names and paths, so treat the state directory as private data and exclude it from backups if that matters to you. The plugin never modifies, moves or deletes indexed files.
+- Node `^22.19.0 || >=24.9.0`; DSH `>=0.2.1-rc.2 <0.3.0` (see `engines` in `package.json`).
+- Releases are published with GitHub Actions provenance, so the npm package's origin can be verified; Gitee / GitCode are synced by a mirror workflow.
+- Changelog: [CHANGELOG.md](CHANGELOG.md); questions and reports: [Issues](https://github.com/PerryLink/dsh-locator/issues).
+
+## Roadmap
+
+Not a commitment, just the current direction:
+
+1. Verify the Electron desktop runtime on a real Windows install.
+2. Richer previews and result grouping in the panel.
+3. Windows on ARM / Linux ARM runtime coverage.
+4. A lowercase-name arena and trigram prefilter for very large indexes.
+5. Incremental snapshot compaction and per-root journals.
 
 ## License
 
