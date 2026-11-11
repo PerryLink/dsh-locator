@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -200,6 +200,76 @@ describe('ContentIndex', () => {
     await settle(kept)
     expect((await kept.search('DEPMARKER', 5)).length).toBeGreaterThan(0)
     expect((await kept.search('CARGOMARKER', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('recovers when another process replaces the database', async () => {
+    if (process.platform === 'win32') return
+    const root = mkdtempSync(join(tmpdir(), 'locator-replace-'))
+    const stateA = mkdtempSync(join(tmpdir(), 'locator-replace-a-'))
+    const stateB = mkdtempSync(join(tmpdir(), 'locator-replace-b-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(stateA, { recursive: true, force: true }), () => rmSync(stateB, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    const bodyA = 'REPLACEMARK-A from the first database\n'
+    const bodyB = 'REPLACEMARK-B from the second database\n'
+    writeFileSync(path, bodyA)
+    const entriesA = [{ path, name: 'notes.md', size: bodyA.length, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtimeA = { dump: async () => ({ entries: entriesA, next: 1, done: true }) } as unknown as LocatorRuntime
+    const first = new ContentIndex(runtimeA, { stateDir: stateA, sessionDirs: [], maxFileBytes: 10_000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => first.close())
+    first.start()
+    await settle(first)
+    expect((await first.search('REPLACEMARK-A', 5)).length).toBeGreaterThan(0)
+    expect((await first.search('REPLACEMARK-B', 5)).length).toBe(0)
+
+    writeFileSync(path, bodyB)
+    const entriesB = [{ path, name: 'notes.md', size: bodyB.length, mtime: entriesA[0]!.mtime + 5_000, ext: 'md', dir: false }]
+    const runtimeB = { dump: async () => ({ entries: entriesB, next: 1, done: true }) } as unknown as LocatorRuntime
+    const second = new ContentIndex(runtimeB, { stateDir: stateB, sessionDirs: [], maxFileBytes: 10_000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    second.start()
+    await settle(second)
+    second.close()
+
+    // Simulate another process rebuilding: unlink + new inode with different data.
+    entriesA[0]!.mtime = entriesB[0]!.mtime
+    rmSync(join(stateA, 'content.db'))
+    copyFileSync(join(stateB, 'content.db'), join(stateA, 'content.db'))
+    expect(await first.search('REPLACEMARK-B', 5)).toEqual([])
+    expect(first.status().building).toBe(true)
+    await settle(first)
+    expect((await first.search('REPLACEMARK-B', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('aborts a build when the engine starts a re-scan, then retries', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-rescan-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-rescan-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'RESCANMARK content\n')
+    const entries = [{ path, name: 'notes.md', size: 19, mtime: Date.now(), ext: 'md', dir: false }]
+    let scanOnce = true
+    const runtime: { status: { running: boolean; scanning?: { phase: string } }; dump: () => Promise<unknown> } = {
+      status: { running: true },
+      dump: async () => {
+        if (scanOnce) {
+          scanOnce = false
+          runtime.status.scanning = { phase: 'walking' }
+          return { entries, next: 1, done: false }
+        }
+        return { entries, next: 1, done: true }
+      },
+    }
+    const content = new ContentIndex(runtime as unknown as LocatorRuntime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().error).toContain('re-scan')
+    expect(content.status().building).toBe(false)
+
+    delete runtime.status.scanning
+    content.refresh()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect((await content.search('RESCANMARK', 5)).length).toBeGreaterThan(0)
   })
 
   it('rebuilds when the previous build never finished', async () => {
