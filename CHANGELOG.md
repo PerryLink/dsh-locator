@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.6 — 2026-11-11
+
+Remaining-risk pass: sharing a cache directory, engine re-scans, and platform coverage.
+
+* **Another DSH process replacing `content.db` is now detected**: the plugin remembers the file identity (device + inode) of its open handle and, on the next `status` or content search, closes the stale handle and reboots from the file now on disk. Previously it kept reading the unlinked database until the process exited. (Windows reports inode 0 on some filesystems; there the check is skipped instead of risking false positives.)
+* **Content builds abort when the engine starts a re-scan**: the dump cursor is a record id, so an engine rebuild in the middle of a content build could mix pages; the build now stops, and the next incremental refresh retries against the new index.
+* CI now runs the Node test suite on **Windows and macOS** as well as Linux (the Go engine already had a three-OS matrix).
+* README notes that two DSH processes should use separate `stateDir` values: the build lock serializes writers, but it cannot share an open database handle.
+
 ## 0.7.5 — 2026-11-11
 
 Hardening release from a full risk/bug pass against the real 3 GB content database.

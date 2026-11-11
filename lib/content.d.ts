@@ -70,6 +70,7 @@ export declare class ContentIndex {
     private readonly lockToken;
     private workerSeq;
     private pendingStart;
+    private dbIdentity;
     private readonly pending;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
@@ -111,6 +112,19 @@ export declare class ContentIndex {
     private reopenWorker;
     private stopWorker;
     private ensureWorker;
+    private identityOf;
+    /**
+     * Whether the open handle still points at the file on disk. Another DSH
+     * process that shares this `stateDir` can recreate `content.db` during its
+     * full rebuild; our handle would then keep reading the unlinked inode until
+     * the process exits. Windows reports ino 0 for some filesystems, in which
+     * case the check is skipped rather than producing false positives.
+     */
+    private databaseIsCurrent;
+    /** Close the stale handle and reopen/rebuild from the file now on disk. */
+    private recoverExternal;
+    /** Whether the engine is re-scanning, which can move its dump cursor. */
+    private engineRescanning;
     /** Whether `path` is a SQLite database this plugin created (has docs_meta). */
     private ownedDatabase;
     private readFlag;

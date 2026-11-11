@@ -16,7 +16,7 @@
  * @module dsh-locator/content
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
@@ -124,11 +124,13 @@ export class ContentIndex {
   private readonly lockToken = randomUUID()
   private workerSeq = 0
   private pendingStart = false
+  private dbIdentity: { dev: number; ino: number } | null = null
   private readonly pending = new Map<number, { resolve: (hits: ContentHit[]) => void; reject: (error: Error) => void }>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
 
   status(): ContentState {
+    if (this.db !== null && !this.state.building && !this.databaseIsCurrent()) this.recoverExternal()
     return { ...this.state, building: this.state.building || this.pendingStart }
   }
 
@@ -170,6 +172,7 @@ export class ContentIndex {
     this.stopWorker()
     this.releaseLock()
     this.pendingStart = false
+    this.dbIdentity = null
   }
 
   /** Build everything from scratch. */
@@ -315,6 +318,7 @@ export class ContentIndex {
     }
     this.db?.close()
     this.db = new DatabaseSync(dbPath)
+    this.dbIdentity = this.identityOf(dbPath)
     try { chmodSync(dbPath, 0o600) } catch { /* Windows or a read-only profile */ }
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = OFF')
@@ -384,6 +388,52 @@ export class ContentIndex {
     } catch {
       this.worker = null
     }
+  }
+
+  private identityOf(path: string): { dev: number; ino: number } | null {
+    try {
+      const info = statSync(path)
+      return { dev: Number(info.dev), ino: Number(info.ino) }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Whether the open handle still points at the file on disk. Another DSH
+   * process that shares this `stateDir` can recreate `content.db` during its
+   * full rebuild; our handle would then keep reading the unlinked inode until
+   * the process exits. Windows reports ino 0 for some filesystems, in which
+   * case the check is skipped rather than producing false positives.
+   */
+  private databaseIsCurrent(): boolean {
+    if (this.dbIdentity === null || this.dbIdentity.ino === 0) return true
+    const current = this.identityOf(join(this.options.stateDir, 'content.db'))
+    return current !== null && current.dev === this.dbIdentity.dev && current.ino === this.dbIdentity.ino
+  }
+
+  /** Close the stale handle and reopen/rebuild from the file now on disk. */
+  private recoverExternal(): void {
+    if (this.state.building) return
+    this.generation++
+    try { this.db?.close() } catch { /* ignore */ }
+    this.db = null
+    this.dbIdentity = null
+    this.stopWorker()
+    this.totalBytes = 0
+    this.state.updatedAt = 0
+    this.state.error = ''
+    this.state.truncated = false
+    this.state.files = 0
+    this.state.sessions = 0
+    this.state.messages = 0
+    this.boot()
+  }
+
+  /** Whether the engine is re-scanning, which can move its dump cursor. */
+  private engineRescanning(): boolean {
+    const scanning = (this.rt as { status?: { scanning?: unknown } }).status?.scanning
+    return scanning !== undefined && scanning !== null
   }
 
   /** Whether `path` is a SQLite database this plugin created (has docs_meta). */
@@ -493,6 +543,7 @@ export class ContentIndex {
     let scanned = 0
     for (;;) {
       if (generation !== this.generation) return
+      if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
       const page = await this.rt.dump(after, 2_000)
       for (const entry of page.entries) {
         if ((++scanned & 0xff) === 0) await this.breathe()
@@ -521,6 +572,7 @@ export class ContentIndex {
     let scanned = 0
     for (;;) {
       if (generation !== this.generation) return
+      if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
       const page = await this.rt.dump(after, 2_000)
       for (const entry of page.entries) {
         if ((++scanned & 0xff) === 0) await this.breathe()
@@ -663,6 +715,10 @@ export class ContentIndex {
    */
   async search(query: string, limit: number): Promise<ContentHit[]> {
     if (this.db === null) return []
+    if (!this.databaseIsCurrent()) {
+      this.recoverExternal()
+      return []
+    }
     if (this.options.searchWorker !== true) return this.searchSync(query, limit)
     this.ensureWorker()
     if (this.worker === null) return this.searchSync(query, limit)
