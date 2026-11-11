@@ -51,7 +51,7 @@ dsh plugin --profile web add /caminho/absoluto/dsh-locator
 
 # tarball
 npm pack
-dsh plugin --profile web add /caminho/absoluto/dsh-locator-0.5.0.tgz
+dsh plugin --profile web add /caminho/absoluto/dsh-locator-0.7.6.tgz
 ```
 
 O pacote npm inclui motores pré-compilados para `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` e `darwin-arm64`.

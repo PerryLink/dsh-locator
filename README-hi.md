@@ -51,7 +51,7 @@ dsh plugin --profile web add /absolute/path/dsh-locator
 
 # tarball
 npm pack
-dsh plugin --profile web add /absolute/path/dsh-locator-0.5.0.tgz
+dsh plugin --profile web add /absolute/path/dsh-locator-0.7.6.tgz
 ```
 
 npm पैकेज में `linux-x64`, `linux-arm64`, `win32-x64`, `win32-arm64`, `darwin-x64` और `darwin-arm64` के पहले से बने इंजन हैं।
