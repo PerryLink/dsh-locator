@@ -4,7 +4,7 @@
 
 **Whole-disk, millisecond file search for DeepSeek Harness — without Everything.**
 
-A self-built cross-platform index (Windows USN/MFT · macOS FSEvents · Linux inotify), four agent tools and a sortable Web panel.
+A self-built cross-platform index (Windows USN/MFT · macOS FSEvents · Linux inotify), six agent tools — names, contents and sessions — and a sortable Web panel.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -83,7 +83,8 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 * Empty query lists the most recently modified entries; typing runs the same Everything-style syntax as the tool after a 110 ms debounce.
 * Click a column header to sort by name, size, modification time or path; toggle ascending/descending.
 * `只看文件` / `只看目录` filter the kind; the footer reports matches, the page cap and query latency.
-* `↑`/`↓` select, `Enter` copies the selected path, `Ctrl+O` opens it, `Ctrl+Enter` inserts a quoted `@"path"` into the composer, **double-click reveals it** in Explorer/Finder/`xdg-open`, `Esc` closes.
+* Tick **Search content** (`搜内容`) to switch from names to file bodies and session messages; hits show a one-line snippet, and a session hit carries its conversation.
+* `↑`/`↓` select, `Enter` copies the selected path, `Ctrl+O` opens it, `Ctrl+Enter` inserts a quoted `@"path"` into the composer, **double-click reveals a file** in Explorer/Finder/`xdg-open`, and **double-click opens a session hit** at the matched message, outlined for a moment, `Esc` closes.
 * The panel follows `navigator.language` (zh/en/es/pt/hi).
 * The panel is optional: profiles without a Web server never mount it, and the three tools keep working.
 
@@ -92,13 +93,15 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 | Tool | What it does |
 |---|---|
 | `locator_search` | Query the index. Returns path, size, modification time, extension and kind, plus total/truncated so a capped page is never presented as complete. |
+| `locator_find` | Search file bodies and DSH session messages. Hits return a snippet plus `sessionId`/`messageId` for conversations. |
 | `locator_status` | Roots, entry counts, watcher state, state directory and engine path. Use it to explain coverage or diagnose a stale result. |
 | `locator_rebuild` | Replace the index with a fresh background scan. Searches keep using the old index until the new one is ready. |
+| `locator_reindex` | Refresh or rebuild the content index: incremental by default, `full: true` drops and rebuilds it. |
 | `locator_export` | Write a read-only SQLite mirror of the index (`entries` table) for external SQL tools. Streams page by page; the binary snapshot stays primary. |
 
 ### Content search
 
-`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and scroll to the matched text. The index is built in the background after the name scan; text files are capped by `contentMaxFileBytes`, the total body store by `contentMaxTotalBytes`, and the most recent `contentMaxSessions` session logs are indexed by default. An incremental refresh runs every `contentRefreshMs` (2 minutes) and only re-reads changed files/sessions; `locator_reindex` triggers it manually (`full: true` rebuilds everything).
+`locator_find` searches the **bodies** of text files and DSH session messages through a local SQLite FTS5 index. Hits return a snippet plus `sessionId`/`messageId` for conversations, so the panel can open the session and outline the matched message. The content index is **lazy by default**: nothing is built at plugin start, and the first body/session search (`locator_find` or the panel's content mode) starts the build in the background — `contentLazy: false` restores the eager build. A restart with an existing database refreshes it incrementally on first use; a full build (session logs first, then file bodies) only runs when the database is missing, carries a stale schema version or cannot be opened. An incremental refresh then follows every `contentRefreshMs` (5 minutes), re-reading only files and sessions whose mtime changed; `locator_reindex` triggers either mode manually (`full: true` drops and rebuilds the database). While a build runs, searches keep answering from what is already indexed and `state.building` reports progress. Text files are capped by `contentMaxFileBytes`, the total body store by `contentMaxTotalBytes`, and only the most recent `contentMaxSessions` session logs are indexed. Dependency and toolchain trees (`node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, …) are skipped by default — otherwise they exhaust the byte budget before your own documents — and `contentExcludes` changes that list. The index runs inside the DSH host process, but file reads and zstd decoding are asynchronous and both build loops yield about every 8 ms: on a 28.6 MB corpus the longest event-loop stall dropped from 968 ms to 19 ms, so session loading and switching stay responsive. Content queries themselves run in a worker thread with a read-only connection, so a slow search cannot freeze the host while you type. Sessions deleted from disk leave the index on the next refresh; archived sessions are skipped unless `contentIncludeArchived: true`; a session log that is still being written is deferred until it has been quiet for `contentActiveSessionDelayMs`, instead of being fully decompressed on every refresh.
 
 ### Query language
 
@@ -133,6 +136,17 @@ Every field is a Schemastery config field; edit the `dsh-locator` entry in the p
 | `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher is active (kqueue fallback or a watcher failure); `0` disables. |
 | `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
 | `memoryLimitMB` | `0` | Soft Go heap limit for the engine in MiB; `0` leaves it to `GOMEMLIMIT`/`GOGC`. |
+| `contentIndex` | `true` | Build the file-body and session-message index at all. |
+| `contentLazy` | `true` | Build the content index on the first content search instead of at plugin start; `false` builds it eagerly in the background. |
+| `contentMaxFileBytes` | `1000000` | Bytes read from one text file. |
+| `contentMaxTotalBytes` | `1000000000` | Total body bytes kept in the content database; `0` means unlimited. |
+| `contentMaxFiles` | `200000` | Text files indexed per build; `0` means unlimited. |
+| `contentMaxSessions` | `100` | Most recent session logs indexed; `0` means all. |
+| `contentRefreshMs` | `300000` | Incremental content refresh cadence; `0` disables it. |
+| `contentIncludeArchived` | `false` | Index archived sessions as well; off by default. |
+| `contentActiveSessionDelayMs` | `120000` | Only index a session log after it has been quiet this long. |
+| `contentSessionDirs` | `[]` | Extra session directories; empty means `$DSH_HOME/sessions`. |
+| `contentExcludes` | dependency/toolchain names | Path segments or substrings the content index skips; the name index still covers them. |
 | `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
 | `stateDir` | `''` | Snapshot directory; empty means the platform cache directory. |
 | `binaryPath` | `''` | Override the bundled engine (development). |
@@ -191,6 +205,20 @@ Measured on a developer WSL2 machine with a Linux home directory (1,234,757 entr
 
 Search is parallel over the record array; the slower cold scan is disk-bound. Numbers vary with the filesystem, cache state and CPU.
 
+### Content search
+
+Measured on the same machine, warm page cache:
+
+| Corpus | Full build | `content.db` | Incremental (no change) | Query p50 / p95 |
+|---|---|---|---|---|
+| 20k files / 40 MB of bodies | 15.1 s | 71 MB | 0.17 s | 5 / 17 ms |
+| 200k files / 331 MB of bodies | 31.5 s | 711 MB | 1.3 s | 5 / 156 ms |
+| Real home, 177k documents at the 2 GB cap | 7.4 min | 5.99 GB | 2.9 s | — |
+
+* The database is roughly 2–3× the indexed body bytes; leave disk headroom. Dependency and toolchain trees (`contentExcludes`) are skipped by default — otherwise they eat the byte budget before your own documents.
+* A restart reuses `content.db` and refreshes incrementally (63.4 s → 4.6 s on the 200k corpus). A full rebuild only runs on the first start after an upgrade, a stale schema or an unreadable database.
+* When `contentMaxTotalBytes` is reached, `locator_find` says “content budget reached”; raise the cap or narrow `contentExcludes`.
+
 ## Design
 
 ![dsh-locator architecture: filesystems → scan/watch → compact snapshot → query engine → agent tools / Web panel](docs/assets/architecture.svg)
@@ -233,7 +261,7 @@ The engine is a separate Go module under `engine/`; run its tests with `cd engin
 
 ## Limitations
 
-* File names, paths, sizes and modification times only — **no content indexing**. Use `grep` for contents.
+* Content search reads text files (by extension) and DSH session logs only; PDFs, Office documents and images are not text-extracted. The body store is capped at 2 GB / 200,000 files by default, so a huge home directory keeps only the first slice it reaches.
 * The index covers configured roots; it is not a filesystem driver.
 * Linux inotify watches one descriptor per directory; a home directory with hundreds of thousands of directories can exceed the kernel limit. The plugin reports the warning and the snapshot stays usable; rebuilds catch up.
 * WSL writes into `/mnt/c` may not produce Windows notifications (the Windows watcher cannot see the 9p writer's change stream). Rebuild those roots explicitly.

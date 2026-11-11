@@ -2,7 +2,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentIndex } from './content.ts'
 
-export function makeReindexTool(content: ContentIndex) {
+export function makeReindexTool(content: ContentIndex, ensure?: () => void) {
   return defineTool({
     name: 'locator_reindex',
     description: [
@@ -30,6 +30,7 @@ export function makeReindexTool(content: ContentIndex) {
       },
     },
     async execute(args) {
+      ensure?.()
       const full = args.full === true
       const started = full ? content.rebuild() : content.refreshNow()
       if (!started) return { ok: false as const, error: 'a content build is already running' }

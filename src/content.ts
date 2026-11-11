@@ -6,15 +6,45 @@
  * `session.v4.jsonl.zstd`, and SQLite's trigram tokenizer gives substring and
  * CJK search. A meta table stores each source's mtime so refresh() only
  * re-reads what changed; rebuild() drops and rebuilds everything.
+ *
+ * Everything here runs inside the DSH host process, so the build must never
+ * monopolise its event loop: file reads and zstd decoding are asynchronous and
+ * the loops yield to the scheduler every ~8 ms of work. Session logs are read
+ * only once they have settled (an actively written session is skipped until it
+ * has been quiet for `activeSessionDelayMs`), and archived sessions are left
+ * alone unless `includeArchived` is set.
  * @module dsh-locator/content
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
-import { zstdDecompressSync } from 'node:zlib'
+import { promisify } from 'node:util'
+import { zstdDecompress } from 'node:zlib'
+import { scheduler } from 'node:timers/promises'
 import { DatabaseSync } from 'node:sqlite'
+import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { Worker } from 'node:worker_threads'
+import { searchContent } from './content-search.ts'
 import type { LocatorRuntime } from './runtime.ts'
+
+const SCHEMA_VERSION = 2
+
+/** Work budget between two event-loop yields; keeps host latency low. */
+const SLICE_MS = 8
+
+/** Session bodies are short: a message, not a whole file. */
+const SESSION_BODY_BYTES = 8_000
+
+const zstdDecompressAsync = promisify(zstdDecompress)
+
+// `scheduler.yield` is newer than the oldest supported Node line; fall back to
+// setImmediate so a build on Node 22 still yields instead of throwing.
+const yieldToLoop: () => Promise<void> = typeof (scheduler as { yield?: unknown }).yield === 'function'
+  ? () => scheduler.yield()
+  : () => new Promise<void>(resolve => { setImmediate(resolve) })
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.markdown', '.rst', '.log', '.csv', '.tsv', '.json', '.jsonl',
@@ -48,10 +78,25 @@ export interface ContentState {
 export interface ContentOptions {
   stateDir: string
   sessionDirs?: string[] | undefined
+  /** Path segments or substrings never read into the content index. */
+  excludes?: string[]
+  /** Index archived sessions too; false (the default) leaves them out. */
+  includeArchived?: boolean
+  /**
+   * Skip session logs modified more recently than this many milliseconds, so
+   * the session being written right now is not re-read on every refresh.
+   */
+  activeSessionDelayMs?: number
   maxFileBytes: number
   maxTotalBytes?: number
   maxFiles: number
   maxSessions: number
+  /**
+   * Run content queries in a worker thread so a slow search never blocks the
+   * DSH host event loop. Off by default so direct embedders and tests stay
+   * single-threaded.
+   */
+  searchWorker?: boolean
 }
 
 interface DocRow {
@@ -70,17 +115,16 @@ export class ContentIndex {
   private readonly state: ContentState = { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', updatedAt: 0 }
   private generation = 0
   private totalBytes = 0
-  private timer: NodeJS.Timeout | undefined
+  private sliceDeadline = 0
+  private worker: Worker | null = null
+  private lockHeld = false
+  private readonly lockToken = randomUUID()
+  private workerSeq = 0
+  private readonly pending = new Map<number, { resolve: (hits: ContentHit[]) => void; reject: (error: Error) => void }>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
 
   status(): ContentState { return { ...this.state } }
-
-  /** Start periodic incremental refreshes; 0 disables. */
-  startAutoRefresh(ms: number): void {
-    if (ms <= 0 || this.timer !== undefined) return
-    this.timer = setInterval(() => this.refresh(), ms)
-  }
 
   /** Queue a full rebuild; false when one is already running. */
   rebuild(): boolean {
@@ -97,21 +141,77 @@ export class ContentIndex {
   }
 
   close(): void {
-    if (this.timer !== undefined) { clearInterval(this.timer); this.timer = undefined }
     this.generation++
     this.db?.close()
     this.db = null
     this.state.building = false
+    this.stopWorker()
+    this.releaseLock()
   }
 
   /** Build everything from scratch. */
   start(): void { this.begin('full') }
 
+  /**
+   * Start at plugin boot: reuse an existing database and refresh it
+   * incrementally, so a restart does not re-read and re-index gigabytes of
+   * text. A missing or incompatible database falls back to a full build.
+   */
+  boot(): void {
+    this.begin(existsSync(join(this.options.stateDir, 'content.db')) ? 'incremental' : 'full')
+  }
+
   /** Re-read changed files/sessions; open the DB when this is the first run. */
   refresh(): void { this.begin(this.db === null ? 'full' : 'incremental') }
 
+  /**
+   * Serialize content builds across plugin instances and DSH processes that
+   * share a state directory: a stale lock (dead pid or older than 30 minutes)
+   * is taken over, a live one keeps this instance from writing concurrently.
+   * @returns whether this instance owns the build lock.
+   */
+  private acquireLock(): boolean {
+    if (this.lockHeld) return true
+    mkdirSync(this.options.stateDir, { recursive: true })
+    const path = join(this.options.stateDir, 'content.lock')
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const fd = openSync(path, 'wx')
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.lockToken }))
+        closeSync(fd)
+        this.lockHeld = true
+        return true
+      } catch {
+        let holder: { pid?: number; startedAt?: number; token?: string } = {}
+        try { holder = JSON.parse(readFileSync(path, 'utf8')) as typeof holder } catch { /* unreadable: treat as stale */ }
+        const age = Date.now() - Number(holder.startedAt ?? 0)
+        let alive = false
+        if (typeof holder.pid === 'number' && age < 30 * 60_000) {
+          try { process.kill(holder.pid, 0); alive = true } catch (error) {
+            alive = (error as NodeJS.ErrnoException).code === 'EPERM'
+          }
+        }
+        // A live sibling instance (for example during profile HMR) blocks even
+        // when it shares our pid; the per-instance token tells them apart.
+        if (alive && holder.token !== this.lockToken) return false
+        try { rmSync(path, { force: true }) } catch { return false }
+      }
+    }
+    return false
+  }
+
+  private releaseLock(): void {
+    if (!this.lockHeld) return
+    this.lockHeld = false
+    try { rmSync(join(this.options.stateDir, 'content.lock'), { force: true }) } catch { /* ignore */ }
+  }
+
   private begin(mode: 'full' | 'incremental'): void {
     if (this.state.building) return
+    if (!this.acquireLock()) {
+      this.state.error = 'another dsh-locator content build is running'
+      return
+    }
     const generation = ++this.generation
     this.state.building = true
     this.state.error = ''
@@ -121,6 +221,8 @@ export class ContentIndex {
       if (generation !== this.generation) return
       this.state.error = messageOf(error)
       this.state.building = false
+    }).finally(() => {
+      this.releaseLock()
     })
   }
 
@@ -135,22 +237,48 @@ export class ContentIndex {
   }
 
   private async incremental(generation: number): Promise<void> {
-    this.open(false)
-    this.totalBytes = Number((this.db!.prepare('SELECT COALESCE(SUM(length(body)), 0) AS n FROM docs').get() as { n: number }).n)
-    await this.refreshFiles(generation)
-    if (generation !== this.generation) return
-    await this.refreshSessions(generation)
-    if (generation !== this.generation) return
-    this.finish()
+    try {
+      this.open(false)
+      const stored = (this.db!.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version ?? 0
+      if (Number(stored) !== SCHEMA_VERSION) return await this.full(generation)
+      this.totalBytes = this.readTotalBytes()
+      await this.refreshFiles(generation)
+      if (generation !== this.generation) return
+      await this.refreshSessions(generation)
+      if (generation !== this.generation) return
+      this.finish()
+    } catch {
+      if (generation !== this.generation) return
+      // A corrupt or outdated database must not disable content search for the
+      // rest of the session: rebuild it from scratch instead.
+      this.db?.close()
+      this.db = null
+      await this.full(generation)
+    }
   }
 
   private open(fresh: boolean): void {
     mkdirSync(this.options.stateDir, { recursive: true })
+    const dbPath = join(this.options.stateDir, 'content.db')
+    let oldFileRemained = false
+    if (fresh) {
+      // A full rebuild throws every row away. Dropping the FTS tables in place
+      // on a multi-GB database blocks the host for about a second, so recreate
+      // the file instead: the worker is stopped and the sidecars go with it.
+      this.stopWorker()
+      try { this.db?.close() } catch { /* ignore */ }
+      this.db = null
+      for (const suffix of ['', '-wal', '-shm']) {
+        try { rmSync(dbPath + suffix, { force: true }) } catch { /* Windows keeps a busy file; DROP below still works */ }
+      }
+      oldFileRemained = existsSync(dbPath)
+    }
     this.db?.close()
-    this.db = new DatabaseSync(join(this.options.stateDir, 'content.db'))
+    this.db = new DatabaseSync(dbPath)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = OFF')
-    if (fresh) {
+    if (fresh && oldFileRemained) {
+      // Fallback for the rare recreate failure above: still start from empty.
       this.db.exec('DROP TABLE IF EXISTS docs')
       this.db.exec('DROP TABLE IF EXISTS docs_meta')
       this.db.exec('DROP TABLE IF EXISTS sources')
@@ -161,6 +289,87 @@ export class ContentIndex {
     )`)
     this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT)')
     this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
+    if (fresh) {
+      this.db.exec('DROP TABLE IF EXISTS content_meta')
+    }
+    this.db.exec('CREATE TABLE IF NOT EXISTS content_meta (key TEXT PRIMARY KEY, value INTEGER)')
+    if (fresh) this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('total_bytes', 0)")
+    if (fresh) this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    this.reopenWorker()
+  }
+
+  private reopenWorker(): void {
+    if (this.worker === null) return
+    this.worker.postMessage({ id: ++this.workerSeq, open: join(this.options.stateDir, 'content.db') })
+  }
+
+  private stopWorker(): void {
+    const worker = this.worker
+    this.worker = null
+    for (const entry of this.pending.values()) entry.resolve([])
+    this.pending.clear()
+    if (worker !== null) void worker.terminate()
+  }
+
+  private ensureWorker(): void {
+    if (this.options.searchWorker !== true || this.worker !== null) return
+    // In a TypeScript test run the compiled worker does not exist next to the
+    // source; skip spawning and answer queries in-process instead.
+    const workerPath = fileURLToPath(new URL('./content-search-worker.js', import.meta.url))
+    if (!existsSync(workerPath)) return
+    try {
+      const worker = new Worker(workerPath, {
+        workerData: { dbPath: join(this.options.stateDir, 'content.db') },
+      })
+      worker.on('message', (message: { id: number; hits?: ContentHit[] }) => {
+        const entry = this.pending.get(message.id)
+        if (entry === undefined) return
+        this.pending.delete(message.id)
+        entry.resolve(message.hits ?? [])
+      })
+      const fail = (): void => {
+        if (this.worker !== worker) return
+        this.worker = null
+        for (const entry of this.pending.values()) entry.reject(new Error('content search worker failed'))
+        this.pending.clear()
+      }
+      worker.on('error', fail)
+      worker.on('exit', fail)
+      this.worker = worker
+    } catch {
+      this.worker = null
+    }
+  }
+
+  /**
+   * Body bytes already stored. Reading a persisted counter avoids a full scan
+   * of every FTS body (measured ~0.6 s for 1 GB) at the start of each refresh.
+   * A database written before the counter existed falls back to one scan.
+   */
+  private readTotalBytes(): number {
+    const row = this.db!.prepare("SELECT value FROM content_meta WHERE key = 'total_bytes'").get() as { value?: number } | undefined
+    if (row?.value !== undefined) return Number(row.value)
+    const scanned = Number((this.db!.prepare('SELECT COALESCE(SUM(length(body)), 0) AS n FROM docs').get() as { n: number }).n)
+    this.db!.prepare("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('total_bytes', ?)").run(scanned)
+    return scanned
+  }
+
+  private writeTotalBytes(): void {
+    this.db!.prepare("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('total_bytes', ?)").run(Math.max(0, Math.round(this.totalBytes)))
+  }
+
+  /** Yield to the host event loop once the current ~8 ms work slice is spent. */
+  private async breathe(): Promise<void> {
+    const now = performance.now()
+    if (now < this.sliceDeadline) return
+    this.sliceDeadline = now + SLICE_MS
+    await yieldToLoop()
+  }
+
+  /** True when a session log has been quiet long enough to be read safely. */
+  private settled(mtime: number): boolean {
+    const delay = this.options.activeSessionDelayMs ?? 0
+    return delay <= 0 || Date.now() - mtime >= delay
   }
 
   private finish(): void {
@@ -170,6 +379,8 @@ export class ContentIndex {
     this.state.sessions = Number((this.db!.prepare('SELECT COUNT(*) AS n FROM sources').get() as { n: number }).n)
     this.state.building = false
     this.state.updatedAt = Date.now()
+    this.writeTotalBytes()
+    this.reopenWorker()
   }
 
   private addDoc(row: DocRow): boolean {
@@ -189,31 +400,42 @@ export class ContentIndex {
   private deleteDoc(key: string): void {
     const row = this.db!.prepare('SELECT rowid FROM docs_meta WHERE doc_key = ?').get(key) as { rowid: number } | undefined
     if (row === undefined) return
+    const body = this.db!.prepare('SELECT length(body) AS n FROM docs WHERE rowid = ?').get(row.rowid) as { n: number } | undefined
+    if (body !== undefined) this.totalBytes = Math.max(0, this.totalBytes - Number(body.n))
     this.db!.prepare('DELETE FROM docs WHERE rowid = ?').run(row.rowid)
     this.db!.prepare('DELETE FROM docs_meta WHERE rowid = ?').run(row.rowid)
   }
 
   private deletePath(path: string): void {
-    const rows = this.db!.prepare('SELECT rowid FROM docs_meta WHERE path = ?').all(path) as Array<{ rowid: number }>
+    const rows = this.db!.prepare(`SELECT m.rowid AS rowid, length(d.body) AS n
+      FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.path = ?`).all(path) as Array<{ rowid: number; n: number }>
     const delDoc = this.db!.prepare('DELETE FROM docs WHERE rowid = ?')
     const delMeta = this.db!.prepare('DELETE FROM docs_meta WHERE rowid = ?')
-    for (const row of rows) { delDoc.run(row.rowid); delMeta.run(row.rowid) }
+    for (const row of rows) {
+      this.totalBytes = Math.max(0, this.totalBytes - Number(row.n))
+      delDoc.run(row.rowid)
+      delMeta.run(row.rowid)
+    }
   }
 
   private async indexFiles(generation: number): Promise<void> {
     let after = 0
     let seen = 0
+    let scanned = 0
     for (;;) {
       if (generation !== this.generation) return
       const page = await this.rt.dump(after, 2_000)
       for (const entry of page.entries) {
+        if ((++scanned & 0xff) === 0) await this.breathe()
+        if (generation !== this.generation) return
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
-        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path)) continue
+        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
         if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) break
-        const row = this.readFileDoc(entry.path, entry.name, entry.mtime)
+        const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
         if (row === null) continue
         seen++
         if (!this.addDoc(row)) return
+        await this.breathe()
       }
       after = page.next
       if (page.done || page.entries.length === 0) break
@@ -224,58 +446,92 @@ export class ContentIndex {
     const meta = new Map<string, number>()
     for (const row of this.db!.prepare("SELECT doc_key, mtime FROM docs_meta WHERE kind = 'file'").all() as Array<{ doc_key: string; mtime: number }>) meta.set(row.doc_key, row.mtime)
     const seen = new Set<string>()
+    const deferred: Array<{ path: string; name: string; mtime: number; size: number }> = []
     let after = 0
     let indexed = 0
+    let scanned = 0
     for (;;) {
       if (generation !== this.generation) return
       const page = await this.rt.dump(after, 2_000)
       for (const entry of page.entries) {
+        if ((++scanned & 0xff) === 0) await this.breathe()
+        if (generation !== this.generation) return
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
-        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path)) continue
+        if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
         if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) break
         const key = `file:${entry.path}`
         seen.add(key)
         indexed++
         if (meta.get(key) === entry.mtime) continue
+        if (this.wouldExceed(entry.size)) {
+          deferred.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
+          continue
+        }
         this.deleteDoc(key)
-        const row = this.readFileDoc(entry.path, entry.name, entry.mtime)
-        if (row !== null && !this.addDoc(row)) return
+        const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
+        if (row !== null && !this.addDoc(row)) {
+          deferred.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
+        }
+        await this.breathe()
       }
       after = page.next
       if (page.done || page.entries.length === 0) break
     }
+    // Removing rows for files that disappeared frees budget before the deferred
+    // files are retried; otherwise a stale large entry would block new ones.
     for (const key of meta.keys()) if (!seen.has(key)) this.deleteDoc(key)
+    for (const entry of deferred) {
+      if (generation !== this.generation) return
+      if (this.wouldExceed(entry.size)) { this.state.truncated = true; continue }
+      this.deleteDoc(`file:${entry.path}`)
+      const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
+      if (row === null || !this.addDoc(row)) { this.state.truncated = true; continue }
+      await this.breathe()
+    }
   }
 
-  private readFileDoc(path: string, name: string, mtime: number): DocRow | null {
-    let raw: string
-    try { raw = readFileSync(path, 'utf8') } catch { return null }
-    if (raw.includes('\u0000')) return null
-    return { key: `file:${path}`, body: raw.slice(0, this.options.maxFileBytes), kind: 'file', path, title: name, sessionId: null, messageId: null, mtime }
+  /** Would storing a file of this size overflow the configured body budget? */
+  private wouldExceed(size: number): boolean {
+    const cap = this.options.maxTotalBytes ?? 0
+    if (cap <= 0) return false
+    return this.totalBytes + Math.min(size, this.options.maxFileBytes) > cap
+  }
+
+  private async readFileDoc(path: string, name: string, mtime: number): Promise<DocRow | null> {
+    let buffer: Buffer
+    try { buffer = await readFile(path) } catch { return null }
+    if (buffer.includes(0)) return null
+    const body = buffer.toString('utf8').slice(0, this.options.maxFileBytes)
+    return { key: `file:${path}`, body, kind: 'file', path, title: name, sessionId: null, messageId: null, mtime }
   }
 
   private async indexSessions(generation: number): Promise<void> {
-    const files = sessionFiles(this.sessionRoots()).slice(0, this.options.maxSessions > 0 ? this.options.maxSessions : undefined)
+    const files = (await this.sessionCandidates()).filter(file => this.settled(file.mtime))
     for (const file of files) {
       if (generation !== this.generation) return
       this.deletePath(file.path)
-      if (!this.indexSessionFile(file)) return
+      if (!(await this.indexSessionFile(file, generation))) return
       this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+      await this.breathe()
     }
   }
 
   private async refreshSessions(generation: number): Promise<void> {
     const known = new Map<string, number>()
     for (const row of this.db!.prepare('SELECT path, mtime FROM sources').all() as Array<{ path: string; mtime: number }>) known.set(row.path, row.mtime)
-    const files = sessionFiles(this.sessionRoots()).slice(0, this.options.maxSessions > 0 ? this.options.maxSessions : undefined)
+    const files = await this.sessionCandidates()
     const present = new Set<string>()
     for (const file of files) {
       if (generation !== this.generation) return
       present.add(file.path)
+      // The session being written right now is left for a later refresh: keep
+      // its existing rows instead of re-reading the whole growing log.
+      if (!this.settled(file.mtime)) continue
       if (known.get(file.path) === file.mtime) continue
       this.deletePath(file.path)
-      if (!this.indexSessionFile(file)) return
+      if (!(await this.indexSessionFile(file, generation))) return
       this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+      await this.breathe()
     }
     for (const path of known.keys()) {
       if (present.has(path)) continue
@@ -284,59 +540,104 @@ export class ContentIndex {
     }
   }
 
-  private indexSessionFile(file: { path: string; mtime: number }): boolean {
+  private async indexSessionFile(file: { path: string; mtime: number }, generation: number): Promise<boolean> {
     let text: string
-    try { text = zstdDecompressSync(readFileSync(file.path)).toString('utf8') } catch { return true }
+    try { text = (await zstdDecompressAsync(await readFile(file.path))).toString('utf8') } catch { return true }
+    if (generation !== this.generation) return false
     const sessionId = basename(dirname(file.path))
     let title = ''
+    let parsed = 0
     for (const line of text.split('\n')) {
       if (!line) continue
+      if ((++parsed & 0xff) === 0) {
+        await this.breathe()
+        if (generation !== this.generation) return false
+      }
       let event: { type?: string; data?: Record<string, unknown> }
       try { event = JSON.parse(line) } catch { continue }
       const extracted = messageText(event)
       if (extracted === undefined) continue
       if (title === '') title = extracted.text.replace(/\s+/g, ' ').slice(0, 90)
-      const body = extracted.text.slice(0, 8_000)
+      const body = extracted.text.slice(0, SESSION_BODY_BYTES)
       const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, mtime: file.mtime }
       if (!this.addDoc(row)) return false
     }
     return true
   }
 
-  sessionRoots(): string[] {
-    if (this.options.sessionDirs !== undefined) return this.options.sessionDirs
-    return [join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'sessions')]
+  /** Session logs to consider, newest first, minus archived ones by default. */
+  private async sessionCandidates(): Promise<Array<{ path: string; mtime: number }>> {
+    const files = await sessionFiles(this.sessionRoots())
+    const archived = this.options.includeArchived === true ? new Set<string>() : await archivedSessionIds()
+    const max = this.options.maxSessions > 0 ? this.options.maxSessions : Number.POSITIVE_INFINITY
+    const out: Array<{ path: string; mtime: number }> = []
+    for (const file of files) {
+      if (out.length >= max) break
+      if (archived.has(basename(dirname(file.path)))) continue
+      out.push(file)
+    }
+    return out
   }
 
-  search(query: string, limit: number): ContentHit[] {
+  sessionRoots(): string[] {
+    if (this.options.sessionDirs !== undefined) return this.options.sessionDirs
+    return [join(dshHome(), 'sessions')]
+  }
+
+  /**
+   * Search file bodies and session messages. With `searchWorker` enabled the
+   * query itself runs off the host thread; a failed or wedged worker falls back
+   * to the in-process query so a result is still produced.
+   * @param query - words or a phrase to find.
+   * @param limit - maximum hits.
+   * @returns matching documents ordered by relevance.
+   */
+  async search(query: string, limit: number): Promise<ContentHit[]> {
     if (this.db === null) return []
-    const text = query.trim()
-    if (text === '') return []
-    const capped = Math.max(1, Math.min(100, limit))
+    if (this.options.searchWorker !== true) return this.searchSync(query, limit)
+    this.ensureWorker()
+    if (this.worker === null) return this.searchSync(query, limit)
+    const id = ++this.workerSeq
+    const worker = this.worker
+    const response = new Promise<ContentHit[]>((resolve, reject) => { this.pending.set(id, { resolve, reject }) })
+    worker.postMessage({ id, query, limit })
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<ContentHit[]>((_resolve, reject) => {
+      timer = setTimeout(() => { this.pending.delete(id); reject(new Error('content search worker timed out')) }, 5_000)
+    })
     try {
-      let rows: Array<Record<string, unknown>>
-      if ([...text].length < 3) {
-        rows = this.db.prepare(`SELECT kind, path, title, session_id, message_id, body, 0 AS score
-          FROM docs WHERE body LIKE '%' || ? || '%' LIMIT ?`).all(text, capped) as Array<Record<string, unknown>>
-      } else {
-        const match = text.split(/\s+/).filter(Boolean).map(term => '"' + term.replace(/"/g, '') + '"').join(' AND ')
-        rows = this.db.prepare(`SELECT kind, path, title, session_id, message_id,
-          snippet(docs, 0, char(1), char(2), '…', 16) AS snippet, bm25(docs) AS score
-          FROM docs WHERE docs MATCH ? ORDER BY score LIMIT ?`).all(match, capped) as Array<Record<string, unknown>>
-      }
-      return rows.map(row => ({
-        kind: row.kind === 'session' ? 'session' : 'file',
-        path: String(row.path ?? ''),
-        title: String(row.title ?? ''),
-        snippet: String(row.snippet ?? row.body ?? '').replace(/[\u0001\u0002]/g, ''),
-        ...(row.session_id ? { sessionId: String(row.session_id) } : {}),
-        ...(row.message_id ? { messageId: String(row.message_id) } : {}),
-        score: Number(row.score ?? 0),
-      }))
+      return await Promise.race([response, timeout])
+    } catch {
+      return this.searchSync(query, limit)
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  private searchSync(query: string, limit: number): ContentHit[] {
+    if (this.db === null) return []
+    try {
+      return searchContent(this.db, query, limit)
     } catch (error) {
       this.state.error = messageOf(error)
       return []
     }
+  }
+}
+
+function dshHome(): string {
+  return process.env.DSH_HOME || join(homedir(), '.dsh')
+}
+
+/** Archived session ids recorded by the Workspace registry; empty when absent. */
+async function archivedSessionIds(): Promise<Set<string>> {
+  try {
+    const raw = await readFile(join(dshHome(), 'storages', 'workspace.json'), 'utf8')
+    const parsed = JSON.parse(raw) as { global?: { archivedSessionIds?: unknown } }
+    const ids = parsed.global?.archivedSessionIds
+    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [])
+  } catch {
+    return new Set()
   }
 }
 
@@ -360,26 +661,41 @@ function messageText(event: { type?: string; data?: Record<string, unknown> }): 
   return { text, id: id || `seq-${String(data.seq ?? '')}` }
 }
 
-function sessionFiles(roots: string[]): Array<{ path: string; mtime: number }> {
+async function sessionFiles(roots: string[]): Promise<Array<{ path: string; mtime: number }>> {
   const out: Array<{ path: string; mtime: number }> = []
-  const walk = (root: string, depth: number): void => {
-    if (depth > 4 || !existsSync(root)) return
+  const walk = async (root: string, depth: number): Promise<void> => {
+    if (depth > 4) return
     let entries
-    try { entries = readdirSync(root, { withFileTypes: true }) } catch { return }
+    try { entries = await readdir(root, { withFileTypes: true }) } catch { return }
     for (const entry of entries) {
       const path = join(root, entry.name)
-      if (entry.isDirectory()) { walk(path, depth + 1); continue }
+      if (entry.isDirectory()) { await walk(path, depth + 1); continue }
       if (!entry.isFile() || !entry.name.endsWith('.v4.jsonl.zstd')) continue
-      try { out.push({ path, mtime: statSync(path).mtimeMs }) } catch { /* ignore */ }
+      try { out.push({ path, mtime: (await stat(path)).mtimeMs }) } catch { /* ignore */ }
     }
   }
-  for (const root of roots) walk(root, 0)
+  for (const root of roots) await walk(root, 0)
   out.sort((a, b) => b.mtime - a.mtime)
   return out
 }
 
-function contentSkipPath(path: string): boolean {
-  return path.includes('/.dsh/') || path.includes('\\.dsh\\')
+function contentSkipPath(path: string, excludes: string[]): boolean {
+  const normalized = path.replace(/\\/g, '/')
+  // The plugin's own session/config tree is never content.
+  if (normalized === '/.dsh' || normalized.includes('/.dsh/')) return true
+  if (excludes.length === 0) return false
+  const lower = normalized.toLowerCase()
+  const segments = lower.split('/')
+  for (const raw of excludes) {
+    const needle = raw.trim().toLowerCase()
+    if (needle === '') continue
+    if (needle.includes('/')) {
+      if (lower.includes(needle)) return true
+      continue
+    }
+    if (segments.includes(needle)) return true
+  }
+  return false
 }
 
 function messageOf(error: unknown): string {

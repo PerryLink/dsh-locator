@@ -24,8 +24,46 @@ export const name = 'dsh-locator'
 /** Tools are registered through the host tool registry. */
 export const inject = ['tools']
 
+/** The timer service mounted by `@deepseek-ai/cordis-plugin-timer`. */
+interface TimerLike {
+  timeout?: (callback: () => void, delay: number) => unknown
+  interval?: (callback: () => void, delay: number) => unknown
+}
+
 /**
- * Mount the locator engine and its three tools.
+ * Read the optional timer service without declaring it as a hard dependency.
+ * Cordis refuses direct mixin access (`ctx.timeout`) unless the plugin injects
+ * `timer`, but `ctx.get()` is the documented escape hatch for optional
+ * services; a profile without the timer plugin simply gets the raw fallback.
+ * @param ctx - the plugin context.
+ * @returns the timer service, or undefined when the profile has none.
+ */
+function optionalTimer(ctx: Context): TimerLike | undefined {
+  const get = (ctx as unknown as { get?: (name: string, strict?: boolean) => unknown }).get
+  if (typeof get !== 'function') return undefined
+  try {
+    const timer = get.call(ctx, 'timer', false) as TimerLike | undefined
+    return timer ?? undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Normalize a cordis timer handle (function or `.dispose()`) to a disposer. */
+function asDisposer(handle: unknown): (() => void) | undefined {
+  if (typeof handle === 'function') return handle as () => void
+  if (handle !== null && typeof handle === 'object' && typeof (handle as { dispose?: unknown }).dispose === 'function') {
+    return () => { (handle as { dispose: () => void }).dispose() }
+  }
+  return undefined
+}
+
+/**
+ * Mount the locator engine and its tools.
+ *
+ * The name index starts right away; the content index is built lazily on the
+ * first content search (or eagerly when `contentLazy` is false) because it is
+ * the expensive half and most sessions never search bodies.
  * @param ctx - the plugin context.
  * @param config - validated configuration.
  */
@@ -41,22 +79,77 @@ export function apply(ctx: Context, config: Config): void {
     ? new ContentIndex(rt, {
         stateDir,
         sessionDirs: config.contentSessionDirs.length > 0 ? config.contentSessionDirs : undefined,
+        excludes: config.contentExcludes,
+        includeArchived: config.contentIncludeArchived,
+        activeSessionDelayMs: config.contentActiveSessionDelayMs,
+        searchWorker: true,
         maxFileBytes: config.contentMaxFileBytes,
         maxTotalBytes: config.contentMaxTotalBytes,
         maxFiles: config.contentMaxFiles,
         maxSessions: config.contentMaxSessions,
       })
     : undefined
+  const timer = optionalTimer(ctx)
+  let contentStarted = false
+  let refreshHandle: (() => void) | undefined
+
+  const armRefresh = (): void => {
+    if (content === undefined || config.contentRefreshMs <= 0 || refreshHandle !== undefined) return
+    const tick = (): void => { content.refreshNow() }
+    if (typeof timer?.interval === 'function') {
+      const handle = asDisposer(timer.interval(tick, config.contentRefreshMs))
+      if (handle !== undefined) { refreshHandle = handle; return }
+    }
+    const handle = setInterval(tick, config.contentRefreshMs)
+    refreshHandle = () => { clearInterval(handle) }
+  }
+
+  /**
+   * Start the content half exactly once. Tools and the panel call this on
+   * their first content operation so that a profile that never searches
+   * bodies pays nothing for the content database.
+   */
+  const ensureContent = (): void => {
+    if (content === undefined || contentStarted) return
+    contentStarted = true
+    void startContent()
+  }
+
+  const startContent = async (): Promise<void> => {
+    try {
+      await rt.waitReady()
+      for (let i = 0; i < 900; i++) {
+        const status = await rt.engineStatus()
+        if (status === undefined || !status.scanning) break
+        await new Promise(resolve => setTimeout(resolve, 2_000))
+      }
+      content!.boot()
+      armRefresh()
+      logger.info('content index started')
+    } catch (error) {
+      logger.info(`content index skipped: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   ctx.effect(() => {
     // Let the host finish starting before a cold scan starts reading the disk.
-    const timer = setTimeout(() => {
+    const start = (): void => {
       rt.start()
       logger.info(`index roots: ${roots.join(', ')} (state ${stateDir})`)
-      if (content !== undefined) void startContent(rt, content, logger, config.contentRefreshMs)
-    }, 1500)
+      if (content !== undefined && config.contentLazy === false) ensureContent()
+    }
+    let disposeBoot: (() => void) | undefined
+    if (typeof timer?.timeout === 'function') {
+      disposeBoot = asDisposer(timer.timeout(start, 1500))
+    }
+    if (disposeBoot === undefined) {
+      const handle = setTimeout(start, 1500)
+      disposeBoot = () => { clearTimeout(handle) }
+    }
     return () => {
-      clearTimeout(timer)
+      disposeBoot?.()
+      refreshHandle?.()
+      refreshHandle = undefined
       content?.close()
       void rt.stop()
     }
@@ -67,27 +160,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
   if (content !== undefined) {
-    ctx.tools.register(makeFindTool(content))
-    ctx.tools.register(makeReindexTool(content))
+    ctx.tools.register(makeFindTool(content, ensureContent))
+    ctx.tools.register(makeReindexTool(content, ensureContent))
   }
 
   // The Web GUI panel is optional: profiles without a Web server keep the
-  // three tools and never mount an HTTP route.
-  registerHttp(ctx, rt, content)
-}
-
-async function startContent(rt: LocatorRuntime, content: ContentIndex, logger: { info(message: string): void }, refreshMs: number): Promise<void> {
-  try {
-    await rt.waitReady()
-    for (let i = 0; i < 900; i++) {
-      const status = await rt.engineStatus()
-      if (status === undefined || !status.scanning) break
-      await new Promise(resolve => setTimeout(resolve, 2_000))
-    }
-    content.start()
-    content.startAutoRefresh(refreshMs)
-    logger.info('content index started')
-  } catch (error) {
-    logger.info(`content index skipped: ${error instanceof Error ? error.message : String(error)}`)
-  }
+  // tools and never mount an HTTP route.
+  registerHttp(ctx, rt, content, ensureContent)
 }

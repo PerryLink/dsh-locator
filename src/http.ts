@@ -47,7 +47,7 @@ interface SearchBody {
 const BODY_LIMIT = 64 * 1024
 
 /** Mount the panel's routes when this profile runs a Web server. */
-export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex): void {
+export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void): void {
   const inject = (ctx as unknown as {
     inject?: (deps: string[], callback: (scoped: Context) => void) => void
   }).inject
@@ -75,6 +75,7 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
         kind: 'exact',
         path: '/dsh-locator/content/rebuild',
         handler: handler(scoped, async body => {
+          ensure?.()
           const full = body.full === true
           const started = full ? content.rebuild() : content.refreshNow()
           return started ? { ok: true, started: true, full } : { ok: false, error: 'a content build is already running' }
@@ -84,9 +85,10 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
         kind: 'exact',
         path: '/dsh-locator/content',
         handler: handler(scoped, async body => {
+          ensure?.()
           const query = typeof body.query === 'string' ? body.query : ''
           const limit = typeof body.limit === 'number' ? body.limit : 30
-          return { ok: true, query, hits: content.search(query, limit), state: content.status() }
+          return { ok: true, query, hits: await content.search(query, limit), state: content.status() }
         }),
       }))
     }

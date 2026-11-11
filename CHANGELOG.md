@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.4 — 2026-11-11
+
+* The content index is **lazy by default**: plugin startup now costs nothing for content. The first body/session search (`locator_find`, the panel's “搜内容”, or `locator_reindex`) starts the build in the background; `contentLazy: false` restores the eager background build. A restart that already has a database still refreshes incrementally on first use.
+* Cordis-native scheduling: the boot delay and the incremental-refresh cadence now use the base profile's timer service (`ctx.timeout`/`ctx.interval` from `@deepseek-ai/cordis-plugin-timer`), so both disposers are owned by the plugin fiber; plain timers remain as a fallback when that service is absent.
+* The panel reports “indexing” and re-polls while the lazy content build runs, so the first query fills in without retyping.
+* Content builds are serialized by a `<stateDir>/content.lock` (per-instance token, stale locks taken over), so a profile HMR reload or a second DSH process can no longer run two writers against the same database and drift the byte counter.
+* A full content rebuild now recreates `content.db` instead of running `DROP TABLE` over multi-GB FTS tables, which had been blocking the host for about a second at the start of a rebuild.
+* The body-byte budget is now persisted in `content_meta` instead of rescanned at every refresh (a 1 GB database made `SUM(length(body))` block the host for ~0.6 s each time). Deleted bodies are subtracted, and files that no longer fit are retried after stale rows are removed. The schema version moves to 2, so an existing database rebuilds once.
+* The content search worker is skipped when its compiled entry is absent (TypeScript test runs) and a failed/timed-out worker falls back to the in-process query instead of returning an empty page.
+
+## 0.7.3 — 2026-11-11
+
+* The content build no longer blocks the DSH host's event loop: file reads and session-log decompression are asynchronous and both build loops yield every ~8 ms (measured max event-loop gap on a 28.6 MB corpus: 968 ms → 19 ms). This is what made session loading and switching stall and could trip a WebSocket reconnect ("all sessions reloaded").
+* Session logs are not chased while they are still being written: a log modified within `contentActiveSessionDelayMs` (default 120000) is indexed only after it has been quiet that long, instead of being fully decompressed and re-inserted every refresh.
+* Archived sessions are skipped by default; set `contentIncludeArchived: true` to index them. Sessions deleted from disk disappear from the index on the next refresh as before.
+* Lower default background load: `contentMaxFileBytes` 4 MB → 1 MB, `contentMaxTotalBytes` 2 GB → 1 GB, `contentMaxSessions` 200 → 100, `contentRefreshMs` 120 s → 300 s. All remain configurable.
+* Tests: content-build event-loop cooperativeness, archived-session filtering, and active-session deferral.
+
+## 0.7.2 — 2026-11-10
+
+* A restart no longer rebuilds the whole content database: the plugin reuses `content.db` and refreshes it incrementally (measured 2.9 s on a 1.3M-entry index that took 7.4 min to build from scratch). A missing, stale-schema (`user_version`) or unreadable database still falls back to a full rebuild.
+* Session jumps are anchored on the Chat node key (`data-chat-node-key` embeds the indexed `messageId`), so double-clicking a session hit outlines the exact message instead of the first copy of those words in the document (often the sidebar title). When the anchor is absent the panel falls back to a phrase search restricted to the conversation transcript and pulls older pages once.
+* English, Spanish, Portuguese and Hindi READMEs document content search, incremental refresh, session jumps and the `content*` configuration; the stale "no content indexing" limitation is gone.
+
 ## 0.7.1 — 2026-11-10
 
 * Content full builds index session messages **before** the much larger file set, so conversation search and jumps become available early.

@@ -4,7 +4,7 @@
 
 **Búsqueda de archivos en todo el disco, en milisegundos, para DeepSeek Harness — sin Everything.**
 
-Índice propio multiplataforma (Windows USN/MFT · macOS FSEvents · Linux inotify), cuatro herramientas para el agente y un panel web ordenable.
+Índice propio multiplataforma (Windows USN/MFT · macOS FSEvents · Linux inotify), seis herramientas para el agente —nombres, contenido y sesiones— y un panel web ordenable.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -62,12 +62,14 @@ Si instalas en un perfil Web ya en ejecución, **recarga la página** (`F5`): la
 
 ![Panel de búsqueda de dsh-locator: resultados Markdown filtrados por ruta, con recuento, tiempo y columnas ordenables](docs/assets/panel-en.png)
 
-Pulsa `Ctrl+Shift+F` en cualquier parte de la Web GUI, o haz clic en la lupa del pie de la barra lateral. El panel consulta el mismo índice mediante rutas del host del mismo origen (`POST /dsh-locator/search`, `POST /dsh-locator/status`), sin segundo servidor ni puerto extra.
+Pulsa `Ctrl+Shift+F` en cualquier parte de la Web GUI, o haz clic en la lupa del pie de la barra lateral. El panel consulta el mismo índice mediante rutas del host del mismo origen (`/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/status`, `/dsh-locator/reveal` y `/dsh-locator/open`), sin segundo servidor ni puerto extra.
 
 * Consulta vacía: entradas recientes por fecha; al escribir, debounce de 110 ms y la misma sintaxis que las herramientas.
 * Clic en una columna para ordenar por nombre, tamaño, fecha o ruta; otro clic invierte.
-* `Solo archivos` / `Solo carpetas`; la barra inferior muestra aciertos, límite y tiempo.
-* `↑`/`↓` selecciona, `Enter` copia, `Ctrl+O` abre, `Ctrl+Enter` inserta `@"ruta"` en el compositor, doble clic revela en el explorador, `Esc` cierra.
+* `Solo archivos` / `Solo carpetas` filtran por tipo; la barra inferior muestra aciertos, límite y tiempo.
+* Marca **Buscar contenido** para pasar de los nombres al contenido de los archivos y a los mensajes de sesión; cada acierto muestra un fragmento de una línea.
+* `↑`/`↓` selecciona, `Enter` copia, `Ctrl+O` abre, `Ctrl+Enter` inserta `@"ruta"` en el compositor y `Esc` cierra.
+* El doble clic sobre un archivo abre su ubicación en el gestor de archivos; el doble clic sobre un resultado de sesión abre esa conversación y resalta el mensaje encontrado por un momento.
 * La interfaz sigue `navigator.language` (zh/en/es/pt/hi).
 
 ## Herramientas
@@ -75,9 +77,23 @@ Pulsa `Ctrl+Shift+F` en cualquier parte de la Web GUI, o haz clic en la lupa del
 | Herramienta | Uso |
 |---|---|
 | `locator_search` | Consulta el índice con sintaxis estilo Everything. |
+| `locator_find` | Busca en el contenido de los archivos y en los mensajes de sesión de DSH; los aciertos traen un fragmento y, cuando vienen de una conversación, `sessionId`/`messageId`. |
 | `locator_status` | Raíces, entradas, watcher, modo USN y errores. |
 | `locator_rebuild` | Reconstruye en segundo plano; las búsquedas siguen usando el índice anterior. |
+| `locator_reindex` | Refresca o reconstruye el índice de contenido: incremental por defecto; `full: true` lo borra y lo vuelve a construir. |
 | `locator_export` | Copia de solo lectura en SQLite (`entries(path, name, dir, size, mtime_ms, ext)`). |
+
+### Búsqueda por contenido
+
+`locator_find` busca en el contenido de los archivos de texto y en los mensajes de sesión de DSH mediante un índice SQLite FTS5 local. Las subcadenas en chino e inglés funcionan sin necesidad de segmentar palabras.
+
+Cada acierto devuelve un fragmento; si viene de una conversación, incluye `sessionId` y `messageId`, de modo que el panel puede abrir esa sesión y resaltar el mensaje encontrado.
+
+El índice de contenido es perezoso por defecto: al iniciar no se construye nada y la primera búsqueda de contenido lo arranca en segundo plano (`contentLazy: false` lo construye desde el arranque). Al reiniciar, el plugin reutiliza la base de datos existente y la actualiza de forma incremental; solo construye el índice completo (primero los registros de sesión, luego el contenido de los archivos) cuando la base no existe, tiene una versión de esquema antigua o no se puede abrir. Después, el refresco incremental se repite cada `contentRefreshMs` (5 minutos) y solo relee los archivos y las sesiones cuya `mtime` cambió; `locator_reindex` permite lanzar a mano cualquiera de los dos modos.
+
+Mientras hay una construcción en marcha, las búsquedas siguen respondiendo con lo que ya está indexado, y la herramienta y el panel informan del estado del proceso.
+
+Los límites actuales son 1 MB por archivo de texto, 200 000 archivos, las 100 sesiones más recientes y 1 GB de contenido en total; todos se pueden ajustar en la configuración. Las carpetas de dependencias y toolchains (`node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, …) se omiten por defecto — si no, se comen el presupuesto antes que tus propios documentos — y `contentExcludes` cambia esa lista. El índice lee y descomprime de forma asíncrona y cede el bucle de eventos cada ~8 ms (28,6 MB: 968 ms → 19 ms), así que no frena la carga ni el cambio de sesión; las sesiones archivadas no se indexan salvo `contentIncludeArchived: true`, y una sesión que se está escribiendo espera `contentActiveSessionDelayMs`.
 
 ### Sintaxis de consulta
 
@@ -105,6 +121,18 @@ case:1  wholeword:1      mayúsculas / palabra completa
 | `windowsUsn` | Ruta rápida USN/MFT (Windows, administrador; por defecto `false`). |
 | `scanWorkers` | Lectores de directorio en paralelo; 0 = CPU. |
 | `stateDir` | Directorio de la instantánea; vacío = caché del sistema. |
+| `contentIndex` | Activa la construcción del índice de contenido de archivos y mensajes de sesión (por defecto `true`). |
+| `contentLazy` | Construye el índice de contenido en la primera búsqueda de contenido en vez de al iniciar; `false` lo construye en segundo plano desde el arranque (por defecto `true`). |
+| `contentMaxFileBytes` | Máximo de bytes que se leen de cada archivo de texto (por defecto `1000000`). |
+| `contentMaxTotalBytes` | Total de bytes de contenido que se conservan; `0` = sin límite (por defecto `1000000000`). |
+| `contentMaxFiles` | Archivos de texto indexados en cada construcción; `0` = sin límite (por defecto `200000`). |
+| `contentMaxSessions` | Sesiones más recientes indexadas; `0` = todas (por defecto `100`). |
+| `contentRefreshMs` | Cadencia del refresco incremental de contenido; `0` lo desactiva (por defecto `300000`). |
+| `contentIncludeArchived` | Indexa también las sesiones archivadas; por defecto `false`. |
+| `contentActiveSessionDelayMs` | Solo indexa un registro de sesión tras estar quieto este tiempo (por defecto `120000`). |
+| `contentSessionDirs` | Directorios de sesión adicionales; vacío = `$DSH_HOME/sessions` (por defecto `[]`). |
+| `contentExcludes` | Tramos de ruta que la búsqueda por contenido omite (dependencias y toolchains); el índice de nombres no cambia. |
+
 
 ## Plataformas
 
@@ -117,6 +145,8 @@ case:1  wholeword:1      mayúsculas / palabra completa
 En Windows, `scan --usn` guarda `usn-state.json` (id del diario, siguiente USN, raíces) y `serve --usn` reproduce el diario antes de servir: un archivo creado con el daemon detenido aparece al reiniciar sin reescanear. Un diario desactualizado o desmontado cae al watcher portátil.
 
 ## Rendimiento
+
+Contenido medido en la misma máquina (caché caliente): 20 000 archivos / 40 MB → 15,1 s y 71 MB; 200 000 archivos / 331 MB → 31,5 s y 711 MB; refresco incremental del índice completo (1,3 M entradas) 2,9 s; reiniciar reutiliza la base y tarda 4,6 s en el corpus de 200 000 archivos. La base ocupa 2–3 veces el texto indexado.
 
 - 1,2 M de entradas: consulta en caliente 25–35 ms; búsqueda durante el escaneo ~2 ms.
 - `C:\Windows` (164 216 entradas) indexado por USN en 7,8 s en un runner de CI; consulta 9,6 ms.
@@ -147,7 +177,7 @@ El motor Go vive en `engine/`; pruebas: `cd engine && go test ./...`.
 
 ## Límites
 
-* Solo nombres, rutas, tamaños y fechas: **no indexa contenido**. Para contenido usa `grep`.
+* La búsqueda por contenido solo lee archivos de texto (por extensión) y los registros de sesión del DSH; los PDF, documentos de Office e imágenes no se extraen. De forma predeterminada el cuerpo indexado se limita a 1 GB / 200.000 archivos, así que en un directorio personal enorme solo queda la primera parte que se alcanza.
 * No es un driver de sistema de archivos; cubre solo las raíces configuradas.
 * inotify consume un descriptor por directorio; árboles enormes pueden agotar el límite del kernel (se avisa y la instantánea sigue usable).
 * Escrituras WSL en `/mnt/c` pueden no generar notificaciones de Windows; reconstruye esas raíces.

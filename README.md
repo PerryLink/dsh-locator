@@ -91,9 +91,13 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 - 文件命中带路径，直接打开或定位；
 - 会话命中带 `sessionId` 和 `messageId`，可以跳回那次对话；
 - 中文和英文子串都能搜，不要求分词。
-- 启动后每 2 分钟做一次增量刷新，只重读 mtime 变化的文件/会话；也可以手动触发全量重建。
+- 内容索引默认**惰性启动**：插件启动时什么都不建，第一次搜内容（`locator_find` 或面板“搜内容”）才开始在后台构建，`contentLazy: false` 可恢复启动即建。重启后复用已有的内容库、先做一次增量刷新；只有库不存在、结构版本不兼容或损坏时才全量重建（先会话、后文件正文）。之后每 5 分钟再增量刷新一次，只重读 mtime 变化的文件/会话；也可以手动触发全量重建。
 
 内容索引在后台构建，刚启动时可能只覆盖了一部分，工具和面板都会显示构建状态。默认只索引 4MB 以内的文本文件，最多 20 万个文件、最近 200 个会话，内容总量上限 2GB；这些都能在配置里改。
+
+依赖和工具链目录（`node_modules`、`.cargo`、`.bun`、`.pnpm`、`site-packages`、`toolchain` 等）默认不读正文，否则内容预算会先被库代码吃满、你自己的文档反而搜不到；要调整就改 `contentExcludes`。
+
+内容索引全程在宿主进程里跑，但读文件和 zstd 解压都是异步的，并且每约 8ms 就让出事件循环——实测 28.6MB 语料一次构建的最大事件循环阻塞从 968ms 降到 19ms，所以不会拖慢会话加载/切换。内容查询本身跑在 worker 线程里（只读连接），输入搜索时也不会卡住宿主。已删除的会话会随文件消失自动退出索引；已归档的会话默认不索引（`contentIncludeArchived: true` 才索引）；正在写入的会话会等它安静 `contentActiveSessionDelayMs` 后再索引，不会每轮刷新把整份日志重新解压一遍。
 
 ## Web 面板
 
@@ -149,12 +153,16 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `windowsUsn` | `false` | Windows 上尝试 USN/MFT 快路径，需要管理员权限。 |
 | `memoryLimitMB` | 0 | 引擎的 Go 软堆上限；0 表示交给 `GOMEMLIMIT`/`GOGC`。 |
 | `contentIndex` | `true` | 是否构建文件正文/会话内容索引。 |
-| `contentMaxFileBytes` | 4000000 | 单个文本文件最多读多少字节。 |
-| `contentMaxTotalBytes` | 2000000000 | 内容库总量上限；0 表示不限制。 |
+| `contentLazy` | `true` | 惰性构建：第一次搜内容时才建库；`false` 表示插件启动后就在后台建。 |
+| `contentMaxFileBytes` | 1000000 | 单个文本文件最多读多少字节。 |
+| `contentMaxTotalBytes` | 1000000000 | 内容库总量上限；0 表示不限制。 |
 | `contentMaxFiles` | 200000 | 最多索引多少个文件；0 表示不限制。 |
-| `contentMaxSessions` | 200 | 最多索引最近多少个会话；0 表示全部。 |
-| `contentRefreshMs` | 120000 | 内容增量刷新周期；0 关闭自动刷新。 |
+| `contentMaxSessions` | 100 | 最多索引最近多少个会话；0 表示全部。 |
+| `contentRefreshMs` | 300000 | 内容增量刷新周期；0 关闭自动刷新。 |
+| `contentIncludeArchived` | `false` | 是否索引已归档的会话；默认不索引。 |
+| `contentActiveSessionDelayMs` | 120000 | 会话日志安静多久后才索引；正在写的会话不重复解析。 |
 | `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
+| `contentExcludes` | 依赖/工具链目录 | 内容索引跳过的路径片段或子串；文件名索引不受影响。 |
 | `stateDir` | 系统缓存 | 快照和内容数据库的位置。 |
 
 ## 平台支持
@@ -173,6 +181,18 @@ Windows 的 USN 快路径默认关闭（`windowsUsn: true`）。它需要管理�
 - Windows CI 上 `C:\Windows` 16.4 万条用 USN 索引约 7.8 秒，查询 9.6ms。
 - 导出 124 万行 SQLite：约 477MB，6.4 秒。
 - 内容索引是后台任务，首次构建时间取决于文本文件数量和会话日志大小。
+
+内容索引实测（同一台 WSL2 开发机，热缓存）：
+
+| 语料 | 全量构建 | `content.db` | 增量刷新（无变化） | 查询 p50 / p95 |
+|---|---|---|---|---|
+| 2 万文件 / 40MB 正文 | 15.1 s | 71 MB | 0.17 s | 5 / 17 ms |
+| 20 万文件 / 331MB 正文 | 31.5 s | 711 MB | 1.3 s | 5 / 156 ms |
+| 真实主目录（17.7 万文档 / 2GB 上限） | 7.4 min | 5.99 GB | 2.9 s | — |
+
+- 内容库体积大约是正文的 2–3 倍，磁盘要留余量；默认跳过依赖/工具链目录（`contentExcludes`），否则 2GB 预算会被库代码先吃光。
+- 重启会复用已有的内容库做增量刷新（20 万文件语料实测 63.4 s → 4.6 s）；只有升级后首启、库损坏或结构版本不匹配时才全量重建。
+- 撞到 `contentMaxTotalBytes` 时工具会明确提示 “content budget reached”，可以调大上限或收窄 `contentExcludes`。
 
 ## 设计
 

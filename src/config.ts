@@ -27,6 +27,12 @@ export interface Config {
   memoryLimitMB: number
   /** Index text-file bodies and DSH session messages into the content database. */
   contentIndex: boolean
+  /**
+   * Build the content index on the first content search instead of at plugin
+   * start. Lazy keeps DSH startup free of content indexing; set false to build
+   * eagerly in the background right after startup.
+   */
+  contentLazy: boolean
   /** Maximum bytes read from one text file. */
   contentMaxFileBytes: number
   /** Stop adding content after this many body bytes; 0 means unlimited. */
@@ -37,8 +43,22 @@ export interface Config {
   contentMaxFiles: number
   /** Most recent session logs indexed; 0 means all. */
   contentMaxSessions: number
+  /** Index archived sessions too; the default leaves them out. */
+  contentIncludeArchived: boolean
+  /**
+   * Session logs modified more recently than this are skipped until they have
+   * been quiet that long, so the session being written now is not re-read on
+   * every background refresh.
+   */
+  contentActiveSessionDelayMs: number
   /** Extra session directories; empty means $DSH_HOME/sessions. */
   contentSessionDirs: string[]
+  /**
+   * Path segments or substrings skipped by the content index only: dependency
+   * trees and toolchains would otherwise eat the body-bytes budget before a
+   * user's own documents. The name index still covers them.
+   */
+  contentExcludes: string[]
   /**
    * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
    * requires running DSH as administrator). Falls back automatically.
@@ -76,12 +96,46 @@ export const Config: Schema<Config> = Schema.object({
   scanWorkers: Schema.number().default(0),
   memoryLimitMB: Schema.number().default(0),
   contentIndex: Schema.boolean().default(true),
-  contentMaxFileBytes: Schema.number().default(4_000_000),
-  contentMaxTotalBytes: Schema.number().default(2_000_000_000),
-  contentRefreshMs: Schema.number().default(120_000),
+  contentLazy: Schema.boolean().default(true),
+  contentMaxFileBytes: Schema.number().default(1_000_000),
+  contentMaxTotalBytes: Schema.number().default(1_000_000_000),
+  contentRefreshMs: Schema.number().default(300_000),
   contentMaxFiles: Schema.number().default(200_000),
-  contentMaxSessions: Schema.number().default(200),
+  contentMaxSessions: Schema.number().default(100),
+  contentIncludeArchived: Schema.boolean().default(false),
+  contentActiveSessionDelayMs: Schema.number().default(120_000),
   contentSessionDirs: Schema.array(Schema.string()).default([]),
+  contentExcludes: Schema.array(Schema.string()).default([
+    'node_modules',
+    '.git',
+    '.hg',
+    '.svn',
+    '.cache',
+    '__pycache__',
+    '.venv',
+    'venv',
+    '.next',
+    '.turbo',
+    '.yarn',
+    '.pnpm',
+    '.npm',
+    '.cargo',
+    '.rustup',
+    '.bun',
+    '.gradle',
+    '.m2',
+    '.nuget',
+    '.nvm',
+    '.pyenv',
+    '.conda',
+    '.asdf',
+    'toolchain',
+    'site-packages',
+    'dist-packages',
+    '/.local/lib/',
+    '/.local/share/pnpm/',
+    '/go/pkg/mod/',
+  ]),
   windowsUsn: Schema.boolean().default(false),
   stateDir: Schema.string().default(''),
   binaryPath: Schema.string().default(''),

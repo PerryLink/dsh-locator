@@ -12,7 +12,7 @@ Install with `dsh plugin --profile web add dsh-locator`.
 * `dsh-locator@0.1.0`, Apache-2.0, local git repo with prebuilt engines for six targets.
 * `npm pack --dry-run`: 8.4 MB tarball, 44 files (engine binaries, `client.js`, `lib/`, docs).
 * Verified: Go tests (including `-race` on the concurrent packages), plugin integration tests, `tsc`, `scripts/verify.mjs`, a real Web profile boot, and a headless-Chromium pass over the search panel.
-* Verified live install: the tarball was installed into the running `/home/yy/.dsh/profiles/web` profile; the host hot-mounted `locator_search`/`locator_status`/`locator_rebuild`, the engine built a 1,221,872-entry snapshot, and the panel in the live GUI at 3081 answered a `report` query with 960 matches in 11.9 ms (headless Chromium, no console errors).
+* Verified live install: the tarball was installed into the running `$DSH_HOME/profiles/web` profile; the host hot-mounted `locator_search`/`locator_status`/`locator_rebuild`, the engine built a 1,221,872-entry snapshot, and the panel in the live GUI at 3081 answered a `report` query with 960 matches in 11.9 ms (headless Chromium, no console errors).
 * Verified install path: `npm pack` tarball installed into a fresh Web profile (`dsh plugin --profile <name> add ./dsh-locator-0.1.0.tgz`), profile booted on a spare port, `POST /dsh-locator/search` answered, the client bundle appeared in the boot graph, and the panel worked in headless Chromium with no console errors.
 
 ## Before publishing
@@ -30,6 +30,11 @@ Install with `dsh plugin --profile web add dsh-locator`.
 2. Bump `version` in `package.json` and add a `CHANGELOG.md` entry.
 3. Confirm the repository URL exists (`github.com/PerryLink/dsh-locator`) and the README renders.
 4. Optional but recommended: run the elevated Windows probe (see README) so the USN fast path is not shipped unvalidated. Keep `windowsUsn: false` as the default either way.
+5. Privacy gate (learned from 0.5.1): regenerate every screenshot from `/tmp/demo` fake data, open `docs/assets/*.png` and confirm no real home path is visible, and grep the shipped text for absolute paths:
+   ```sh
+   grep -rn '/home/[a-z0-9_-]*/\|C:\\Users\\' README*.md CHANGELOG.md cordis.patch.yml src client.js
+   ```
+   Unpublish is only possible within 72 hours and CDN mirrors keep serving the tarball afterwards (npmmirror still serves 0.5.1), so this check runs *before* the publish, not after.
 
 ## Publish
 

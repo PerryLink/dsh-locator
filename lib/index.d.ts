@@ -12,7 +12,11 @@ export declare const name = "dsh-locator";
 /** Tools are registered through the host tool registry. */
 export declare const inject: string[];
 /**
- * Mount the locator engine and its three tools.
+ * Mount the locator engine and its tools.
+ *
+ * The name index starts right away; the content index is built lazily on the
+ * first content search (or eagerly when `contentLazy` is false) because it is
+ * the expensive half and most sessions never search bodies.
  * @param ctx - the plugin context.
  * @param config - validated configuration.
  */

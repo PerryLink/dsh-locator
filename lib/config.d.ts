@@ -25,6 +25,12 @@ export interface Config {
     memoryLimitMB: number;
     /** Index text-file bodies and DSH session messages into the content database. */
     contentIndex: boolean;
+    /**
+     * Build the content index on the first content search instead of at plugin
+     * start. Lazy keeps DSH startup free of content indexing; set false to build
+     * eagerly in the background right after startup.
+     */
+    contentLazy: boolean;
     /** Maximum bytes read from one text file. */
     contentMaxFileBytes: number;
     /** Stop adding content after this many body bytes; 0 means unlimited. */
@@ -35,8 +41,22 @@ export interface Config {
     contentMaxFiles: number;
     /** Most recent session logs indexed; 0 means all. */
     contentMaxSessions: number;
+    /** Index archived sessions too; the default leaves them out. */
+    contentIncludeArchived: boolean;
+    /**
+     * Session logs modified more recently than this are skipped until they have
+     * been quiet that long, so the session being written now is not re-read on
+     * every background refresh.
+     */
+    contentActiveSessionDelayMs: number;
     /** Extra session directories; empty means $DSH_HOME/sessions. */
     contentSessionDirs: string[];
+    /**
+     * Path segments or substrings skipped by the content index only: dependency
+     * trees and toolchains would otherwise eat the body-bytes budget before a
+     * user's own documents. The name index still covers them.
+     */
+    contentExcludes: string[];
     /**
      * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
      * requires running DSH as administrator). Falls back automatically.

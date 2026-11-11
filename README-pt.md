@@ -4,7 +4,7 @@
 
 **Busca de arquivos em todo o disco, em milissegundos, para o DeepSeek Harness — sem o Everything.**
 
-Índice próprio multiplataforma (Windows USN/MFT · macOS FSEvents · Linux inotify), quatro ferramentas para o agente e um painel web ordenável.
+Índice próprio multiplataforma (Windows USN/MFT · macOS FSEvents · Linux inotify), seis ferramentas para o agente — nomes, conteúdo e sessões — e um painel web ordenável.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -62,12 +62,12 @@ Ao instalar num perfil Web já em execução, **recarregue a página** (`F5`): a
 
 ![Painel de busca do dsh-locator: resultados Markdown filtrados por caminho, com contagem, tempo e colunas ordenáveis](docs/assets/panel-en.png)
 
-Pressione `Ctrl+Shift+F` em qualquer lugar da Web GUI, ou clique na lupa no rodapé da barra lateral. O painel consulta o mesmo índice por rotas do host na mesma origem (`POST /dsh-locator/search`, `POST /dsh-locator/status`), sem segundo servidor e sem porta extra.
+Pressione `Ctrl+Shift+F` em qualquer lugar da Web GUI, ou clique na lupa no rodapé da barra lateral. O painel se comunica com o host por rotas na mesma origem (`/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/status`, `/dsh-locator/reveal` e `/dsh-locator/open`), sem segundo servidor e sem porta extra.
 
 * Consulta vazia: entradas recentes por data; ao digitar, debounce de 110 ms e a mesma sintaxe das ferramentas.
 * Clique no cabeçalho para ordenar por nome, tamanho, data ou caminho; outro clique inverte.
-* `Somente arquivos` / `Somente pastas`; o rodapé mostra resultados, limite e tempo.
-* `↑`/`↓` seleciona, `Enter` copia, `Ctrl+O` abre, `Ctrl+Enter` insere `@"caminho"` no compositor, clique duplo revela no gerenciador, `Esc` fecha.
+* `Somente arquivos` / `Somente pastas` filtram o tipo; marcar **Buscar conteúdo** alterna entre a busca por nomes e a busca no conteúdo dos arquivos e das mensagens de sessão, e os acertos mostram um trecho de uma linha. O rodapé mostra resultados, limite e tempo.
+* `↑`/`↓` seleciona, `Enter` copia, `Ctrl+O` abre, `Ctrl+Enter` insere `@"caminho"` no compositor; o clique duplo revela um arquivo no gerenciador de arquivos e, num resultado de sessão, abre a conversa correspondente e destaca a mensagem encontrada por um instante. `Esc` fecha.
 * A interface segue `navigator.language` (zh/en/es/pt/hi).
 
 ## Ferramentas
@@ -75,9 +75,21 @@ Pressione `Ctrl+Shift+F` em qualquer lugar da Web GUI, ou clique na lupa no roda
 | Ferramenta | Uso |
 |---|---|
 | `locator_search` | Consulta com sintaxe estilo Everything. |
+| `locator_find` | Busca no corpo de arquivos e nas mensagens de sessão do DSH; os acertos trazem um trecho e, em conversas, `sessionId`/`messageId`. |
 | `locator_status` | Raízes, entradas, watcher, modo USN e erros. |
 | `locator_rebuild` | Reconstrói em segundo plano; buscas continuam no índice antigo. |
+| `locator_reindex` | Atualiza ou reconstrói o índice de conteúdo: incremental por padrão, `full: true` descarta e reconstrói. |
 | `locator_export` | Cópia somente leitura em SQLite (`entries(path, name, dir, size, mtime_ms, ext)`). |
+
+### Busca por conteúdo
+
+`locator_find` procura no corpo de arquivos de texto e nas mensagens de sessão do DSH por meio de um índice FTS5 local em SQLite. Subcadeias em chinês e inglês funcionam sem segmentação de palavras; cada acerto traz um trecho e, quando vem de uma conversa, `sessionId` e `messageId`.
+
+O índice de conteúdo é preguiçoso por padrão: nada é construído na inicialização e a primeira busca de conteúdo inicia a construção em segundo plano (`contentLazy: false` constrói desde o início). Ao reiniciar, o plugin reaproveita o banco existente e o atualiza de forma incremental; a indexação completa (primeiro os logs de sessão, depois o corpo dos arquivos) só roda quando o banco não existe, tem uma versão de esquema antiga ou não pode ser aberto. Depois disso, uma atualização incremental a cada `contentRefreshMs` (5 minutos) relê apenas os arquivos e as sessões cujo mtime mudou. O `locator_reindex` dispara um dos dois modos manualmente.
+
+Enquanto uma indexação está em andamento, as buscas continuam respondendo com o que já está indexado; a ferramenta e o painel mostram o estado da indexação.
+
+Os limites padrão são 1 MB por arquivo de texto, 200.000 arquivos, as 100 sessões mais recentes e 1 GB de texto — tudo configurável. Pastas de dependências e toolchains (`node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, …) ficam de fora por padrão — senão consomem o orçamento antes dos seus próprios documentos — e `contentExcludes` muda essa lista. O índice lê e descomprime de forma assíncrona e cede o event loop a cada ~8 ms (28,6 MB: 968 ms → 19 ms), então não trava o carregamento nem a troca de sessão; sessões arquivadas ficam de fora a menos que `contentIncludeArchived: true`, e uma sessão que está sendo escrita espera `contentActiveSessionDelayMs`.
 
 ### Sintaxe de consulta
 
@@ -104,7 +116,19 @@ case:1  wholeword:1      maiúsculas / palavra inteira
 | `refreshIntervalMs` | Reconstrução periódica quando não há watcher nativo. |
 | `windowsUsn` | Caminho rápido USN/MFT (Windows, administrador; padrão `false`). |
 | `scanWorkers` | Leitores de diretório em paralelo; 0 = CPU. |
+| `contentIndex` | Constrói o índice de conteúdo de arquivos e sessões (padrão `true`). |
+| `contentLazy` | Constrói o índice de conteúdo na primeira busca de conteúdo em vez de na inicialização; `false` constrói em segundo plano desde o início (padrão `true`). |
+| `contentMaxFileBytes` | Bytes lidos de cada arquivo de texto (padrão `1000000`). |
+| `contentMaxTotalBytes` | Total de bytes de conteúdo mantido; `0` = sem limite (padrão `1000000000`). |
+| `contentMaxFiles` | Máximo de arquivos de texto indexados a cada execução; `0` = sem limite (padrão `200000`). |
+| `contentMaxSessions` | Sessões mais recentes indexadas; `0` = todas (padrão `100`). |
+| `contentRefreshMs` | Ritmo da atualização incremental de conteúdo; `0` desativa (padrão `300000`). |
+| `contentIncludeArchived` | Indexa também sessões arquivadas; padrão `false`. |
+| `contentActiveSessionDelayMs` | Só indexa um log de sessão depois de ficar quieto esse tempo (padrão `120000`). |
+| `contentSessionDirs` | Diretórios adicionais de sessões; vazio = `$DSH_HOME/sessions`. |
+| `contentExcludes` | Trechos de caminho que a busca por conteúdo ignora (dependências e toolchains); o índice de nomes continua igual. |
 | `stateDir` | Diretório do instantâneo; vazio = cache do sistema. |
+
 
 ## Plataformas
 
@@ -117,6 +141,8 @@ case:1  wholeword:1      maiúsculas / palavra inteira
 No Windows, `scan --usn` grava `usn-state.json` (id do diário, próximo USN, raízes) e `serve --usn` reproduz o diário antes de servir: um arquivo criado com o daemon parado aparece após reiniciar sem reescanear. Diário desatualizado ou removido cai no watcher portátil.
 
 ## Desempenho
+
+Conteúdo medido na mesma máquina (cache quente): 20.000 arquivos / 40 MB → 15,1 s e 71 MB; 200.000 arquivos / 331 MB → 31,5 s e 711 MB; atualização incremental do índice completo (1,3 M entradas) 2,9 s; reiniciar reaproveita o banco e leva 4,6 s no corpus de 200.000 arquivos. O banco ocupa 2–3 vezes o texto indexado.
 
 - 1,2 M de entradas: consulta a quente 25–35 ms; busca durante a varredura ~2 ms.
 - `C:\Windows` (164.216 entradas) indexado por USN em 7,8 s num runner de CI; consulta 9,6 ms.
@@ -147,7 +173,7 @@ O motor Go fica em `engine/`; testes: `cd engine && go test ./...`.
 
 ## Limites
 
-* Só nomes, caminhos, tamanhos e datas: **não indexa conteúdo**. Para conteúdo use `grep`.
+* A busca por conteúdo lê apenas arquivos de texto (por extensão) e os logs de sessão do DSH; PDFs, documentos do Office e imagens não têm o texto extraído. Por padrão o corpo indexado fica limitado a 1 GB / 200.000 arquivos, então um diretório pessoal enorme guarda só a primeira fatia alcançada.
 * Não é um driver de sistema de arquivos; cobre apenas as raízes configuradas.
 * inotify usa um descritor por diretório; árvores enormes podem estourar o limite do kernel (há aviso e o instantâneo continua utilizável).
 * Escritas do WSL em `/mnt/c` podem não gerar notificações do Windows; reconstrua essas raízes.

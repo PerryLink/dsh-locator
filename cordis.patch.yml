@@ -38,6 +38,19 @@
         # directory walk. Requires DSH to run as administrator; on any failure
         # the engine falls back to the walk automatically.
         windowsUsn: false
+        # Content search reads text bodies and DSH session messages into a
+        # local SQLite FTS5 database. The defaults are documented in the README;
+        # override them here (or in the profile patch) when needed.
+        # contentIndex: true
+        # contentMaxFileBytes: 1000000
+        # contentMaxTotalBytes: 1000000000
+        # contentMaxFiles: 200000
+        # contentMaxSessions: 100
+        # contentRefreshMs: 300000
+        # contentIncludeArchived: false
+        # contentActiveSessionDelayMs: 120000
+        # contentSessionDirs: []
+        # contentExcludes: [node_modules, .cargo, .bun, .pnpm, site-packages, toolchain]
         # Snapshot directory. Empty means the platform cache directory
         # (%LOCALAPPDATA%\dsh-locator, ~/Library/Application Support/dsh-locator,
         # or $XDG_CACHE_HOME/dsh-locator).

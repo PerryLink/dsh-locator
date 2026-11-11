@@ -277,23 +277,98 @@ window.__ModuleLoader__.load({
     // ── panel ───────────────────────────────────────────────────────────────
     let workspaceService = null
 
-    function jumpHighlight(snippet) {
-      const phrase = String(snippet || '').replace(/\u0001|\u0002/g, '').replace(/…/g, ' ').trim().split(/\s+/).slice(0, 8).join(' ')
-      if (phrase.length < 2) return false
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+    // ── chat anchors ────────────────────────────────────────────────────────
+    // The Chat flow renders one `[data-chat-node-key]` row per node and the key
+    // of a human input embeds the message id the content index stored
+    // (`"<n>:input-message<messageId>"`). Anchor on that id first: it lands on
+    // the exact message instead of whichever copy of the words comes first in
+    // the document (the sidebar title, for example).
+
+    function chatScope() {
+      return document.querySelector('[data-conversation-scroll]')
+        || document.querySelector('[data-slot="conversation.chat.flow"]')
+        || null
+    }
+
+    function findMessageNode(messageId) {
+      if (!messageId) return null
+      const id = String(messageId)
+      if (id === '') return null
+      const rows = document.querySelectorAll('[data-chat-node-key]')
+      for (const row of rows) {
+        const key = row.getAttribute('data-chat-node-key') || ''
+        if (key === id || key.endsWith(id)) return row
+      }
+      return null
+    }
+
+    function markElement(element) {
+      if (!element || typeof element.scrollIntoView !== 'function') return false
+      element.scrollIntoView({ block: 'center' })
+      const previous = element.style.outline
+      const previousOffset = element.style.outlineOffset
+      const previousRadius = element.style.borderRadius
+      element.style.outline = '2px solid #4f7cff'
+      element.style.outlineOffset = '3px'
+      element.style.borderRadius = '8px'
+      clearTimeout(element.__dshLocatorMark)
+      element.__dshLocatorMark = setTimeout(() => {
+        element.style.outline = previous
+        element.style.outlineOffset = previousOffset
+        element.style.borderRadius = previousRadius
+      }, 2400)
+      return true
+    }
+
+    // Progressively shorter fallbacks: a FTS snippet may be cut mid-word or
+    // separated by ellipses, so try the whole phrase before the leading words.
+    function phraseCandidates(snippet) {
+      const clean = String(snippet || '')
+        .replace(/[\u0001\u0002]/g, ' ')
+        .replace(/…/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      const out = []
+      const push = value => {
+        const text = String(value || '').trim()
+        if (text.length >= 2 && !out.includes(text)) out.push(text)
+      }
+      if (clean === '') return out
+      push(clean)
+      const words = clean.split(' ')
+      if (words.length > 1) {
+        push(words.slice(0, 8).join(' '))
+        push(words.slice(0, 4).join(' '))
+        push(words.slice(0, 2).join(' '))
+      }
+      push(clean.slice(0, 24))
+      push(clean.slice(0, 12))
+      return out
+    }
+
+    function findPhraseNode(scope, phrase) {
+      if (!scope || phrase.length < 2) return null
+      const needle = phrase.toLowerCase()
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT)
       let node
       while ((node = walker.nextNode())) {
         const text = node.nodeValue || ''
-        const index = text.toLowerCase().indexOf(phrase.toLowerCase())
-        if (index < 0) continue
-        const element = node.parentElement
-        if (!element) continue
-        element.scrollIntoView({ block: 'center' })
-        const previous = element.style.outline
-        element.style.outline = '2px solid #4f7cff'
-        element.style.outlineOffset = '4px'
-        setTimeout(() => { element.style.outline = previous; element.style.outlineOffset = '' }, 2400)
-        return true
+        if (text.toLowerCase().indexOf(needle) < 0) continue
+        // The scope is the conversation transcript, so the first match already
+        // belongs to the bubble that contains the phrase.
+        const parent = node.parentElement
+        if (parent) return parent
+      }
+      return null
+    }
+
+    function jumpHighlight(snippet, messageId) {
+      const anchor = findMessageNode(messageId)
+      if (anchor !== null) return markElement(anchor)
+      const scope = chatScope()
+      for (const phrase of phraseCandidates(snippet)) {
+        const element = findPhraseNode(scope, phrase)
+        if (element !== null) return markElement(element)
       }
       return false
     }
@@ -312,6 +387,8 @@ window.__ModuleLoader__.load({
       const [total, setTotal] = useState(0)
       const [took, setTook] = useState(0)
       const [truncated, setTruncated] = useState(false)
+      const [contentBuilding, setContentBuilding] = useState(false)
+      const [refreshTick, setRefreshTick] = useState(0)
       const [status, setStatus] = useState(null)
       const [error, setError] = useState('')
       const [loading, setLoading] = useState(false)
@@ -373,6 +450,7 @@ window.__ModuleLoader__.load({
             setTotal(typeof data.total === 'number' ? data.total : nextHits.length)
             setTook(typeof data.tookMs === 'number' ? data.tookMs : 0)
             setTruncated(data.truncated === true)
+            setContentBuilding(contentMode && data.state != null && data.state.building === true)
             setSelected(0)
             setLoading(false)
           }).catch(cause => {
@@ -384,7 +462,15 @@ window.__ModuleLoader__.load({
           })
         }, 110)
         return () => clearTimeout(timer)
-      }, [open, query, sort, desc, filesOnly, dirsOnly, contentMode])
+      }, [open, query, sort, desc, filesOnly, dirsOnly, contentMode, refreshTick])
+
+      // The content index is built lazily on first use; poll until it settles so
+      // the first query fills in without the user retyping it.
+      useEffect(() => {
+        if (!open || !contentMode || !contentBuilding) return undefined
+        const timer = setTimeout(() => setRefreshTick(value => value + 1), 2500)
+        return () => clearTimeout(timer)
+      }, [open, contentMode, contentBuilding, refreshTick])
 
       const toggleSort = useCallback(key => {
         if (sort === key) {
@@ -425,10 +511,23 @@ window.__ModuleLoader__.load({
           return
         }
         const snippet = hit.snippet
+        const messageId = hit.messageId
         let tries = 0
+        let pulledEarlier = false
         const timer = setInterval(() => {
           tries++
-          if (jumpHighlight(snippet) || tries > 40) clearInterval(timer)
+          if (jumpHighlight(snippet, messageId)) {
+            clearInterval(timer)
+            return
+          }
+          // A long session renders its tail first: nudge the transcript to the
+          // top once so paging can load the message the hit points at.
+          if (!pulledEarlier && tries === 15) {
+            pulledEarlier = true
+            const scroller = document.querySelector('[data-conversation-scroll]')
+            if (scroller !== null && scroller.scrollTop > 0) scroller.scrollTop = 0
+          }
+          if (tries > 100) clearInterval(timer)
         }, 150)
       }, [close, copy, notify])
 
@@ -593,7 +692,8 @@ window.__ModuleLoader__.load({
             loading
               ? t('loading')
               : t('results', { total: total.toLocaleString() }) + (truncated ? ' (' + t('showing', { n: hits.length }) + ')' : '') + ' · ' + took.toFixed(1) + ' ms'
-                + (status && status.scanning ? ' · ' + t('indexing') : '')),
+                + (status && status.scanning ? ' · ' + t('indexing') : '')
+                + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
           toast === '' ? null : h('span', { className: 'dsh-locator-toast' }, toast),
           h('span', null, t('footer')),

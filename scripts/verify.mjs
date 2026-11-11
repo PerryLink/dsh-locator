@@ -3,7 +3,8 @@
  * Package sanity check: manifest, bundle patch, compiled entry, engine binary
  * and documentation must all be present before `npm pack`.
  */
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -56,6 +57,33 @@ requireFile(join(root, 'LICENSE'), 'LICENSE')
 const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
 for (const key of ['id: dsh-locator', 'name: dsh-locator', 'roots:', 'stateDir:', 'refreshIntervalMs:']) {
   if (!patch.includes(key)) failures.push(`cordis.patch.yml is missing ${key}`)
+}
+
+// Privacy guard, learned from 0.5.1: that release shipped a screenshot with a
+// real home directory and a README path example. npm unpublish only lasts 72
+// hours and mirrors keep serving the tarball, so the check runs before pack.
+const LEAKED_SCREENSHOTS = new Map([
+  ['3653c25817cd601202215dc79083f62b', 'panel-en.png from 0.5.1'],
+  ['dbb1e592ebff225662d5515e9efabd77', 'panel-zh.png from 0.5.1'],
+])
+for (const name of readdirSync(join(root, 'docs', 'assets'))) {
+  if (!name.endsWith('.png')) continue
+  const digest = createHash('md5').update(readFileSync(join(root, 'docs', 'assets', name))).digest('hex')
+  const leaked = LEAKED_SCREENSHOTS.get(digest)
+  if (leaked !== undefined) failures.push(`docs/assets/${name} is the leaked screenshot (${leaked}); regenerate it from /tmp/demo fake data`)
+}
+const TEXT_FILES = ['README.md', 'README.en.md', 'README-es.md', 'README-pt.md', 'README-hi.md', 'CHANGELOG.md', 'SECURITY.md', 'cordis.patch.yml', 'client.js', 'package.json']
+for (const name of readdirSync(join(root, 'src'))) {
+  if (name.endsWith('.ts')) TEXT_FILES.push(`src/${name}`)
+}
+const HOME_PATH = /\/home\/(?!user\b|username\b|you\b|me\b|example\b|<)[a-z0-9_.-]+\//i
+const WINDOWS_HOME_PATH = /[A-Za-z]:\\Users\\(?!<|Public\b)[A-Za-z0-9_.-]+\\/
+for (const name of TEXT_FILES) {
+  const path = join(root, name)
+  if (!existsSync(path)) continue
+  const text = readFileSync(path, 'utf8')
+  const match = text.match(HOME_PATH) ?? text.match(WINDOWS_HOME_PATH)
+  if (match !== null) failures.push(`${name} contains an absolute home path (${match[0]}); use $HOME or a placeholder`)
 }
 
 if (failures.length > 0) {
