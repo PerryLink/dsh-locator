@@ -185,6 +185,8 @@ El motor Go vive en `engine/`; pruebas: `cd engine && go test ./...`.
 
 ## Seguridad y privacidad
 
+La base de datos de contenido y el bloqueo de compilación se crean con permisos `0600`, y el directorio de estado con `0700`: otros usuarios locales no pueden leer los documentos indexados ni el texto de las sesiones.
+
 El índice es local: sin red, sin telemetría, sin subidas. La instantánea contiene nombres y rutas; trátala como datos privados. El plugin nunca modifica, mueve ni borra los archivos indexados.
 
 ## Licencia

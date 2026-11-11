@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -200,6 +200,103 @@ describe('ContentIndex', () => {
     await settle(kept)
     expect((await kept.search('DEPMARKER', 5)).length).toBeGreaterThan(0)
     expect((await kept.search('CARGOMARKER', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('rebuilds when the previous build never finished', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-interrupted-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-interrupted-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'INTERRUPTEDMARK content that survived\n')
+    const entries = [{ path, name: 'notes.md', size: 34, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const options = { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 }
+    const first = new ContentIndex(runtime, options)
+    cleanups.push(() => first.close())
+    first.start()
+    await settle(first)
+    first.close()
+
+    const db = new DatabaseSync(join(state, 'content.db'))
+    db.prepare("UPDATE content_meta SET value = 0 WHERE key = 'complete'").run()
+    db.prepare("UPDATE content_meta SET value = 999999999 WHERE key = 'total_bytes'").run()
+    db.close()
+
+    const second = new ContentIndex(runtime, options)
+    cleanups.push(() => second.close())
+    second.boot()
+    await settle(second)
+    expect(second.status().error).toBe('')
+    expect((await second.search('INTERRUPTEDMARK', 5)).length).toBeGreaterThan(0)
+    const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const complete = check.prepare("SELECT value FROM content_meta WHERE key = 'complete'").get() as { value: number }
+    const counter = check.prepare("SELECT value FROM content_meta WHERE key = 'total_bytes'").get() as { value: number }
+    const sum = check.prepare('SELECT COALESCE(SUM(length(body)), 0) AS n FROM docs').get() as { n: number }
+    check.close()
+    expect(Number(complete.value)).toBe(1)
+    expect(Number(counter.value)).toBe(Number(sum.n))
+  })
+
+  it('refuses to delete a content.db it does not own', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-foreign-state-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }))
+    const foreign = new DatabaseSync(join(state, 'content.db'))
+    foreign.exec('CREATE TABLE someone_elses_data (id INTEGER PRIMARY KEY)')
+    foreign.exec('INSERT INTO someone_elses_data (id) VALUES (1)')
+    foreign.close()
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().error).toContain('not a dsh-locator database')
+    expect(existsSync(join(state, 'content.db'))).toBe(true)
+    const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    expect((check.prepare('SELECT COUNT(*) AS n FROM someone_elses_data').get() as { n: number }).n).toBe(1)
+    check.close()
+  })
+
+  it('bounds the snippet of a one-character LIKE query', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-short-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-short-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'big.md')
+    writeFileSync(path, 'SHORTQ\n' + 'x'.repeat(5000))
+    const entries = [{ path, name: 'big.md', size: 5007, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 100000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const hits = await content.search('x', 5)
+    expect(hits.length).toBeGreaterThan(0)
+    expect(hits[0]!.snippet.length).toBeLessThanOrEqual(400)
+  })
+
+  it('reports a pending lazy start and keeps the database private', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-pending-'))
+    const state = join(root, 'state')
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    writeFileSync(join(root, 'a.md'), 'PENDINGMARK content\n')
+    const entries = [{ path: join(root, 'a.md'), name: 'a.md', size: 20, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.markPending()
+    expect(content.status().building).toBe(true)
+    content.start()
+    expect(content.status().building).toBe(true)
+    content.clearPending()
+    await settle(content)
+    expect(content.status().building).toBe(false)
+    if (process.platform !== 'win32') {
+      expect(statSync(join(state, 'content.db')).mode & 0o777).toBe(0o600)
+      expect(statSync(state).mode & 0o777).toBe(0o700)
+    }
+    const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const index = check.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'docs_meta_path'").get()
+    check.close()
+    expect(index).toBeDefined()
   })
 
   it('refuses a concurrent build but takes over a stale lock', async () => {

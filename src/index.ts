@@ -112,6 +112,9 @@ export function apply(ctx: Context, config: Config): void {
   const ensureContent = (): void => {
     if (content === undefined || contentStarted) return
     contentStarted = true
+    // Surface the lazy start immediately: the first query would otherwise look
+    // like a permanent "no results" until the asynchronous boot opens the DB.
+    content.markPending()
     void startContent()
   }
 
@@ -127,6 +130,7 @@ export function apply(ctx: Context, config: Config): void {
       armRefresh()
       logger.info('content index started')
     } catch (error) {
+      content!.clearPending()
       logger.info(`content index skipped: ${error instanceof Error ? error.message : String(error)}`)
     }
   }

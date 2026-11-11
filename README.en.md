@@ -283,6 +283,8 @@ The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOG
 
 ## Security and privacy
 
+The content database and build lock are created `0600` and the state directory `0700`, so other local users cannot read indexed documents or session text.
+
 The index is local: no network calls, no telemetry, no uploads. The snapshot contains file names and paths, so treat the state directory as private data and exclude it from backups if that matters to you. The plugin never modifies, moves or deletes indexed files.
 
 ## License

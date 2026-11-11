@@ -16,7 +16,7 @@
  * @module dsh-locator/content
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
@@ -34,6 +34,9 @@ const SCHEMA_VERSION = 2
 
 /** Work budget between two event-loop yields; keeps host latency low. */
 const SLICE_MS = 8
+
+/** Wall-clock start of this process; distinguishes a reused pid from a live sibling. */
+const PROCESS_START = Math.round(Date.now() - process.uptime() * 1000)
 
 /** Session bodies are short: a message, not a whole file. */
 const SESSION_BODY_BYTES = 8_000
@@ -120,11 +123,30 @@ export class ContentIndex {
   private lockHeld = false
   private readonly lockToken = randomUUID()
   private workerSeq = 0
+  private pendingStart = false
   private readonly pending = new Map<number, { resolve: (hits: ContentHit[]) => void; reject: (error: Error) => void }>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
 
-  status(): ContentState { return { ...this.state } }
+  status(): ContentState {
+    return { ...this.state, building: this.state.building || this.pendingStart }
+  }
+
+  /**
+   * Report a lazy build as in progress before the asynchronous start reaches
+   * `boot()`, so the panel/agent sees "building" on the very first query
+   * instead of an empty result with no hint.
+   */
+  markPending(): void {
+    if (this.state.building) return
+    this.state.error = ''
+    this.pendingStart = true
+  }
+
+  /** Drop the pending flag when the lazy start failed before it began. */
+  clearPending(): void {
+    this.pendingStart = false
+  }
 
   /** Queue a full rebuild; false when one is already running. */
   rebuild(): boolean {
@@ -147,6 +169,7 @@ export class ContentIndex {
     this.state.building = false
     this.stopWorker()
     this.releaseLock()
+    this.pendingStart = false
   }
 
   /** Build everything from scratch. */
@@ -158,6 +181,9 @@ export class ContentIndex {
    * text. A missing or incompatible database falls back to a full build.
    */
   boot(): void {
+    // A content operation that ran before the deferred boot may have built the
+    // database already; do not start a second pass behind it.
+    if (this.state.updatedAt > 0) return
     this.begin(existsSync(join(this.options.stateDir, 'content.db')) ? 'incremental' : 'full')
   }
 
@@ -172,17 +198,17 @@ export class ContentIndex {
    */
   private acquireLock(): boolean {
     if (this.lockHeld) return true
-    mkdirSync(this.options.stateDir, { recursive: true })
+    mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 })
     const path = join(this.options.stateDir, 'content.lock')
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const fd = openSync(path, 'wx')
-        writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.lockToken }))
+        const fd = openSync(path, 'wx', 0o600)
+        writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.lockToken, procStart: PROCESS_START }))
         closeSync(fd)
         this.lockHeld = true
         return true
       } catch {
-        let holder: { pid?: number; startedAt?: number; token?: string } = {}
+        let holder: { pid?: number; startedAt?: number; token?: string; procStart?: number } = {}
         try { holder = JSON.parse(readFileSync(path, 'utf8')) as typeof holder } catch { /* unreadable: treat as stale */ }
         const age = Date.now() - Number(holder.startedAt ?? 0)
         let alive = false
@@ -192,8 +218,10 @@ export class ContentIndex {
           }
         }
         // A live sibling instance (for example during profile HMR) blocks even
-        // when it shares our pid; the per-instance token tells them apart.
-        if (alive && holder.token !== this.lockToken) return false
+        // when it shares our pid; the per-instance token tells them apart. A
+        // reused pid from an earlier process incarnation is stale, not live.
+        const sameProcess = holder.procStart === undefined || Math.abs(Number(holder.procStart) - PROCESS_START) < 5_000
+        if (alive && sameProcess && holder.token !== this.lockToken) return false
         try { rmSync(path, { force: true }) } catch { return false }
       }
     }
@@ -208,6 +236,7 @@ export class ContentIndex {
 
   private begin(mode: 'full' | 'incremental'): void {
     if (this.state.building) return
+    this.pendingStart = false
     if (!this.acquireLock()) {
       this.state.error = 'another dsh-locator content build is running'
       return
@@ -241,6 +270,9 @@ export class ContentIndex {
       this.open(false)
       const stored = (this.db!.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version ?? 0
       if (Number(stored) !== SCHEMA_VERSION) return await this.full(generation)
+      // A database whose last build never finished (crash, update, forced
+      // reload) has a stale byte counter; rebuild instead of trusting it.
+      if (this.readFlag('complete') !== 1) return await this.full(generation)
       this.totalBytes = this.readTotalBytes()
       await this.refreshFiles(generation)
       if (generation !== this.generation) return
@@ -258,8 +290,16 @@ export class ContentIndex {
   }
 
   private open(fresh: boolean): void {
-    mkdirSync(this.options.stateDir, { recursive: true })
+    const existedDir = existsSync(this.options.stateDir)
+    mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 })
+    if (!existedDir) {
+      try { chmodSync(this.options.stateDir, 0o700) } catch { /* Windows or a read-only profile */ }
+    }
     const dbPath = join(this.options.stateDir, 'content.db')
+    const existed = existsSync(dbPath)
+    if (existed && !this.ownedDatabase(dbPath)) {
+      throw new Error(`content.db is not a dsh-locator database, refusing to touch it: ${dbPath}`)
+    }
     let oldFileRemained = false
     if (fresh) {
       // A full rebuild throws every row away. Dropping the FTS tables in place
@@ -275,6 +315,7 @@ export class ContentIndex {
     }
     this.db?.close()
     this.db = new DatabaseSync(dbPath)
+    try { chmodSync(dbPath, 0o600) } catch { /* Windows or a read-only profile */ }
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = OFF')
     if (fresh && oldFileRemained) {
@@ -289,11 +330,15 @@ export class ContentIndex {
     )`)
     this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT)')
     this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
+    this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_path ON docs_meta(path)')
     if (fresh) {
       this.db.exec('DROP TABLE IF EXISTS content_meta')
     }
     this.db.exec('CREATE TABLE IF NOT EXISTS content_meta (key TEXT PRIMARY KEY, value INTEGER)')
-    if (fresh) this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('total_bytes', 0)")
+    if (fresh) {
+      this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('total_bytes', 0)")
+      this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('complete', 0)")
+    }
     if (fresh) this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     this.reopenWorker()
   }
@@ -341,6 +386,29 @@ export class ContentIndex {
     }
   }
 
+  /** Whether `path` is a SQLite database this plugin created (has docs_meta). */
+  private ownedDatabase(path: string): boolean {
+    let probe: DatabaseSync | undefined
+    try {
+      probe = new DatabaseSync(path, { readOnly: true })
+      const row = probe.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'docs_meta'").get()
+      return row !== undefined
+    } catch {
+      return false
+    } finally {
+      try { probe?.close() } catch { /* ignore */ }
+    }
+  }
+
+  private readFlag(key: string): number | undefined {
+    const row = this.db!.prepare('SELECT value FROM content_meta WHERE key = ?').get(key) as { value?: number } | undefined
+    return row?.value === undefined ? undefined : Number(row.value)
+  }
+
+  private writeFlag(key: string, value: number): void {
+    this.db!.prepare('INSERT OR REPLACE INTO content_meta (key, value) VALUES (?, ?)').run(key, value)
+  }
+
   /**
    * Body bytes already stored. Reading a persisted counter avoids a full scan
    * of every FTS body (measured ~0.6 s for 1 GB) at the start of each refresh.
@@ -380,6 +448,7 @@ export class ContentIndex {
     this.state.building = false
     this.state.updatedAt = Date.now()
     this.writeTotalBytes()
+    this.writeFlag('complete', 1)
     this.reopenWorker()
   }
 

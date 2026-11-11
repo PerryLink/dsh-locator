@@ -69,9 +69,18 @@ export declare class ContentIndex {
     private lockHeld;
     private readonly lockToken;
     private workerSeq;
+    private pendingStart;
     private readonly pending;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
+    /**
+     * Report a lazy build as in progress before the asynchronous start reaches
+     * `boot()`, so the panel/agent sees "building" on the very first query
+     * instead of an empty result with no hint.
+     */
+    markPending(): void;
+    /** Drop the pending flag when the lazy start failed before it began. */
+    clearPending(): void;
     /** Queue a full rebuild; false when one is already running. */
     rebuild(): boolean;
     /** Queue an incremental refresh; false when one is already running. */
@@ -102,6 +111,10 @@ export declare class ContentIndex {
     private reopenWorker;
     private stopWorker;
     private ensureWorker;
+    /** Whether `path` is a SQLite database this plugin created (has docs_meta). */
+    private ownedDatabase;
+    private readFlag;
+    private writeFlag;
     /**
      * Body bytes already stored. Reading a persisted counter avoids a full scan
      * of every FTS body (measured ~0.6 s for 1 GB) at the start of each refresh.

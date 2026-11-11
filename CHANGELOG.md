@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.5 — 2026-11-11
+
+Hardening release from a full risk/bug pass against the real 3 GB content database.
+
+* `deletePath` no longer scans every row: `docs_meta(path)` is indexed, so removing a rewritten session costs a lookup instead of ~10 ms of table scan (measured 6 ms before the index on 95k rows).
+* A one- or two-character content query used to return full document bodies (up to a megabyte per hit); it now returns at most a 400-character excerpt. Matching rows are still found the same way, but the payload is bounded.
+* A build interrupted by a crash, update, or forced reload is detected by the persisted `complete` flag and rebuilt on the next start instead of trusting a stale byte counter (which could let the body budget drift).
+* The plugin refuses to delete a `content.db` it does not own (another tool in a shared `stateDir`); it reports an error instead of recreating the file.
+* The state directory is created `0700`, `content.db` and `content.lock` are created `0600`, so indexed documents and session text are not readable by other local users.
+* The build lock records the process start time as well as the pid, so a reused pid from an earlier incarnation cannot block builds for 30 minutes.
+* The first lazy content query now reports `building: true` immediately (requested-start flag) instead of returning an empty page until the asynchronous boot opens the database.
+* `boot()` skips a second pass when a content operation already built the database (for example `locator_reindex` right after a lazy start).
+
 ## 0.7.4 — 2026-11-11
 
 * The content index is **lazy by default**: plugin startup now costs nothing for content. The first body/session search (`locator_find`, the panel's “搜内容”, or `locator_reindex`) starts the build in the background; `contentLazy: false` restores the eager background build. A restart that already has a database still refreshes incrementally on first use.

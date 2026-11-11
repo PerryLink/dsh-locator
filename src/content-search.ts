@@ -19,10 +19,16 @@ export function searchContent(db: DatabaseSync, query: string, limit: number): C
   const capped = Math.max(1, Math.min(100, limit))
   let rows: Array<Record<string, unknown>>
   if ([...text].length < 3) {
-    rows = db.prepare(`SELECT kind, path, title, session_id, message_id, body, 0 AS score
+    // A one- or two-character query cannot use the trigram index, so bound the
+    // payload as well as the row count: never ship a whole megabyte body.
+    rows = db.prepare(`SELECT kind, path, title, session_id, message_id,
+      substr(body, 1, 400) AS snippet, 0 AS score
       FROM docs WHERE body LIKE '%' || ? || '%' LIMIT ?`).all(text, capped) as Array<Record<string, unknown>>
   } else {
     const match = text.split(/\s+/).filter(Boolean).map(term => '"' + term.replace(/"/g, '') + '"').join(' AND ')
+    // Keep MATCH in this statement: FTS5 snippet() and bm25() are only defined
+    // inside a matching query (a rowid subquery silently degrades both). The
+    // query runs in the search worker, so its cost stays off the host thread.
     rows = db.prepare(`SELECT kind, path, title, session_id, message_id,
       snippet(docs, 0, char(1), char(2), '…', 16) AS snippet, bm25(docs) AS score
       FROM docs WHERE docs MATCH ? ORDER BY score LIMIT ?`).all(match, capped) as Array<Record<string, unknown>>
