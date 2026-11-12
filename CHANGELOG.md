@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.1 — 2026-11-13
+
+* Add `contentFullIndex: true` as the explicit one-switch full-content mode. It overrides `contentMaxTotalBytes`/`contentMaxFiles` to unlimited; the numeric caps and their defaults are unchanged. This avoids making users hand-write two zeros and makes the disk/build trade-off discoverable.
+* Status/docs use the same language: full mode is opt-in; the default remains capped at 1 GB / 200k files.
+
 ## 0.11.0 — 2026-11-13
 
 Search coverage, panel productivity and boundary hardening.

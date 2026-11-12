@@ -22,6 +22,7 @@ function config(overrides: Partial<Config> = {}): Config {
     contentMaxTotalBytes: 0,
     contentRefreshMs: 120_000,
     contentMaxFiles: 0,
+    contentFullIndex: false,
     contentMaxSessions: 0,
     contentSessionDirs: [],
     contentExcludes: [],

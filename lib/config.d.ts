@@ -39,6 +39,12 @@ export interface Config {
     contentRefreshMs: number;
     /** Maximum text files indexed per build; 0 means no cap. */
     contentMaxFiles: number;
+    /**
+     * One switch for full content search: overrides both body and file caps to
+     * unlimited. Off by default because a full index costs gigabytes of disk and
+     * a long first build; set this instead of hand-writing two zero values.
+     */
+    contentFullIndex: boolean;
     /** Most recent session logs indexed; 0 means all. */
     contentMaxSessions: number;
     /** Index archived sessions too; the default leaves them out. */
@@ -75,4 +81,14 @@ export interface Config {
 }
 /** Configuration schema; invalid values fail the profile load loudly. */
 export declare const Config: Schema<Config>;
+/**
+ * Effective content caps. `contentFullIndex` is the explicit one-switch full
+ * mode; otherwise the two numeric caps apply (0 still means unlimited).
+ * @param config - validated plugin configuration.
+ * @returns limits passed to {@link ContentIndex}.
+ */
+export declare function contentLimits(config: Pick<Config, 'contentFullIndex' | 'contentMaxTotalBytes' | 'contentMaxFiles'>): {
+    maxTotalBytes: number;
+    maxFiles: number;
+};
 //# sourceMappingURL=config.d.ts.map
