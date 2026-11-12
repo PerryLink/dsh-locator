@@ -62,6 +62,8 @@ describe('ContentIndex', () => {
     for (let i = 0; i < 200 && content.status().building; i++) await new Promise(resolve => setTimeout(resolve, 25))
     const hits = await content.search('launch friday', 5)
     expect(hits.some(hit => hit.kind === 'session' && hit.sessionId === 'session-abc' && hit.messageId === 'msg-2')).toBe(true)
+    expect(hits.find(hit => hit.messageId === 'msg-1')?.nodeKey).toBe('13:input-messagemsg-1')
+    expect(hits.find(hit => hit.messageId === 'msg-2')?.nodeKey).toBe('14:assistant-step1:1')
   })
 
   it('leaves archived sessions out unless includeArchived is set', async () => {

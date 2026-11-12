@@ -61,7 +61,7 @@ dsh plugin --profile web add dsh-locator
 | 能力 | 怎么用 |
 |---|---|
 | 文件名 / 路径搜索 | `locator_search`，或面板默认模式 |
-| 文件正文搜索 | `locator_find`，或面板勾选“搜内容” |
+| 文件正文搜索 | `locator_find`，或面板的“内容”范围（默认开启） |
 | DSH 会话内容搜索 | 同上；命中带 `sessionId` / `messageId`，可直接跳回那次对话 |
 | 打开 / 定位 | 工具返回路径；面板双击在文件管理器定位，`Ctrl+O` 打开，`Ctrl+Enter` 把 `@"路径"` 插进输入框 |
 | 外部工具消费 | `locator_export` 导出只读 SQLite |
@@ -150,7 +150,7 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 
 内容索引的行为：
 
-- **惰性启动**：插件启动时什么都不建；第一次搜内容（`locator_find` 或面板“搜内容”）才开始后台构建，`contentLazy: false` 可恢复启动即建。第一次查询会立刻返回 `building: true`，不会让你干等或误以为没结果。
+- **惰性启动**：插件启动时什么都不建；第一次搜内容（`locator_find` 或面板的“内容”范围）才开始后台构建，`contentLazy: false` 可恢复启动即建。第一次查询会立刻返回 `building: true`，不会让你干等或误以为没结果。
 - **重启复用**：有内容库时只做一次增量刷新，不重读全部正文；只有库不存在、结构版本不兼容、上次构建没完成或损坏时才全量重建（先会话、后文件正文）。
 - **增量刷新**：默认每 5 分钟检查一次，只重读 mtime 变化的文件/会话；`contentRefreshMs` 可调，0 关闭。
 - **归档与活动会话**：已归档会话默认不索引（`contentIncludeArchived: true` 才索引）；正在写入的会话等它安静 `contentActiveSessionDelayMs`（默认 2 分钟）后再索引，不会每轮刷新重解压整份日志；已删除的会话随文件消失自动退出索引。
@@ -161,22 +161,13 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 
 ## Web 面板
 
-![搜索面板：勾选“搜内容”后在文件正文中搜索，显示命中片段和路径](docs/assets/panel-zh.png)
-
-在 Web GUI 里按 `Ctrl+Shift+F`，或者点侧栏底部的放大镜。
-
-- 空查询按修改时间列出最近的条目；输入后 110ms 防抖，和工具用同一套语法。
-- 点列头按名称、大小、修改时间、路径排序；可勾选“只看文件”“只看目录”。
-- 勾选“搜内容”切换到正文/会话搜索；构建期间底栏显示状态并自动重查。
-- `↑`/`↓` 选择，`Enter` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 把 `@"路径"` 插进输入框，`Esc` 关闭。
-- 双击文件结果在文件管理器里定位；双击会话结果打开对应会话并尝试滚动到命中处。
-- 面板文案跟随 `navigator.language`（中/英/西/葡/印地语）。
-
-面板通过同源路由工作：`/dsh-locator/search`、`/dsh-locator/content`、`/dsh-locator/content/rebuild`、`/dsh-locator/combined`、`/dsh-locator/status`、`/dsh-locator/reveal`、`/dsh-locator/open`。不另起服务，也不占额外端口。
+在 Web GUI 里按 `Ctrl+Shift+F`，或者点侧栏底部的放大镜。面板通过同源路由工作（`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`），不另起服务、不占额外端口。
 
 - **默认同时搜索三个范围**：内容（正文 + 会话）、文件、目录，三个勾选默认全部打开；取消任一勾选即可缩小范围。结果按“内容 → 文件 → 目录”分组，组头显示数量；内容按相关度排序，文件/目录按排序菜单。
-- **双击或 `Enter` 激活**：会话命中会打开对应会话，并把命中的词用半透明琥珀色高亮（随滚动跟随、自动居中、`Esc` 清除）；文件/目录在文件管理器中定位。`Ctrl+Shift+C` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 插入 `@file`，`Alt+1–3` 切换范围。
-- 内容查询至少需要 2 个字符；空查询和 1 个字符的查询不会启动内容索引构建。
+- **双击或 `Enter` 激活**：会话命中打开对应会话，并把命中的词用半透明琥珀色高亮（随滚动跟随、自动居中、`Esc` 清除）；文件/目录在文件管理器中定位。`Ctrl+Shift+C` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 插入 `@file`，`Alt+1–3` 切换范围。
+- 内容查询至少需要 2 个字符；空查询和 1 个字符的查询不会启动内容索引构建。构建期间内容组显示进度，文件名/目录结果立即返回；勾选状态会记住。
+- 键盘：`↑`/`↓`、`Home`/`End`、`PageUp`/`PageDown` 移动，`Enter` 激活，`Esc` 关闭；对话框有焦点陷阱并在关闭时还原。面板文案跟随 `navigator.language`（中/英/西/葡/印地语）。
+
 
 ## 工具一览
 
@@ -353,7 +344,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 两个 DSH 进程共享同一个 `stateDir` 时，构建锁只能串行化写入；建议各用各的缓存目录。
 - macOS 的发布版二进制用 FSEvents；`CGO_ENABLED=0` 构建只有 kqueue，目录上限 4096，且内容变更依赖定时重建。
 
-- 文件正文命中目前只在文件管理器里定位（在 DSH 内按行预览是下一步）；assistant 消息的 DOM 行不带 messageId，跳转用短语回退定位。
+- 文件正文命中目前只在文件管理器里定位（在 DSH 内按行预览是下一步）；assistant 消息通过 `turn:step` 节点键精确定位，找不到时才退回短语匹配。升级到 0.8.1 会因新增节点键字段重建一次内容库。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
 ## 安全与隐私

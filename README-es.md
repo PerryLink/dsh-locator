@@ -62,7 +62,7 @@ Buscar archivos tiene dos formas:
 | Capacidad | Cómo se usa |
 |---|---|
 | Búsqueda por nombre / ruta | `locator_search`, o el modo por defecto del panel |
-| Búsqueda en el cuerpo del archivo | `locator_find`, o el modo **Buscar contenido** del panel |
+| Búsqueda en el cuerpo del archivo | `locator_find`, o el ámbito **Contenido** del panel (activo por defecto) |
 | Búsqueda en sesiones de DSH | Las mismas herramientas; los resultados llevan `sessionId` / `messageId` y el panel puede volver a la conversación |
 | Abrir / mostrar | Las herramientas devuelven rutas; el panel abre con doble clic, `Ctrl+O` abre y `Ctrl+Enter` inserta `@"ruta"` en el compositor |
 | Consumo externo | `locator_export` escribe una réplica SQLite de solo lectura |
@@ -162,23 +162,13 @@ La construcción ocurre dentro del proceso anfitrión de DSH, pero las lecturas 
 
 ## Panel web
 
-![Panel de búsqueda de dsh-locator: modo contenido activado, con aciertos en el cuerpo y fragmentos](docs/assets/panel-en.png)
-
-Pulsa `Ctrl+Shift+F` en cualquier parte de la GUI web, o haz clic en la lupa del pie de la barra lateral.
-
-- Una consulta vacía lista las entradas modificadas más recientemente; al escribir se usa la misma sintaxis que las herramientas tras 110 ms de debounce.
-- Haz clic en la cabecera de una columna para ordenar por nombre, tamaño, fecha de modificación o ruta.
-- Alterna **solo archivos** / **solo directorios** para filtrar el tipo.
-- Marca **Buscar contenido** para pasar de nombres a cuerpos de archivo y mensajes de sesión; mientras se construye el índice el pie muestra el estado y el panel vuelve a consultar.
-- `↑`/`↓` seleccionan, `Enter` copia la ruta, `Ctrl+O` abre, `Ctrl+Enter` inserta `@"ruta"` en el compositor y `Esc` cierra.
-- Doble clic en un archivo lo muestra en Explorer/Finder/`xdg-open`; doble clic en una sesión abre la conversación en el mensaje encontrado.
-- El texto del panel sigue `navigator.language` (zh/en/es/pt/hi).
-
-El panel usa rutas del mismo origen — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/combined`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — así que no necesita otro servidor ni otro puerto. Los perfiles sin servidor web no lo montan.
+Pulsa `Ctrl+Shift+F` en la GUI web, o haz clic en la lupa del pie de la barra lateral. El panel usa rutas del mismo origen (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sin otro servidor ni otro puerto.
 
 - **Los tres ámbitos están activos por defecto**: contenido (cuerpos + sesiones), archivos y carpetas; desmarca cualquiera para acotar. Los resultados se agrupan **contenido → archivos → carpetas** con el recuento por grupo; el contenido se ordena por relevancia y los grupos de nombres siguen el menú de orden.
 - **Doble clic o `Enter` activa un resultado**: una sesión abre la conversación y pinta las palabras encontradas con un resaltado ámbar translúcido que sigue el desplazamiento, se centra al llegar y se limpia con `Esc`; archivos y carpetas se muestran en el gestor de archivos. `Ctrl+Shift+C` copia la ruta, `Ctrl+O` abre, `Ctrl+Enter` inserta `@file` y `Alt+1–3` alterna los ámbitos.
-- Las consultas de contenido requieren al menos dos caracteres; las consultas vacías o de un carácter no inician la construcción del índice.
+- Las consultas de contenido requieren al menos dos caracteres; las consultas vacías o de un carácter no inician la construcción. Mientras construye, el grupo de contenido muestra el progreso y los nombres responden al momento; la elección de ámbitos se recuerda.
+- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` mueven, `Enter` activa y `Esc` cierra; el diálogo atrapa el foco y lo restaura al cerrar. El texto sigue `navigator.language` (zh/en/es/pt/hi).
+
 
 ## Herramientas
 
@@ -388,7 +378,7 @@ DeepSeek Harness
 - macOS usa FSEvents (recursivo) en los binarios publicados; una compilación con `CGO_ENABLED=0` cae a kqueue, limitado a 4.096 directorios, con cambios de contenido dependientes de la reconstrucción periódica.
 - USN/MFT de Windows es opcional y solo se usa si el proceso puede leer el volumen y el diario está activo; si no, se usa el recorrido portátil.
 
-- Los aciertos en el cuerpo de un archivo se muestran por ahora en el gestor de archivos (la vista por línea dentro de DSH es el siguiente paso); los mensajes del asistente se localizan por frase porque sus filas del DOM no llevan messageId.
+- Los aciertos en el cuerpo de un archivo se muestran por ahora en el gestor de archivos (la vista por línea dentro de DSH es el siguiente paso); los mensajes del asistente ahora se anclan por su clave de nodo `turn:step`, con frase solo como reserva. Actualizar a 0.8.1 reconstruye una vez la base de contenido por el nuevo campo.
 - El resaltado dentro de la conversación usa la API CSS Custom Highlight; los navegadores antiguos sin ella caen a un contorno de fila.
 
 ## Memoria

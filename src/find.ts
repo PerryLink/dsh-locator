@@ -16,6 +16,7 @@ const HIT = {
     snippet: { type: 'string' },
     sessionId: { type: 'string' },
     messageId: { type: 'string' },
+    nodeKey: { type: 'string' },
     score: { type: 'number' },
   },
 } as const

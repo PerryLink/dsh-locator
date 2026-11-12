@@ -62,7 +62,7 @@ File lookup has two shapes:
 | Capability | How you use it |
 |---|---|
 | File name / path search | `locator_search`, or the panel's default mode |
-| File body search | `locator_find`, or the panel's **Search content** mode |
+| File body search | `locator_find`, or the panel's **Content** scope (on by default) |
 | DSH session search | Same tools; hits carry `sessionId` / `messageId`, so the panel can jump back to the conversation |
 | Open / reveal | Tools return paths; the panel double-click reveals, `Ctrl+O` opens, `Ctrl+Enter` inserts a quoted `@"path"` into the composer |
 | External consumption | `locator_export` writes a read-only SQLite mirror |
@@ -151,7 +151,7 @@ Searches the **bodies** of text files and DSH session messages and returns snipp
 
 How the content index behaves:
 
-- **Lazy by default.** Nothing is built at plugin start; the first content search (`locator_find` or the panel's content mode) starts the build in the background, and `contentLazy: false` restores the eager build. The first query reports `building: true` instead of an empty result with no hint.
+- **Lazy by default.** Nothing is built at plugin start; the first content search (`locator_find` or the panel's Content scope) starts the build in the background, and `contentLazy: false` restores the eager build. The first query reports `building: true` instead of an empty result with no hint.
 - **Restart reuses the database.** An existing database is refreshed incrementally; a full build (session logs first, then file bodies) runs only when the database is missing, has a stale schema, was left unfinished by an interrupted build, or cannot be opened.
 - **Incremental refresh** every `contentRefreshMs` (5 minutes by default) re-reads only files and sessions whose mtime changed; `0` disables it.
 - **Archived and active sessions.** Archived sessions are skipped unless `contentIncludeArchived: true`; a session log that is still being written is indexed after it has been quiet for `contentActiveSessionDelayMs` (2 minutes), so the current log is not decompressed on every refresh. Deleted sessions leave the index when their files disappear.
@@ -162,23 +162,13 @@ The build runs inside the DSH host process, but file reads and zstd decoding are
 
 ## Web panel
 
-![dsh-locator search panel: content mode checked, showing body matches and snippets](docs/assets/panel-en.png)
-
-Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot.
-
-- Empty query lists the most recently modified entries; typing runs the same Everything-style syntax after a 110 ms debounce.
-- Click a column header to sort by name, size, modification time or path.
-- Toggle **files only** / **directories only** to filter the kind.
-- Tick **Search content** to switch from names to file bodies and session messages; while the index builds the footer shows the state and the panel re-polls.
-- `↑`/`↓` select, `Enter` copies the path, `Ctrl+O` opens, `Ctrl+Enter` inserts a quoted `@"path"` into the composer, `Esc` closes.
-- Double-click a file hit to reveal it in Explorer/Finder/`xdg-open`; double-click a session hit to open the conversation at the matched message.
-- Panel text follows `navigator.language` (zh/en/es/pt/hi).
-
-The panel talks to same-origin host routes — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/combined`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — so it needs no second server and no extra port. Profiles without a Web server never mount it.
+Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot. The panel uses same-origin routes (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), so it needs no second server and no extra port.
 
 - **All three scopes are on by default**: content (bodies + sessions), files and folders; uncheck any scope to narrow the search. Results are grouped **content → files → folders** with a count per group; content is ranked by relevance and name groups follow the sort menu.
 - **Double-click or `Enter` activates a hit**: a session hit opens the conversation and paints the matched words with a translucent amber highlight that follows scrolling, is centered on arrival and clears with `Esc`; file/folder hits are revealed in the file manager. `Ctrl+Shift+C` copies the path, `Ctrl+O` opens, `Ctrl+Enter` inserts `@file`, and `Alt+1–3` toggles the scopes.
-- Content queries need at least two characters; empty and one-character queries never start the content build.
+- Content queries need at least two characters; empty and one-character queries never start the content build. While it builds the content group shows progress and name results return immediately; the scope choice is remembered.
+- Keyboard: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` move, `Enter` activates, `Esc` closes; the dialog traps focus and restores it on close. Panel text follows `navigator.language` (zh/en/es/pt/hi).
+
 
 ## Tools
 
@@ -388,7 +378,7 @@ DeepSeek Harness
 - macOS uses FSEvents (recursive) in the shipped binaries; a `CGO_ENABLED=0` build falls back to kqueue, capped at 4,096 directories, with content changes relying on the periodic rebuild.
 - Windows USN/MFT is optional and only used when the process can read the volume and the journal is active; otherwise the portable walk is used.
 
-- File-body hits currently reveal the file in the file manager (line-level preview inside DSH is next); assistant messages are located by phrase because their DOM rows carry no message id.
+- File-body hits currently reveal the file in the file manager (line-level preview inside DSH is next); assistant messages now anchor exactly through their `turn:step` node key, with a phrase fallback only when that row is missing. Upgrading to 0.8.1 rebuilds the content database once for the new node-key field.
 - In-conversation highlighting uses the CSS Custom Highlight API; older browsers without it fall back to a row outline.
 
 ## Memory

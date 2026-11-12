@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.1 — 2026-11-12
+
+Pre-delivery review fixes for 0.8.0, plus an exact DOM anchor for assistant messages.
+
+* **Exact anchors for every session hit**: the content index now stores the host's conversation node key (`13:input-message<id>` for user messages, `14:assistant-step<turn>:<step>` for assistant steps), so session jumps match the right row instead of falling back to the first phrase in the transcript. The schema moves to 3: an existing content database rebuilds once in the background after upgrading.
+* **Highlight persists while reading**: releasing the scroll lock (wheel, touch, pointer, keys) no longer clears the highlight — only `Esc`, a new jump, a session change or plugin disposal clear it. The bounded recenter updates its expected scroll position after each correction.
+* **Jump feedback after the panel closes**: a small shell notice reports "opened session", "could not locate the message" and the phrase fallback, instead of toasting into a closed panel.
+* **Cancellation**: a jump can now be cancelled while it is still looking for the session/message, so a rapid second double-click, `Esc` or plugin disposal cannot leave timers, observers or highlights behind.
+* Fixed: the combined response field is `contentEnabled` (the panel read `availableContent`), per-group errors were swallowed, stale rows stayed keyboard-activatable after unchecking a scope, loading a new query gave no visible feedback, Enter on panel buttons activated a result, `Alt+1–3` on macOS and Home/End in the search box were intercepted.
+* Docs (five languages): the old panel section was replaced with the 0.8 scopes/grouping/highlight behaviour; the limitation note now describes the assistant node-key anchor and the one-time rebuild.
+* Tests: 37 (session node-key assertions added); verify still checks client syntax and the combined route.
+
 ## 0.8.0 — 2026-11-12
 
 Search and locate: all three stores in one panel, and a Word/Notepad++-style highlight in the conversation.
