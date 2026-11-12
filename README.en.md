@@ -174,7 +174,11 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 - Double-click a file hit to reveal it in Explorer/Finder/`xdg-open`; double-click a session hit to open the conversation at the matched message.
 - Panel text follows `navigator.language` (zh/en/es/pt/hi).
 
-The panel talks to same-origin host routes — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — so it needs no second server and no extra port. Profiles without a Web server never mount it.
+The panel talks to same-origin host routes — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/combined`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — so it needs no second server and no extra port. Profiles without a Web server never mount it.
+
+- **All three scopes are on by default**: content (bodies + sessions), files and folders; uncheck any scope to narrow the search. Results are grouped **content → files → folders** with a count per group; content is ranked by relevance and name groups follow the sort menu.
+- **Double-click or `Enter` activates a hit**: a session hit opens the conversation and paints the matched words with a translucent amber highlight that follows scrolling, is centered on arrival and clears with `Esc`; file/folder hits are revealed in the file manager. `Ctrl+Shift+C` copies the path, `Ctrl+O` opens, `Ctrl+Enter` inserts `@file`, and `Alt+1–3` toggles the scopes.
+- Content queries need at least two characters; empty and one-character queries never start the content build.
 
 ## Tools
 
@@ -383,6 +387,9 @@ DeepSeek Harness
 - Two DSH processes sharing one `stateDir` should be avoided: the build lock serializes writers but cannot share one open database handle.
 - macOS uses FSEvents (recursive) in the shipped binaries; a `CGO_ENABLED=0` build falls back to kqueue, capped at 4,096 directories, with content changes relying on the periodic rebuild.
 - Windows USN/MFT is optional and only used when the process can read the volume and the journal is active; otherwise the portable walk is used.
+
+- File-body hits currently reveal the file in the file manager (line-level preview inside DSH is next); assistant messages are located by phrase because their DOM rows carry no message id.
+- In-conversation highlighting uses the CSS Custom Highlight API; older browsers without it fall back to a row outline.
 
 ## Memory
 

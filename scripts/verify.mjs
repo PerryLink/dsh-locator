@@ -4,6 +4,7 @@
  * and documentation must all be present before `npm pack`.
  */
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,6 +38,20 @@ requireFile(join(root, 'cordis.patch.yml'), 'bundle patch')
 requireFile(join(root, 'lib', 'index.js'), 'compiled plugin entry', 500)
 requireFile(join(root, 'lib', 'tools.js'), 'compiled tools', 500)
 requireFile(join(root, 'client.js'), 'client bundle', 5_000)
+try {
+  execFileSync(process.execPath, ['--check', join(root, 'client.js')], { stdio: 'pipe' })
+} catch (error) {
+  const detail = error instanceof Error && 'stderr' in error ? String(error.stderr).trim().split('\n').slice(0, 3).join(' ') : String(error)
+  failures.push(`client.js does not parse: ${detail}`)
+}
+const clientSource = existsSync(join(root, 'client.js')) ? readFileSync(join(root, 'client.js'), 'utf8') : ''
+for (const marker of ['/dsh-locator/combined', '::highlight(dsh-locator-find)', 'Alt+1–3', 'dsh-locator-find-active']) {
+  if (!clientSource.includes(marker)) failures.push(`client.js is missing ${marker}`)
+}
+for (const marker of ['/dsh-locator/combined', 'runCombinedSearch']) {
+  const source = existsSync(join(root, 'src', 'http.ts')) ? readFileSync(join(root, 'src', 'http.ts'), 'utf8') : ''
+  if (!source.includes(marker)) failures.push(`src/http.ts is missing ${marker}`)
+}
 for (const target of [
   ['linux-x64', 'indexd'],
   ['linux-arm64', 'indexd'],
