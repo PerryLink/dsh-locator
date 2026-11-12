@@ -8,6 +8,11 @@
  * few bodies and build the snippet in JS. Putting `snippet()` in the same
  * `ORDER BY rank` statement made a SQLite sorter evaluate it for every match
  * (measured 2.7 s for "the" on a 1 GB corpus; 60 ms with this split).
+ *
+ * Every unbounded-looking path has an explicit budget: queries shorter than a
+ * trigram are rejected instead of degrading into a full-table LIKE/GLOB scan,
+ * and the whole-word post-filter stops after a fixed number of rows, body bytes
+ * or milliseconds and reports a bounded count.
  * @module dsh-locator/content-search
  */
 import type { DatabaseSync } from 'node:sqlite';
@@ -22,6 +27,17 @@ export interface ContentCount {
     kind: 'exact' | 'bounded' | 'unknown';
     limit?: number;
 }
+/**
+ * Hard budget for the whole-word post-filter, which has to read candidate
+ * bodies in JS. Exceeding any cap stops the scan and keeps the hits found so
+ * far; the count then becomes bounded. Exposed mainly so embedders and tests
+ * can shrink the caps.
+ */
+export interface ContentScanBudget {
+    maxRows?: number;
+    maxBytes?: number;
+    maxMs?: number;
+}
 /** Options accepted by {@link searchContent} and the content search worker. */
 export interface ContentSearchOptions {
     matchMode?: ContentMatchMode;
@@ -33,6 +49,14 @@ export interface ContentSearchOptions {
     sessionPath?: string | null;
     count?: ContentCountMode;
     countLimit?: number;
+    /**
+     * Keep only file/session documents whose stored path lives under this
+     * directory prefix (the locator_find `scope: workspace` filter). Session
+     * documents are unaffected: they are scoped by `sessionPath`/`sessionId`.
+     */
+    pathPrefix?: string | null;
+    /** Override for the whole-word scan caps; production uses the defaults. */
+    scanBudget?: ContentScanBudget;
 }
 /** Result of one content query. */
 export interface ContentSearchResult {
@@ -66,6 +90,28 @@ export declare function decodeExtended(input: string): DecodedExtended;
  * nothing.
  */
 export declare function decodeExtendedForNames(input: string): DecodedExtended;
+/** Result of the query-entry checks shared by searchContent and the panel. */
+export interface ContentQueryCheck {
+    ok: boolean;
+    /** Literal terms for normal mode; one phrase for extended mode. */
+    terms: string[];
+    phrase: boolean;
+    warnings: string[];
+    error?: string;
+}
+/**
+ * Validate a content query before it reaches SQL.
+ *
+ * Content search only supports substrings the FTS5 trigram tokenizer can
+ * serve. A 1–2 character term used to fall back to a whole-corpus `LIKE` scan,
+ * which is both slow and unbounded; it is now a hard, visible error instead.
+ * The same limits apply after extended-mode escapes are decoded, and lengths
+ * are measured in Unicode code points so emoji are not mistaken for long text.
+ * @param query - raw query text.
+ * @param matchMode - `normal` (whitespace-separated terms) or `extended`.
+ * @returns normalized terms, or the first entry error.
+ */
+export declare function checkContentQuery(query: string, matchMode: ContentMatchMode): ContentQueryCheck;
 /** Whether `index` starts a whole-word occurrence of `length` bytes. */
 export declare function isWholeWord(hay: string, index: number, length: number): boolean;
 /** One located match: byte offset and length. */

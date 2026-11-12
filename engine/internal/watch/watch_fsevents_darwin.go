@@ -58,6 +58,13 @@ type watcher struct {
 	excludes []string
 	onError  func(error)
 
+	onDegraded   func(Health)
+	degraded     bool
+	degradedMu   sync.Mutex
+	reasons      []string
+	eventsClosed chan struct{}
+	closeEvents  sync.Once
+
 	file     *os.File
 	stream   C.FSEventStreamRef
 	info     unsafe.Pointer
@@ -88,21 +95,70 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		return nil, errors.New("FSEvents: cannot create the stream")
 	}
 	w := &watcher{
-		ix:       ix,
-		roots:    opt.Roots,
-		excludes: opt.Excludes,
-		onError:  opt.OnError,
-		file:     os.NewFile(uintptr(readFD), "dsh-locator-fsevents"),
-		stream:   stream,
-		info:     info,
-		events:   make(chan fsevent, 4096),
+		ix:           ix,
+		roots:        opt.Roots,
+		excludes:     opt.Excludes,
+		onError:      opt.OnError,
+		onDegraded:   opt.OnDegraded,
+		file:         os.NewFile(uintptr(readFD), "dsh-locator-fsevents"),
+		stream:       stream,
+		info:         info,
+		events:       make(chan fsevent, 4096),
+		eventsClosed: make(chan struct{}),
 	}
 	go w.readEvents()
 	return w, nil
 }
 
+// Health reports the FSEvents coverage. The stream is recursive, so every root
+// is covered until it dies or drops events.
+func (w *watcher) Health() Health {
+	w.degradedMu.Lock()
+	defer w.degradedMu.Unlock()
+	watching := len(w.roots)
+	if w.closed.Load() {
+		watching = 0
+	}
+	return Health{
+		Roots:    len(w.roots),
+		Watching: watching,
+		Degraded: w.degraded || len(w.reasons) > 0,
+		Reason:   strings.Join(w.reasons, "; "),
+	}
+}
+
+// markDegraded records dropped-event coverage and notifies the daemon once.
+// FSEvents can coalesce or drop events; the daemon's periodic rebuild then
+// covers whatever the rescan could not repair.
+func (w *watcher) markDegraded(reason string) {
+	if reason == "" {
+		return
+	}
+	w.degradedMu.Lock()
+	first := !w.degraded
+	w.degraded = true
+	dup := false
+	for _, existing := range w.reasons {
+		if existing == reason {
+			dup = true
+			break
+		}
+	}
+	if !dup && len(w.reasons) < 4 {
+		w.reasons = append(w.reasons, reason)
+	}
+	reasonText := strings.Join(w.reasons, "; ")
+	w.degradedMu.Unlock()
+	if first && w.onDegraded != nil {
+		w.onDegraded(Health{Roots: len(w.roots), Watching: len(w.roots), Degraded: true, Reason: reasonText})
+	}
+}
+
 // readEvents decodes the length-prefixed records written by the C callback.
+// It closes eventsClosed when the stream ends so Run can fall back instead of
+// blocking forever.
 func (w *watcher) readEvents() {
+	defer w.closeEvents.Do(func() { close(w.eventsClosed) })
 	var header struct {
 		PathLen uint32
 		Flags   uint32
@@ -141,10 +197,16 @@ func (w *watcher) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			w.Close()
 			return ctx.Err()
+		case <-w.eventsClosed:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errors.New("FSEvents stream ended")
 		case event := <-w.events:
 			w.apply(event)
 		case <-ticker.C:
 			if w.overflow.Swap(false) {
+				w.markDegraded("FSEvents dropped events; rescanned the roots")
 				w.rescan()
 			}
 		}
@@ -156,6 +218,9 @@ func (w *watcher) apply(event fsevent) {
 		return
 	}
 	if event.flags&(fseventMustScanSubDirs|fseventUserDropped|fseventKernelDropped|fseventEventIDsWrapped|fseventRootChanged) != 0 {
+		if event.flags&(fseventUserDropped|fseventKernelDropped|fseventEventIDsWrapped|fseventRootChanged) != 0 {
+			w.markDegraded("FSEvents reported dropped events; rescanned the roots")
+		}
 		w.rescan()
 		return
 	}

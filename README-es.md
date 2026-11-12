@@ -401,6 +401,15 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
+## Notas de actualización 0.10.0
+
+- La búsqueda de contenido requiere al menos **3 caracteres**; usa `Ctrl+F` para 1–2. Se rechazan consultas de más de 256 caracteres o 32 términos.
+- `locator_find` usa **ámbito workspace** por defecto (sesión del llamador y su cwd); para cruzar workspaces pasa `scope: "all"`. Nuevos parámetros: `matchMode`, `caseSensitive`, `wholeWord`, `sessionId`, `count`, `countLimit`, `pathPrefix`.
+- Las rutas HTTP del panel exigen el servicio `connection` de DSH (fail-closed) y POST + JSON + mismo origen; el perfil web estándar no cambia.
+- `locator_export` escribe por defecto en el stateDir del plugin y valida la propiedad antes de sobrescribir; `locator_rebuild` solo acepta subconjuntos de roots/excludes configurados.
+- Los binarios del motor son 0.10.0: guardado de snapshot con debounce, memoria de `sort=path` acotada, watcher con estado degradado/fallback; en macOS el release debe compilarse con cgo/FSEvents (el fallback kqueue de depuración no es publicable).
+- Cliente: clic en resultados conserva teclado/Esc; búsqueda con saltos suaves/`<br>`/CJK corregida; filas gemelas del asistente prefieren la respuesta; regex usa `u` y no cae al hilo principal; avisos/límites/truncado visibles.
+
 ## Seguridad y privacidad
 
 - El índice es local: sin llamadas de red, sin telemetría, sin subidas. El plugin nunca modifica, mueve ni borra archivos indexados.

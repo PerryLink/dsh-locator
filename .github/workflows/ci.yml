@@ -1,17 +1,116 @@
 name: ci
 
+# The full gate a release may be dispatched from: three operating systems, both
+# supported Node lines, the engine rebuilt from source for every shipped target,
+# and the engine-dependent test suites required to actually execute (until
+# 0.9.0 they silently skipped whenever a host binary was missing).
+
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.22'
+
 jobs:
+  # Build the shipped engines from this commit exactly like release.yml does.
+  # Ubuntu only cross-builds linux/windows; darwin must be built on macOS with
+  # cgo so the FSEvents watcher is compiled in. Never run `build:engine:all` on
+  # Linux/Windows here: it would overwrite darwin with the kqueue fallback.
+  engine:
+    name: engine (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-win
+          - os: macos-latest
+            name: darwin-cgo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build engine binaries from source
+        shell: bash
+        env:
+          GROUP: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          echo "package version: ${version}"
+          rm -rf dist
+          mkdir -p dist
+          build() {
+            local goos="$1" goarch="$2" tag="$3" ext="$4" cgo="$5" cc="${6:-}"
+            mkdir -p "dist/${tag}"
+            (
+              cd engine
+              # macOS runners still default to bash 3.2: keep this array-free.
+              unset CC
+              if [ -n "${cc}" ]; then CC="${cc}"; export CC; fi
+              CGO_ENABLED="${cgo}" GOOS="${goos}" GOARCH="${goarch}" \
+                go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+                -o "../dist/${tag}/indexd${ext}" ./cmd/indexd
+            )
+            echo "built dist/${tag}/indexd${ext} (GOOS=${goos} GOARCH=${goarch} CGO_ENABLED=${cgo})"
+          }
+          case "${GROUP}" in
+            linux-win)
+              # Static cross-builds so the same binaries run on every Linux and Windows distro.
+              build linux amd64 linux-x64 '' 0
+              build linux arm64 linux-arm64 '' 0
+              build windows amd64 win32-x64 .exe 0
+              build windows arm64 win32-arm64 .exe 0
+              expected=4
+              ;;
+            darwin-cgo)
+              # cgo is required for the FSEvents watcher; the kqueue fallback is never shipped.
+              build darwin arm64 darwin-arm64 '' 1
+              build darwin amd64 darwin-x64 '' 1 'clang -arch x86_64'
+              expected=2
+              ;;
+            *)
+              echo "::error::unknown engine group ${GROUP}"
+              exit 1
+              ;;
+          esac
+          find dist -type f | sort
+          count="$(find dist -type f | wc -l | tr -d ' ')"
+          if [ "${count}" -ne "${expected}" ]; then
+            echo "::error::expected ${expected} engine binaries, built ${count}"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engines-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
   node:
+    name: node ${{ matrix.node }} (${{ matrix.os }})
+    needs: engine
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -19,22 +118,87 @@ jobs:
           version: 12.16.1
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: pnpm
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
-      # Rebuild the committed engine binaries on Linux; Windows and macOS run
-      # the published binaries so the plugin tests cover those platforms too.
-      - if: runner.os == 'Linux'
-        run: pnpm build:engine:all
-      - run: pnpm test
-      - run: node scripts/verify.mjs
+      - name: Download the engines built from this commit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engines-*
+          path: dist
+          merge-multiple: true
+      - name: Install all six freshly built engines into bin/
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(find dist -type f | wc -l | tr -d ' ')"
+          if [ "${count}" -ne 6 ]; then
+            echo "::error::expected 6 engine binaries from the engine jobs, got ${count}"
+            find dist -type f | sort
+            exit 1
+          fi
+          cp -a dist/. bin/
+          # upload-artifact/download-artifact does not preserve the executable
+          # bit, so restore it before running the host engine and the tests.
+          if [ "$(node -p process.platform)" != "win32" ]; then
+            chmod +x bin/*/indexd
+          fi
+          host="$(node -p "process.platform + '-' + (process.arch === 'x64' ? 'x64' : process.arch)")"
+          ext="$(node -p "process.platform === 'win32' ? '.exe' : ''")"
+          if [ ! -f "bin/${host}/indexd${ext}" ]; then
+            echo "::error::host engine bin/${host}/indexd${ext} is missing"
+            exit 1
+          fi
+          "bin/${host}/indexd${ext}" version
+      - name: Verify package and every engine binary
+        env:
+          # The engines here came from the engine jobs: darwin must be the
+          # macOS cgo/FSEvents build, never the kqueue fallback.
+          DSH_LOCATOR_REQUIRE_DARWIN_CGO: '1'
+        run: node scripts/verify.mjs
+      - name: Run tests and write a machine-readable report
+        run: pnpm exec vitest run --reporter=default --reporter=json --outputFile=vitest-report.json
+      - name: Assert the real-engine suites actually ran
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          node -e '
+          const fs = require("node:fs");
+          const REQUIRED = ["runtime.spec.ts", "plugin.spec.ts", "export.spec.ts"];
+          if (!fs.existsSync("vitest-report.json")) {
+            console.error("::error::vitest-report.json was not produced; the test run did not complete");
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync("vitest-report.json", "utf8"));
+          const results = report.testResults || [];
+          let failures = 0;
+          for (const file of results) {
+            for (const assertion of file.assertionResults || []) {
+              if (assertion.status === "failed") console.error(`failed: ${assertion.fullName}`);
+            }
+          }
+          for (const name of REQUIRED) {
+            const file = results.find((result) => result.name.endsWith(name));
+            if (!file) {
+              console.error(`::error::no test result for ${name}`);
+              failures += 1;
+              continue;
+            }
+            const assertions = file.assertionResults || [];
+            const executed = assertions.filter((assertion) => assertion.status === "passed" || assertion.status === "failed").length;
+            console.log(`${name}: ${executed}/${assertions.length} tests executed`);
+            if (executed === 0) {
+              console.error(`::error::${name} executed no tests: the host engine is missing or the suite was skipped via describe.skipIf`);
+              failures += 1;
+            }
+          }
+          process.exit(failures === 0 ? 0 : 1);
+          '
 
   go:
+    name: go (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -47,25 +211,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
       - run: go vet ./...
       - run: go test ./...
       - run: go build ./...
-      - name: Build cgo darwin binaries
-        if: matrix.os == 'macos-latest'
-        run: |
-          mkdir -p ../dist/darwin-arm64 ../dist/darwin-x64
-          VERSION=$(node -p "require('../package.json').version")
-          CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o ../dist/darwin-arm64/indexd ./cmd/indexd
-          CGO_ENABLED=1 GOARCH=amd64 CC='clang -arch x86_64' go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o ../dist/darwin-x64/indexd ./cmd/indexd
-      - uses: actions/upload-artifact@v4
-        if: matrix.os == 'macos-latest'
-        with:
-          name: dsh-locator-darwin-cgo
-          path: dist
-          if-no-files-found: warn
 
   cross:
+    name: cross-compile
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -74,9 +227,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
-      - run: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
-      - run: GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build ./...
-      - run: GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build ./...
-      - run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build ./...
-      - run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # Build-only coverage for every GOOS/GOARCH pair, including the darwin
+      # kqueue fallback (CGO_ENABLED=0). Writes no artifacts, so it cannot
+      # replace the cgo darwin binaries built by the engine job.
+      - name: Cross-compile every target
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=windows GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=linux GOARCH=arm64 go build ./...

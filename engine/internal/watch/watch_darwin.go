@@ -35,14 +35,20 @@ type watcher struct {
 	excludes []string
 	onError  func(error)
 
+	onDegraded func(Health)
+	rootsWatch int
+	dirsFailed int
+	degraded   bool
+	reasons    []string
+
 	kq      int
 	mu      sync.Mutex
 	dirs    map[int]*watchedDir
 	fdPaths map[int]string
 	paths   map[string]int
 	names   map[string]*watchedDir
-	closed bool
-	warned bool
+	closed  bool
+	warned  bool
 }
 
 func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
@@ -51,18 +57,30 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		return nil, fmt.Errorf("kqueue: %w", err)
 	}
 	w := &watcher{
-		ix:       ix,
-		roots:    opt.Roots,
-		excludes: opt.Excludes,
-		onError:  opt.OnError,
-		kq:       kq,
-		dirs:     make(map[int]*watchedDir),
-		fdPaths:  make(map[int]string),
-		paths:    make(map[string]int),
-		names:    make(map[string]*watchedDir),
+		ix:         ix,
+		roots:      opt.Roots,
+		excludes:   opt.Excludes,
+		onError:    opt.OnError,
+		onDegraded: opt.OnDegraded,
+		kq:         kq,
+		dirs:       make(map[int]*watchedDir),
+		fdPaths:    make(map[int]string),
+		paths:      make(map[string]int),
+		names:      make(map[string]*watchedDir),
 	}
 	for _, root := range opt.Roots {
+		if reason := unreliableNotifyFSDarwin(root); reason != "" {
+			w.markDegraded(reason)
+		}
+		before := w.dirCount()
 		w.addTree(root, false)
+		if w.dirCount() > before {
+			w.rootsWatch++
+		}
+	}
+	if w.dirCount() == 0 {
+		_ = syscall.Close(kq)
+		return nil, fmt.Errorf("kqueue: no directory could be watched")
 	}
 	return w, nil
 }
@@ -73,9 +91,67 @@ func (w *watcher) report(err error) {
 	}
 }
 
+func (w *watcher) dirCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.dirs)
+}
+
+// Health reports how many roots and directories have a vnode watch. The kqueue
+// backend is capped (one descriptor per directory), so it is honest about
+// subtrees beyond the budget: the periodic rebuild covers those.
+func (w *watcher) Health() Health {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	reasons := w.reasons
+	degraded := w.degraded || w.rootsWatch < len(w.roots) || w.dirsFailed > 0
+	if w.rootsWatch < len(w.roots) && len(reasons) == 0 {
+		reasons = []string{fmt.Sprintf("%d of %d root(s) could not be watched", len(w.roots)-w.rootsWatch, len(w.roots))}
+	}
+	return Health{
+		Roots:    len(w.roots),
+		Watching: w.rootsWatch,
+		Dirs:     len(w.dirs),
+		Degraded: degraded,
+		Reason:   strings.Join(reasons, "; "),
+	}
+}
+
+// markDegraded records incomplete coverage and notifies the daemon once.
+func (w *watcher) markDegraded(reason string) {
+	if reason == "" {
+		return
+	}
+	w.mu.Lock()
+	first := !w.degraded && !w.closed
+	w.degraded = true
+	dup := false
+	for _, existing := range w.reasons {
+		if existing == reason {
+			dup = true
+			break
+		}
+	}
+	if !dup && len(w.reasons) < 4 {
+		w.reasons = append(w.reasons, reason)
+	}
+	h := Health{
+		Roots:    len(w.roots),
+		Watching: w.rootsWatch,
+		Dirs:     len(w.dirs),
+		Degraded: true,
+		Reason:   strings.Join(w.reasons, "; "),
+	}
+	w.mu.Unlock()
+	if first && w.onDegraded != nil {
+		w.onDegraded(h)
+	}
+}
+
 func (w *watcher) addTree(root string, indexChildren bool) {
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			w.noteDirFailure()
 			return nil
 		}
 		if !d.IsDir() {
@@ -113,9 +189,13 @@ func (w *watcher) addDir(path string) bool {
 	if len(w.dirs) >= maxWatchedDirs {
 		if !w.warned {
 			w.warned = true
-			w.report(fmt.Errorf("kqueue watch limit reached (%d directories); deeper changes rely on the periodic rebuild", maxWatchedDirs))
+			w.mu.Unlock()
+			reason := fmt.Sprintf("kqueue watch limit reached (%d directories); deeper changes rely on the periodic rebuild", maxWatchedDirs)
+			w.report(errors.New(reason))
+			w.markDegraded(reason)
+		} else {
+			w.mu.Unlock()
 		}
-		w.mu.Unlock()
 		return false
 	}
 	w.mu.Unlock()
@@ -123,6 +203,7 @@ func (w *watcher) addDir(path string) bool {
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		w.report(fmt.Errorf("open %s: %w", path, err))
+		w.noteDirFailure()
 		return false
 	}
 	change := syscall.Kevent_t{
@@ -134,6 +215,7 @@ func (w *watcher) addDir(path string) bool {
 	if _, err := syscall.Kevent(w.kq, []syscall.Kevent_t{change}, nil, nil); err != nil {
 		_ = syscall.Close(fd)
 		w.report(fmt.Errorf("kevent add %s: %w", path, err))
+		w.noteDirFailure()
 		return false
 	}
 	entry := &watchedDir{fd: fd, known: listNames(path)}
@@ -329,4 +411,36 @@ func excluded(path, name string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// noteDirFailure counts a directory that could not be watched. The periodic
+// rebuild fallback covers its changes.
+func (w *watcher) noteDirFailure() {
+	w.mu.Lock()
+	w.dirsFailed++
+	count := w.dirsFailed
+	w.mu.Unlock()
+	w.markDegraded(fmt.Sprintf("kqueue coverage is incomplete (%d directorie(s) unwatched)", count))
+}
+
+// unreliableNotifyFSDarwin names the filesystem type when kqueue vnode events
+// cannot be trusted for root. Network mounts do not raise local vnode events for
+// remote changes.
+func unreliableNotifyFSDarwin(root string) string {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(root, &st); err != nil {
+		return ""
+	}
+	var name []byte
+	for _, c := range st.Fstypename {
+		if c == 0 {
+			break
+		}
+		name = append(name, byte(c))
+	}
+	switch strings.ToLower(string(name)) {
+	case "nfs", "smbfs", "webdav", "afpfs", "cifs", "osxfuse", "macfuse":
+		return fmt.Sprintf("%s does not deliver kqueue vnode events; changes are picked up by the periodic rebuild", string(name))
+	}
+	return ""
 }

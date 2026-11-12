@@ -72,6 +72,7 @@ usage:
                  [--whole-word] QUERY...
   indexd status  --state DIR [--json]
   indexd serve   --state DIR [--root PATH...] [--exclude GLOB...] [--no-watch]
+                 [--refresh DUR] [--save-debounce DUR] [--save-max-interval DUR]
   indexd usn-probe [--volume C:] [--root 'C:\\Users\\me'] [--limit 10]
                    [--enumerate=false] [--json]
 
@@ -258,7 +259,9 @@ func cmdServe(args []string) error {
 	fs.Var(&roots, "root", "directory to index (repeatable)")
 	fs.Var(&excludes, "exclude", "base-name glob to skip (repeatable)")
 	noWatch := fs.Bool("no-watch", false, "disable filesystem watching")
-	refresh := fs.Duration("refresh", 30*time.Minute, "rebuild interval when no native watcher exists (0 disables)")
+	refresh := fs.Duration("refresh", 0, "rebuild interval when no native watcher exists (0 disables; the plugin passes its configured value)")
+	saveDebounce := fs.Duration("save-debounce", 0, "write the snapshot after the index is quiet this long (0 = 60s)")
+	saveMax := fs.Duration("save-max-interval", 0, "force a snapshot write at most this long after changes (0 = 5m)")
 	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
 	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
 	memoryLimitMB := fs.Int("memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
@@ -289,11 +292,13 @@ func cmdServe(args []string) error {
 	ctx, stop := signalContext()
 	defer stop()
 	srv := server.New(server.Options{
-		StateDir: *state,
-		Roots:    roots,
-		Excludes: excludes,
+		StateDir:        *state,
+		Roots:           roots,
+		Excludes:        excludes,
 		Watch:           !*noWatch,
 		RefreshInterval: *refresh,
+		SaveDebounce:    *saveDebounce,
+		SaveMaxInterval: *saveMax,
 		ScanWorkers:     *workers,
 		USN:             *useUSN,
 		Version:         version,

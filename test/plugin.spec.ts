@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { apply } from '../src/index.ts'
 import type { Config } from '../src/config.ts'
 
-const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, 'indexd')
+const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, process.platform === 'win32' ? 'indexd.exe' : 'indexd')
 
 interface RegisteredTool {
   name: string
@@ -248,4 +248,101 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
     }
   })
 
+})
+
+describe('HTTP surface gating (no engine required)', () => {
+  interface Mounted {
+    routes: string[]
+    tools: string[]
+    dispose: () => void
+  }
+
+  /** Mount the plugin with a recording Web server and an optional connection service. */
+  function mount(connection?: unknown): Mounted {
+    const routes: string[] = []
+    const tools: RegisteredTool[] = []
+    const disposers: Array<() => void> = []
+    const root = mkdtempSync(join(tmpdir(), 'locator-http-mount-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-http-mount-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const services: Record<string, unknown> = {
+      webServer: {
+        register: (route: { path: string }) => {
+          routes.push(route.path)
+          return () => {}
+        },
+      },
+      ...(connection === undefined ? {} : { connection }),
+    }
+    const scoped = {
+      effect: (factory: () => () => void) => { disposers.push(factory()) },
+      get: (name: string) => services[name],
+    }
+    const ctx = {
+      logger: () => ({ info: () => {}, warn: () => {}, debug: () => {} }),
+      effect: (factory: () => () => void) => { disposers.push(factory()) },
+      tools: { register: (tool: RegisteredTool) => { tools.push(tool) } },
+      inject: (deps: string[], callback: (scopedCtx: Context) => void) => {
+        if (deps.every(dep => services[dep] !== undefined)) callback(scoped as unknown as Context)
+      },
+    } as unknown as Context
+    const config: Config = {
+      enabled: true,
+      roots: [root],
+      excludes: ['node_modules'],
+      watch: false,
+      refreshIntervalMs: 0,
+      scanWorkers: 0,
+      memoryLimitMB: 0,
+      contentIndex: false,
+      contentLazy: true,
+      contentMaxFileBytes: 1_000_000,
+      contentMaxTotalBytes: 0,
+      contentRefreshMs: 0,
+      contentMaxFiles: 0,
+      contentMaxSessions: 0,
+      contentSessionDirs: [],
+      contentExcludes: [],
+      contentIncludeArchived: false,
+      contentActiveSessionDelayMs: 0,
+      windowsUsn: false,
+      stateDir: state,
+      binaryPath: binary,
+      maxResults: 100,
+      startupTimeoutMs: 1_000,
+      requestTimeoutMs: 1_000,
+    }
+    apply(ctx, config)
+    return {
+      routes,
+      tools: tools.map(tool => tool.name),
+      dispose: () => { for (const dispose of disposers.reverse()) dispose() },
+    }
+  }
+
+  it('mounts no panel routes without the connection trust fence', () => {
+    // A Web server alone is not enough: exposing the routes would be fail-open.
+    const mounted = mount()
+    try {
+      expect(mounted.tools).toEqual(expect.arrayContaining(['locator_search', 'locator_status']))
+      expect(mounted.routes).toEqual([])
+    } finally {
+      mounted.dispose()
+    }
+  })
+
+  it('mounts the panel routes when webServer and connection are both present', () => {
+    const mounted = mount({ requestRejection: () => undefined })
+    try {
+      expect(mounted.routes.sort()).toEqual([
+        '/dsh-locator/combined',
+        '/dsh-locator/open',
+        '/dsh-locator/reveal',
+        '/dsh-locator/search',
+        '/dsh-locator/status',
+      ])
+    } finally {
+      mounted.dispose()
+    }
+  })
 })

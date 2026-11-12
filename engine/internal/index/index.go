@@ -78,6 +78,9 @@ func (ix *Index) AddRoot(root string) int32 {
 			}
 		}
 		ix.roots = append(ix.roots, id)
+		// The roots list is part of the snapshot even when the record itself
+		// was already present.
+		ix.gen++
 		return id
 	}
 	id := ix.appendLocked(root, -1, FileInfo{Mode: fs.ModeDir}, 0)
@@ -214,12 +217,12 @@ func (ix *Index) Stats() Stats {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	s := Stats{
-		Records:   len(ix.recs),
-		Dirs:      0,
-		Roots:     len(ix.roots),
-		NameBytes: len(ix.names),
-		Deleted:   ix.nDelet,
-		BuiltAt:   ix.built,
+		Records:    len(ix.recs),
+		Dirs:       0,
+		Roots:      len(ix.roots),
+		NameBytes:  len(ix.names),
+		Deleted:    ix.nDelet,
+		BuiltAt:    ix.built,
 		Generation: ix.gen,
 	}
 	for i := range ix.recs {
@@ -399,17 +402,36 @@ func (ix *Index) addLocked(full string, info FileInfo) int32 {
 	return ix.addLockedFRN(full, info, 0)
 }
 
+// addLockedFRN indexes one path. An existing record is updated in place, but
+// the generation only advances when a persisted field actually changed: the
+// watcher sees a lot of repeat notifications (create followed by close-write,
+// attribute churn), and bumping the generation for every event made the daemon
+// rewrite a multi-hundred-megabyte snapshot on a timer even when nothing had
+// changed.
 func (ix *Index) addLockedFRN(full string, info FileInfo, frn uint64) int32 {
 	full = cleanPath(full)
 	if id := ix.table.get(full, ix); id >= 0 {
 		r := &ix.recs[id]
-		r.Size = info.Size
-		r.Mtime = info.Mtime
-		r.Flags = flagsFor(info.Mode, r.Flags)
-		if frn != 0 {
-			r.FRN = frn
+		changed := false
+		if r.Size != info.Size {
+			r.Size = info.Size
+			changed = true
 		}
-		ix.gen++
+		if r.Mtime != info.Mtime {
+			r.Mtime = info.Mtime
+			changed = true
+		}
+		if flags := flagsFor(info.Mode, r.Flags); flags != r.Flags {
+			r.Flags = flags
+			changed = true
+		}
+		if frn != 0 && r.FRN != frn {
+			r.FRN = frn
+			changed = true
+		}
+		if changed {
+			ix.gen++
+		}
 		return id
 	}
 	parent := int32(-1)
@@ -454,12 +476,21 @@ type DumpEntry struct {
 // cursor is a record id, so callers can stream the whole index without holding
 // the lock between pages.
 func (ix *Index) DumpPage(after int32, limit int) (entries []DumpEntry, next int32, done bool) {
+	return ix.DumpPageFrom(after, limit, 0)
+}
+
+// DumpPageFrom is DumpPage with an optional modification-time floor in Unix
+// milliseconds (the unit DumpEntry.Mtime uses). It lets a content index refresh
+// skip bodies that cannot have changed instead of materialising and shipping
+// every path again. mtimeFrom <= 0 exports everything.
+func (ix *Index) DumpPageFrom(after int32, limit int, mtimeFrom int64) (entries []DumpEntry, next int32, done bool) {
 	if limit <= 0 {
 		limit = 1000
 	}
 	if after < 0 {
 		after = 0
 	}
+	mtimeFloor := mtimeFrom * int64(time.Millisecond)
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	entries = make([]DumpEntry, 0, limit)
@@ -467,6 +498,9 @@ func (ix *Index) DumpPage(after int32, limit int) (entries []DumpEntry, next int
 	for ; i < len(ix.recs) && len(entries) < limit; i++ {
 		r := &ix.recs[i]
 		if r.Deleted() {
+			continue
+		}
+		if mtimeFrom > 0 && r.Mtime < mtimeFloor {
 			continue
 		}
 		path := ix.pathLocked(int32(i))
@@ -480,4 +514,26 @@ func (ix *Index) DumpPage(after int32, limit int) (entries []DumpEntry, next int
 		})
 	}
 	return entries, int32(i), i >= len(ix.recs)
+}
+
+// SnapshotState is the subset of index state that a saver must observe to
+// decide whether the on-disk snapshot is stale.
+type SnapshotState struct {
+	Generation uint64
+	Entries    int
+	NameBytes  int
+	BuiltAt    int64
+}
+
+// SnapshotState reports the state a snapshot write would persist. It takes only
+// the read lock, so a caller can poll it cheaply.
+func (ix *Index) SnapshotState() SnapshotState {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return SnapshotState{
+		Generation: ix.gen,
+		Entries:    len(ix.recs) - ix.nDelet,
+		NameBytes:  len(ix.names),
+		BuiltAt:    ix.built,
+	}
 }

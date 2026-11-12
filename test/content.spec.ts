@@ -1,10 +1,13 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import type { Worker } from 'node:worker_threads'
 import { zstdCompressSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
 import { ContentIndex } from '../src/content.ts'
+import type { ContentOptions } from '../src/content.ts'
 import type { LocatorRuntime, DumpPage } from '../src/runtime.ts'
 
 const cleanups: Array<() => void> = []
@@ -328,7 +331,7 @@ describe('ContentIndex', () => {
     check.close()
   })
 
-  it('bounds the snippet of a one-character LIKE query', async () => {
+  it('rejects sub-trigram queries instead of scanning the whole corpus', async () => {
     const root = mkdtempSync(join(tmpdir(), 'locator-short-'))
     const state = mkdtempSync(join(tmpdir(), 'locator-short-state-'))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
@@ -340,7 +343,14 @@ describe('ContentIndex', () => {
     cleanups.push(() => content.close())
     content.start()
     await settle(content)
-    const hits = await content.search('x', 5)
+    const result = await content.search('x', 5, {})
+    expect(result.hits).toEqual([])
+    expect(result.error).toBe('content-query-too-short')
+    expect(result.count).toEqual({ value: 0, kind: 'unknown' })
+    // The legacy hit-array form must not fall back to an unbounded LIKE scan.
+    expect(await content.search('x', 5)).toEqual([])
+    // A real trigram query still returns a bounded snippet.
+    const hits = await content.search('SHORTQ', 5)
     expect(hits.length).toBeGreaterThan(0)
     expect(hits[0]!.snippet.length).toBeLessThanOrEqual(400)
   })
@@ -501,6 +511,9 @@ describe('ContentIndex', () => {
     second.boot()
     await settle(second)
     expect(second.status().error).toBe('')
+    expect(second.status().warnings).toContain('content-db-incompatible')
+    const quarantined = readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))
+    expect(quarantined).toHaveLength(1)
     expect((await second.search('schema probe', 5)).length).toBeGreaterThan(0)
   })
 
@@ -595,14 +608,19 @@ describe('advanced content search', () => {
     expect(legacy[0]?.path).toBe(result.hits[0]?.path)
   })
 
-  it('finds queries that mix long and short terms instead of returning nothing', async () => {
+  it('rejects mixed long/short terms instead of an unbounded LIKE scan', async () => {
     const { content } = await makeAdvancedIndex([
       { name: 'a.md', body: 'sql ab together' },
       { name: 'b.md', body: 'sql only' },
     ])
     const result = await content.search('sql ab', 5, {})
-    expect(result.hits.map(hit => hit.title)).toEqual(['a.md'])
-    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+    expect(result.hits).toEqual([])
+    expect(result.error).toBe('content-query-too-short')
+    expect(result.count).toEqual({ value: 0, kind: 'unknown' })
+    // The short term is not silently ignored to make the long term match.
+    expect((await content.search('sql ab', 5)).length).toBe(0)
+    // A valid two-term query still works.
+    expect((await content.search('sql together', 5)).map(hit => hit.title)).toEqual(['a.md'])
   })
 
   it('matches case exactly through GLOB and reports exact counts', async () => {
@@ -644,7 +662,8 @@ describe('advanced content search', () => {
     expect(invalid.error).toBe('invalid-escape')
     expect(invalid.hits).toEqual([])
     const short = await content.search('ab', 5, { matchMode: 'extended' })
-    expect(short.hits).toHaveLength(1)
+    expect(short.hits).toEqual([])
+    expect(short.error).toBe('content-query-too-short')
     const caseSensitive = await content.search('Alpha', 5, { matchMode: 'extended', caseSensitive: true })
     expect(caseSensitive.hits).toHaveLength(0)
   })
@@ -682,14 +701,30 @@ describe('advanced content search', () => {
     expect(brackets.count).toEqual({ value: 1, kind: 'exact' })
   })
 
-  it('escapes LIKE and GLOB metacharacters in literal terms', async () => {
+  it('filters file hits by path prefix without hiding session hits', async () => {
+    const { content } = await makeAdvancedIndex(
+      [{ name: 'a.md', body: 'PREFIXMARK file body' }],
+      [{ id: 'session-prefix', texts: ['PREFIXMARK session body'] }],
+    )
+    const all = await content.search('PREFIXMARK', 10, {})
+    expect(all.hits).toHaveLength(2)
+    const filePath = all.hits.find(hit => hit.kind === 'file')?.path ?? ''
+    const outside = await content.search('PREFIXMARK', 10, { pathPrefix: '/definitely/not/this/root' })
+    expect(outside.hits.map(hit => hit.kind)).toEqual(['session'])
+    expect(outside.count).toEqual({ value: 1, kind: 'exact' })
+    const inside = await content.search('PREFIXMARK', 10, { pathPrefix: dirname(filePath) })
+    expect(inside.hits.map(hit => hit.kind).sort()).toEqual(['file', 'session'])
+    expect(inside.count).toEqual({ value: 2, kind: 'exact' })
+  })
+
+  it('keeps quoted literals and GLOB metacharacters escaped', async () => {
     const { content } = await makeAdvancedIndex([
-      { name: 'lit.md', body: 'percent 100% and a_b and star *x* here a' },
-      { name: 'plain.md', body: 'percent 1000 and axb and star xx here a' },
+      { name: 'lit.md', body: 'percent 100% and a_b marker star *x* here' },
+      { name: 'plain.md', body: 'percent 1000 and axb marker star xx here' },
     ])
-    const like = await content.search('100% a', 5, {})
-    expect(like.hits.map(hit => hit.title)).toEqual(['lit.md'])
-    const underscore = await content.search('a_b a', 5, {})
+    const percent = await content.search('100% and', 5, {})
+    expect(percent.hits.map(hit => hit.title)).toEqual(['lit.md'])
+    const underscore = await content.search('a_b marker', 5, {})
     expect(underscore.hits.map(hit => hit.title)).toEqual(['lit.md'])
     const glob = await content.search('*x*', 5, { caseSensitive: true })
     expect(glob.hits.map(hit => hit.title)).toEqual(['lit.md'])
@@ -700,5 +735,317 @@ describe('advanced content search', () => {
     const { content } = await makeAdvancedIndex([{ name: 'a.md', body: 'anything' }])
     const paused = await content.search('a.*g', 5, { matchMode: 'regex' })
     expect(paused).toEqual({ hits: [], count: { value: 0, kind: 'unknown' }, warnings: ['content-regex-paused'], error: 'content-regex-not-supported' })
+  })
+})
+
+interface FakeWorker extends EventEmitter {
+  postMessage(message: unknown): void
+  terminate(): Promise<number>
+}
+
+/** Minimal Worker stand-in so the host-side protocol can be tested. */
+function fakeWorker(onPost: (message: Record<string, unknown>, worker: FakeWorker) => void): Worker {
+  const worker = new EventEmitter() as FakeWorker
+  worker.postMessage = message => { onPost(message as Record<string, unknown>, worker) }
+  worker.terminate = async () => 0
+  return worker as unknown as Worker
+}
+
+async function makeWorkerIndex(extra: Partial<ContentOptions>): Promise<ContentIndex> {
+  const root = mkdtempSync(join(tmpdir(), 'locator-worker-'))
+  const state = mkdtempSync(join(tmpdir(), 'locator-worker-state-'))
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+  const path = join(root, 'worker.md')
+  const body = 'WORKERMARK content that the worker should find\n'
+  writeFileSync(path, body)
+  const entries = [{ path, name: 'worker.md', size: body.length, mtime: Date.now(), ext: 'md', dir: false }]
+  const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+  const content = new ContentIndex(runtime, {
+    stateDir: state,
+    sessionDirs: [],
+    maxFileBytes: 10_000,
+    maxTotalBytes: 0,
+    maxFiles: 10,
+    maxSessions: 0,
+    searchWorker: true,
+    ...extra,
+  })
+  cleanups.push(() => content.close())
+  content.start()
+  await settle(content)
+  return content
+}
+
+describe('content query boundaries', () => {
+  it('rejects sub-trigram terms in normal, extended and case-sensitive modes', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'a.md', body: 'ab cd long enough' }])
+    for (const options of [{}, { matchMode: 'extended' as const }, { caseSensitive: true }]) {
+      const result = await content.search('ab', 5, options)
+      expect(result.hits).toEqual([])
+      expect(result.error).toBe('content-query-too-short')
+      expect(result.count).toEqual({ value: 0, kind: 'unknown' })
+    }
+  })
+
+  it('bounds the query length and the number of terms', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'a.md', body: 'whatever content' }])
+    const long = await content.search('a'.repeat(300), 5, {})
+    expect(long.error).toBe('content-query-too-long')
+    const many = await content.search(Array.from({ length: 33 }, (_, index) => `term${String(index)}`).join(' '), 5, {})
+    expect(many.error).toBe('content-query-too-many-terms')
+    expect(many.hits).toEqual([])
+  })
+
+  it('rejects NUL and control characters instead of truncating the query in SQL', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'a.md', body: 'alpha beta gamma' }])
+    const nul = await content.search('alpha\u0000beta', 5, {})
+    expect(nul.error).toBe('invalid-control-char')
+    expect(nul.hits).toEqual([])
+    const decodedNul = await content.search('alpha\\0beta', 5, { matchMode: 'extended' })
+    expect(decodedNul.error).toBe('invalid-control-char')
+    const control = await content.search('alpha\u0001beta', 5, {})
+    expect(control.error).toBe('invalid-control-char')
+  })
+
+  it('measures the trigram floor in code points so emoji are not short-circuited', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'emoji.md', body: '😀😀😀 emoji marker' }])
+    // Two code points, four UTF-16 units: still too short for the trigram index.
+    const short = await content.search('😀😀', 5, {})
+    expect(short.error).toBe('content-query-too-short')
+    expect(short.hits).toEqual([])
+    const full = await content.search('😀😀😀', 5, {})
+    expect(full.error).toBeUndefined()
+    expect(full.hits.map(hit => hit.title)).toEqual(['emoji.md'])
+  })
+})
+
+describe('whole-word scan budgets', () => {
+  it('caps the scanned rows and keeps the hits found so far', async () => {
+    const files = Array.from({ length: 6 }, (_, index) => ({ name: `w${String(index)}.md`, body: `test marker ${String(index)}` }))
+    const { content } = await makeAdvancedIndex(files)
+    const result = await content.search('test', 10, { wholeWord: true, scanBudget: { maxRows: 2 } })
+    expect(result.warnings).toContain('scan-capped')
+    expect(result.count).toEqual({ value: 2, kind: 'bounded', limit: 1000 })
+    expect(result.hits).toHaveLength(2)
+  })
+
+  it('caps the scanned body bytes', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'a.md', body: 'test aaaaaaaaaaaaaaaa' },
+      { name: 'b.md', body: 'test bbbbbbbbbbbbbbbb' },
+    ])
+    const result = await content.search('test', 10, { wholeWord: true, scanBudget: { maxBytes: 5 } })
+    expect(result.warnings).toContain('scan-capped')
+    expect(result.count.kind).toBe('bounded')
+    expect(result.count.value).toBe(1)
+    expect(result.hits).toHaveLength(1)
+  })
+
+  it('also caps a session-scoped whole-word scan', async () => {
+    const { content } = await makeAdvancedIndex([], [
+      { id: 'session-scan', texts: ['test one', 'test two', 'test three', 'test four'] },
+    ])
+    const result = await content.search('test', 10, { wholeWord: true, sessionId: 'session-scan', scanBudget: { maxRows: 2 } })
+    expect(result.warnings).toContain('scan-capped')
+    expect(result.count).toEqual({ value: 2, kind: 'bounded', limit: 1000 })
+    expect(result.hits).toHaveLength(2)
+    expect(result.hits.every(hit => hit.sessionId === 'session-scan')).toBe(true)
+  })
+})
+
+describe('content search worker protocol', () => {
+  it('reports a timeout instead of re-running the query on the host thread', async () => {
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 40,
+      searchWorkerFactory: () => fakeWorker(() => { /* never answer */ }),
+    })
+    const result = await content.search('WORKERMARK', 5, {})
+    expect(result.hits).toEqual([])
+    expect(result.error).toBe('content-search-timeout')
+    expect(result.count).toEqual({ value: 0, kind: 'unknown' })
+    expect(result.warnings).toContain('content-search-timeout')
+    // A host-thread fallback would have found the document immediately.
+    expect((await content.search('WORKERMARK', 5)).length).toBe(0)
+  })
+
+  it('reports a malformed worker reply as a protocol error', async () => {
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 500,
+      searchWorkerFactory: () => fakeWorker((message, worker) => {
+        if (typeof message.query !== 'string') return
+        setImmediate(() => { worker.emit('message', { id: message.id, result: { hits: 'not-an-array', count: { value: 0, kind: 'exact' }, warnings: [] } }) })
+      }),
+    })
+    const result = await content.search('WORKERMARK', 5, {})
+    expect(result.hits).toEqual([])
+    expect(result.error).toBe('content-search-worker-protocol-error')
+    expect(result.warnings).toContain('content-search-worker-protocol-error')
+  })
+
+  it('reports a dead worker instead of falling back to a sync query', async () => {
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 500,
+      searchWorkerFactory: () => fakeWorker((message, worker) => {
+        if (typeof message.query !== 'string') return
+        setImmediate(() => { worker.emit('exit', 1) })
+      }),
+    })
+    const result = await content.search('WORKERMARK', 5, {})
+    expect(result.hits).toEqual([])
+    expect(result.error).toBe('content-search-worker-failed')
+  })
+
+  it('allows a budgeted in-process query only when the worker cannot be created', async () => {
+    // Vitest resolves src/content-search-worker.js, which does not exist: the
+    // worker cannot be spawned, so the documented sync fallback must answer.
+    const content = await makeWorkerIndex({})
+    const result = await content.search('WORKERMARK', 5, {})
+    expect(result.error).toBeUndefined()
+    expect(result.warnings).toContain('content-search-in-process')
+    const count = (result.count as { kind: string }).kind
+    if (count === 'bounded') expect(result.count.limit).toBe(200)
+    expect(result.hits.map(hit => hit.title)).toEqual(['worker.md'])
+  })
+})
+
+describe('refresh resilience', () => {
+  it('does not let one unreadable file evict trailing documents or eat a maxFiles slot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-refresh-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-refresh-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const a = join(root, 'a.md')
+    const b = join(root, 'b.md')
+    const broken = join(root, 'broken.md')
+    const bodyA = 'AAAAMARK first document'
+    const bodyB = 'BBBBMARK second document'
+    writeFileSync(a, bodyA)
+    writeFileSync(b, bodyB)
+    const base = Date.now() - 10_000
+    let entries = [
+      { path: a, name: 'a.md', size: bodyA.length, mtime: base, ext: 'md', dir: false },
+      { path: b, name: 'b.md', size: bodyB.length, mtime: base, ext: 'md', dir: false },
+    ]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 10_000, maxTotalBytes: 0, maxFiles: 2, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(2)
+    expect((await content.search('AAAAMARK', 5)).length).toBeGreaterThan(0)
+    expect((await content.search('BBBBMARK', 5)).length).toBeGreaterThan(0)
+
+    // `broken.md` is listed by the engine but cannot be read this refresh. It
+    // must not consume one of the two maxFiles slots, otherwise the deletion
+    // pass would drop b.md permanently.
+    const newer = base + 5_000
+    entries = [
+      { path: broken, name: 'broken.md', size: 20, mtime: newer, ext: 'md', dir: false },
+      { path: a, name: 'a.md', size: bodyA.length, mtime: newer, ext: 'md', dir: false },
+      { path: b, name: 'b.md', size: bodyB.length, mtime: newer, ext: 'md', dir: false },
+    ]
+    content.refresh()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().files).toBe(2)
+    expect((await content.search('AAAAMARK', 5)).length).toBeGreaterThan(0)
+    expect((await content.search('BBBBMARK', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('keeps old session messages when a log cannot be decompressed and retries later', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-badsession-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-badsession-state-'))
+    cleanups.push(() => rmSync(sessions, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const dir = join(sessions, '--workspace--', 'session-broken')
+    mkdirSync(dir, { recursive: true })
+    const log = join(dir, 'session.v4.jsonl.zstd')
+    const line = (id: string, text: string) => JSON.stringify({ type: 'user/message', data: { id, seq: 1, content: [{ type: 'text', text }] } })
+    const first = Date.now() - 60_000
+    writeFileSync(log, zstdCompressSync(Buffer.from(line('old-msg', 'OLDSESSIONMARK decision record'))))
+    utimesSync(log, new Date(first), new Date(first))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect((await content.search('OLDSESSIONMARK', 5)).length).toBeGreaterThan(0)
+
+    // A newer but unreadable log: keep the old messages and the old mtime.
+    const second = first + 5_000
+    writeFileSync(log, Buffer.from('this is definitely not zstd data'))
+    utimesSync(log, new Date(second), new Date(second))
+    content.refresh()
+    await settle(content)
+    expect(content.status().warnings).toContain('content-session-log-unreadable')
+    expect((await content.search('OLDSESSIONMARK', 5)).length).toBeGreaterThan(0)
+
+    // Fix the log but keep the same mtime: because the failed attempt did not
+    // update sources.mtime, the next refresh retries and indexes the new text.
+    writeFileSync(log, zstdCompressSync(Buffer.from(line('new-msg', 'NEWSESSIONMARK replacement record'))))
+    utimesSync(log, new Date(second), new Date(second))
+    content.refresh()
+    await settle(content)
+    expect((await content.search('NEWSESSIONMARK', 5)).length).toBeGreaterThan(0)
+    expect((await content.search('OLDSESSIONMARK', 5)).length).toBe(0)
+  })
+})
+
+describe('content database self-healing', () => {
+  it('quarantines a corrupt database and rebuilds', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-corrupt-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-corrupt-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'HEALMARK after corruption\n')
+    const entries = [{ path, name: 'notes.md', size: 26, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    writeFileSync(join(state, 'content.db'), 'this is not a sqlite database at all')
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.boot()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().warnings).toContain('content-db-corrupt')
+    expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
+    expect((await content.search('HEALMARK', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('quarantines a database that has only some dsh-locator tables (old schema)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-partial-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-partial-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'PARTIALDBMARK rebuilt\n')
+    const entries = [{ path, name: 'notes.md', size: 20, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const old = new DatabaseSync(join(state, 'content.db'))
+    old.exec('CREATE TABLE sources (path TEXT PRIMARY KEY)')
+    old.close()
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.boot()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().warnings).toContain('content-db-incompatible')
+    expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
+    expect((await content.search('PARTIALDBMARK', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('quarantines a zero-byte database and rebuilds', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-empty-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-empty-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'EMPTYDBMARK rebuilt\n')
+    const entries = [{ path, name: 'notes.md', size: 20, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    writeFileSync(join(state, 'content.db'), '')
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.boot()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().warnings).toContain('content-db-corrupt')
+    expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
+    expect((await content.search('EMPTYDBMARK', 5)).length).toBeGreaterThan(0)
   })
 })

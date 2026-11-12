@@ -11,7 +11,7 @@
  */
 
 import type { ContentHit, ContentState } from './content.ts'
-import { decodeExtendedForNames } from './content-search.ts'
+import { checkContentQuery, decodeExtendedForNames } from './content-search.ts'
 import type {
   ContentCount,
   ContentCountMode,
@@ -183,9 +183,10 @@ export async function runCombinedSearch(deps: CombinedDeps, request: CombinedReq
   const { scopes, query } = request
   const contentEnabled = deps.contentSearch !== undefined
   const wantsContent = scopes.content && contentEnabled
-  // Two characters are the floor for the content store: one-character queries
-  // fall back to an unindexed LIKE scan and are not worth a build or a query.
-  const askContent = wantsContent && query.trim().length >= 2
+  // Any non-empty query is evaluated against the content store; short or
+  // over-limit queries are rejected by the same validator the store uses, so
+  // the panel can show `content-query-too-short` without starting a build.
+  const askContent = wantsContent && query.trim() !== ''
 
   const contentPromise = wantsContent ? contentGroup(deps, request, askContent) : Promise.resolve(undefined)
   const filesPromise = scopes.files ? nameGroup(deps, request, true) : Promise.resolve(undefined)
@@ -296,6 +297,14 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     return { ...empty(['content-regex-paused']), error: 'content-regex-not-supported' }
   }
   if (!ask || deps.contentSearch === undefined) return empty()
+  // Reject sub-trigram / over-limit / control-character queries here, before
+  // deps.ensure() can start a lazy content build the store cannot answer. The
+  // store performs the same check; sharing it keeps the error codes identical.
+  const check = checkContentQuery(request.query, request.matchMode)
+  if (!check.ok) {
+    return { ...empty(check.warnings), error: check.error ?? 'content-query-invalid', tookMs: Date.now() - started }
+  }
+  if (check.terms.length === 0) return empty()
   const options: ContentSearchOptions = {
     matchMode: request.matchMode,
     caseSensitive: request.caseSensitive,

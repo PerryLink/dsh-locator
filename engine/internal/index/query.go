@@ -66,7 +66,7 @@ const (
 // Double quotes keep spaces inside one term.
 func ParseQuery(text string) (Query, error) {
 	q := Query{
-		Text: strings.TrimSpace(text),
+		Text:    strings.TrimSpace(text),
 		MinSize: -1, MaxSize: -1, MinMtime: -1, MaxMtime: -1,
 		Limit: defaultLimit,
 	}
@@ -312,13 +312,16 @@ func parseDateRange(v string, now time.Time) (lo, hi int64, err error) {
 	case "thisweek", "week":
 		wd := (int(now.Weekday()) + 6) % 7 // Monday = 0
 		a := day(now.AddDate(0, 0, -wd))
-		x, y := mk(a, a.AddDate(0, 0, 7)); return x, y, nil
+		x, y := mk(a, a.AddDate(0, 0, 7))
+		return x, y, nil
 	case "thismonth", "month":
 		a := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
-		x, y := mk(a, a.AddDate(0, 1, 0)); return x, y, nil
+		x, y := mk(a, a.AddDate(0, 1, 0))
+		return x, y, nil
 	case "thisyear", "year":
 		a := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, loc)
-		x, y := mk(a, a.AddDate(1, 0, 0)); return x, y, nil
+		x, y := mk(a, a.AddDate(1, 0, 0))
+		return x, y, nil
 	}
 
 	for _, op := range []string{">=", "<=", ">", "<"} {
@@ -424,14 +427,11 @@ func (ix *Index) Search(q Query) (Result, error) {
 
 	ids := ix.collectMatches(m)
 	total := len(ids)
-	var pathCache map[int32]string
-	if q.Sort == "path" && total > 0 {
-		pathCache = make(map[int32]string, total)
-		for _, id := range ids {
-			pathCache[id] = ix.pathLocked(id)
-		}
-	}
-	less := func(a, b int32) bool { return ix.lessHit(a, b, q, pathCache) }
+	// Sorting by path compares the parent chains directly (see comparePath), so
+	// no path is materialised for hits outside the returned page. A full-map
+	// prebuild used to cost a path string per match, which for a million-entry
+	// index is hundreds of megabytes and a multi-second stall.
+	less := func(a, b int32) bool { return ix.lessHit(a, b, q) }
 
 	k := q.Offset + limit
 	if k > total {
@@ -535,9 +535,11 @@ func (ix *Index) collectMatches(m *matcher) []int32 {
 	return ids
 }
 
-func (ix *Index) lessHit(a, b int32, q Query, pathCache map[int32]string) bool {
-	cmp := ix.compareHits(a, b, q, pathCache)
+func (ix *Index) lessHit(a, b int32, q Query) bool {
+	cmp := ix.compareHits(a, b, q)
 	if cmp == 0 {
+		// Record ids are append-ordered, so the tie-break keeps the order
+		// deterministic and stable without sort.SliceStable's extra memory.
 		return a < b
 	}
 	if q.Desc {
@@ -546,7 +548,7 @@ func (ix *Index) lessHit(a, b int32, q Query, pathCache map[int32]string) bool {
 	return cmp < 0
 }
 
-func (ix *Index) compareHits(a, b int32, q Query, pathCache map[int32]string) int {
+func (ix *Index) compareHits(a, b int32, q Query) int {
 	ra, rb := &ix.recs[a], &ix.recs[b]
 	switch q.Sort {
 	case "size":
@@ -559,16 +561,67 @@ func (ix *Index) compareHits(a, b int32, q Query, pathCache map[int32]string) in
 		}
 		return 0
 	case "path":
-		if pathCache != nil {
-			return compareStrings(pathCache[a], pathCache[b], q.Case)
-		}
-		return compareStrings(ix.pathLocked(a), ix.pathLocked(b), q.Case)
+		return ix.comparePath(a, b, q.Case)
 	default:
 		if q.Case {
 			return strings.Compare(ix.nameLocked(a), ix.nameLocked(b))
 		}
 		return compareFold(ix.nameLocked(a), ix.nameLocked(b))
 	}
+}
+
+// pathChainDepth bounds the parent-chain stack used by comparePath. Real trees
+// are shallower; a deeper entry falls back to comparing materialised paths.
+const pathChainDepth = 64
+
+// comparePath orders two records by path without allocating: it walks both
+// parent chains and compares the name of each component from the root down.
+// Components are compared the way path strings are, except that a name which
+// prefixes another one sorts first regardless of the separator byte (the
+// difference only shows for names containing characters below '/', such as
+// "a!" vs "a/x"). Ancestors sort before their descendants, and the result is a
+// total order, so sorting stays deterministic.
+func (ix *Index) comparePath(a, b int32, caseSens bool) int {
+	var ca, cb [pathChainDepth]int32
+	na := ix.fillPathChain(a, ca[:])
+	nb := ix.fillPathChain(b, cb[:])
+	if na < 0 || nb < 0 {
+		// Pathological depth (or a corrupt parent link): compare the strings.
+		return compareStrings(ix.pathLocked(a), ix.pathLocked(b), caseSens)
+	}
+	n := na
+	if nb < n {
+		n = nb
+	}
+	for i := 0; i < n; i++ {
+		if c := compareStrings(ix.nameLocked(ca[i]), ix.nameLocked(cb[i]), caseSens); c != 0 {
+			return c
+		}
+	}
+	switch {
+	case na < nb:
+		return -1
+	case na > nb:
+		return 1
+	}
+	return 0
+}
+
+// fillPathChain writes the root..leaf record ids of id into dst and returns the
+// chain length, or -1 when the chain does not fit in dst.
+func (ix *Index) fillPathChain(id int32, dst []int32) int {
+	n := 0
+	for cur := id; cur >= 0; cur = ix.recs[cur].Parent {
+		if n >= len(dst) || n >= len(ix.recs) {
+			return -1
+		}
+		dst[n] = cur
+		n++
+	}
+	for i, j := 0, n-1; i < j; i, j = i+1, j-1 {
+		dst[i], dst[j] = dst[j], dst[i]
+	}
+	return n
 }
 
 func compareStrings(a, b string, caseSens bool) int {

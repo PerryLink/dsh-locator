@@ -21,6 +21,45 @@ type Options struct {
 	Excludes []string
 	// OnError receives non-fatal backend errors (watch limits, overflow).
 	OnError func(error)
+	// OnDegraded is called once when coverage becomes incomplete after startup
+	// (a root handle died, a watch limit was hit, the notification stream was
+	// dropped, or the filesystem cannot deliver events). The daemon then turns
+	// on its periodic rebuild fallback so unwatched changes still converge.
+	OnDegraded func(Health)
+}
+
+// Health reports how much of the requested tree a watcher actually covers.
+// Backends report it honestly: a watcher that only sees part of the roots is
+// degraded, and the daemon enables a periodic rebuild for the rest.
+type Health struct {
+	// Roots is the number of roots the watcher was asked to watch.
+	Roots int `json:"roots"`
+	// Watching is the number of roots that are actually covered.
+	Watching int `json:"watching"`
+	// Dirs is the number of directories with an active watch, when the backend
+	// tracks them (0 otherwise).
+	Dirs int `json:"dirs,omitempty"`
+	// Degraded is true when coverage is known to be incomplete.
+	Degraded bool `json:"degraded"`
+	// Reason explains a degraded state in one short line.
+	Reason string `json:"reason,omitempty"`
+}
+
+// HealthReporter is implemented by backends that can describe their coverage.
+type HealthReporter interface {
+	Health() Health
+}
+
+// HealthOf returns the watcher's coverage; backends without a reporter report a
+// zero value (unknown, not degraded).
+func HealthOf(w Watcher) Health {
+	if w == nil {
+		return Health{}
+	}
+	if reporter, ok := w.(HealthReporter); ok {
+		return reporter.Health()
+	}
+	return Health{}
 }
 
 // Watcher applies filesystem changes to an index.

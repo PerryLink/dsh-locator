@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.10.0 — 2026-11-12
+
+Full-plugin hardening pass from a 20-agent audit. This release focuses on stability, release integrity, security boundaries, client correctness and performance rather than new search features.
+
+**Stability / performance**
+* Whole-word content search now has a hard scan budget (rows, bytes, time) and stops with a bounded count + `scan-capped` warning instead of scanning an unbounded corpus.
+* A content worker timeout no longer falls back to the same query on the host event loop; it returns `content-search-timeout` (or a worker error) and discards the stuck worker. This removes the multi-second DSH freeze.
+* Content queries are bounded to 256 characters / 32 terms / 3 characters per term; shorter or over-long queries return explicit errors instead of a full-table LIKE/GLOB scan. NUL/control characters are rejected. emoji are counted by code point.
+* Content refresh reuses a successful parse before replacing a session; a read/decompression failure keeps the old messages and retries next refresh. `maxFiles` no longer deletes tail documents after a transient read failure. Corrupt/zero-byte/old-schema content databases are quarantined and rebuilt.
+* Engine: generation only advances on real changes; snapshot save is dirty-debounced (60 s quiet / 5 min max) and shutdown skips an unchanged snapshot; `sort=path` no longer builds a path map for every hit; dump supports `since`/`mtimeFrom`; watcher reports degraded/fallback state and `--refresh 0` disables periodic rebuilds; Windows roots/handles stay paired.
+* Six engine binaries are rebuilt at 0.10.0; the release workflow rebuilds Linux/Windows on Ubuntu and darwin with cgo/FSEvents on macOS, verifies versions, and refuses to publish from a red CI commit.
+
+**Security / boundaries**
+* HTTP panel routes now require the DSH `connection` service (fail-closed), enforce POST + JSON content-type, same-origin Fetch metadata, 64 KiB body limit and proper 400/405/413/415/503 responses.
+* `/reveal` and `/open` resolve real paths and reject symlink escapes from the indexed roots; `/open` rejects executable/script extensions. `locator_export` defaults to the plugin state directory, validates ownership before overwrite and writes atomically; `locator_rebuild` only accepts configured roots/excludes subsets.
+* `locator_find` now exposes `matchMode`, `caseSensitive`, `wholeWord`, `sessionId`, `count`, `countLimit`, `pathPrefix` and defaults to **workspace scope** (caller session for session hits, caller cwd for file hits); `scope: 'all'` is explicit cross-workspace access. The tool description, count/warnings and session/message references are rendered for the agent.
+
+**Client**
+* Panel result rows keep focus, so Esc/arrow/F3/Enter work after clicking a hit; a document-level Escape fallback closes the panel; Ctrl+Shift+F ignores host modals, editors/terminals, key repeat and AltGr.
+* Unified visible-text projection for the find bar and jump: soft newlines/`<br>` collapse to a space outside `<pre>`, CJK soft-wrapped phrases match, KaTeX/sr-only/aria-live/status text is excluded; the projection uses segment maps instead of one object per character.
+* Assistant steps rendered as two rows with the same node key now prefer the response row; anchored hits no longer fall back to an unrelated phrase in the loaded window, and older pages are loaded until the anchor exists.
+* Regular expressions prefer the Unicode `u` flag (so `\p{L}`/`\p{Script=Han}` work) and never fall back to a main-thread regex when the worker is blocked or times out; the find bar reports the timeout/unavailable state.
+* The panel renders content warnings, scan caps, budget truncation and query errors as information instead of a retryable failure; footer/group counts use the exact/bounded count consistently; content queries need 3 characters (shorter searches use Ctrl+F).
+* One-shot toast/insert/reveal timers are tracked and cleared; plugin disposal resets overlay state.
+
+**Upgrade notes**
+* No content schema change. 0.10.0 runs on schema v3; the engine binary version changes to 0.10.0.
+* Content search minimum length is 3 characters; use the in-conversation find bar (`Ctrl+F`) for 1–2 character searches.
+* `locator_find` is workspace-scoped by default; pass `scope: 'all'` for cross-workspace session/file content.
+* Panel routes require the stock web `connection` service; custom compositions without it will not mount them (intentional fail-closed).
+* `locator_export` writes under the plugin state directory by default; pass `allowOutsideStateDir: true` only for a deliberate external export. Importing an existing arbitrary file is refused.
+
+**Tests**: 122 tests across content, combined, HTTP, tools, find, plugin, runtime, export, reveal and lag suites; CI runs Node 22/24 on Linux/Windows/macOS with rebuilt engines and fail-on-skip gates.
+
 ## 0.9.0 — 2026-11-12
 
 Advanced find and a two-surface search model, informed by Notepad++/Notepad--/VS Code and a live-DB benchmark.

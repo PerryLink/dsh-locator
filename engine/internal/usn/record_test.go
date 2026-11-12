@@ -57,7 +57,7 @@ func TestParseRecords(t *testing.T) {
 }
 
 func TestParseRecordsRejectsTruncated(t *testing.T) {
-	buf := recordBytes(Record{FRN: 5,ParentFRN: 5, Name: "x"})
+	buf := recordBytes(Record{FRN: 5, ParentFRN: 5, Name: "x"})
 	if _, err := ParseRecords(buf[:20]); err == nil {
 		t.Fatal("expected a truncation error")
 	}

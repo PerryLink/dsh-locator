@@ -402,6 +402,15 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
 
+## 0.10.0 अपग्रेड नोट्स
+
+- सामग्री खोज के लिए कम से कम **3 अक्षर** चाहिए; 1–2 अक्षर के लिए `Ctrl+F` उपयोग करें। 256 अक्षर/32 शब्द से बड़ी क्वेरी अस्वीकार होती है।
+- `locator_find` डिफ़ॉल्ट **workspace स्कोप** (कॉलर सत्र और cwd) में चलता है; दूसरे workspace के लिए `scope: "all"` दें। नए पैरामीटर: `matchMode`, `caseSensitive`, `wholeWord`, `sessionId`, `count`, `countLimit`, `pathPrefix`.
+- पैनल HTTP रूट अब DSH `connection` सेवा अनिवार्य करते हैं (fail-closed) और POST + JSON + same-origin जाँचते हैं; stock web profile प्रभावित नहीं।
+- `locator_export` डिफ़ॉल्ट रूप से plugin stateDir में लिखता है और overwrite से पहले ownership जाँचता है; `locator_rebuild` केवल configured roots/excludes के subset लेता है।
+- engine बाइनरी 0.10.0 हैं: snapshot dirty-debounce, `sort=path` सीमित मेमोरी, watcher degraded/fallback; macOS रिलीज़ cgo/FSEvents से बनना चाहिए (debug kqueue fallback प्रकाशन योग्य नहीं)।
+- क्लाइंट: परिणाम-पंक्ति क्लिक के बाद भी कुंजी/Esc काम करते हैं; soft newline/`<br>`/CJK खोज ठीक; assistant twin rows में response प्राथमिक; regex Unicode `u` और worker विफलता पर main-thread fallback नहीं; सामग्री चेतावनी/सीमा/truncation दिखती है।
+
 ## सुरक्षा और गोपनीयता
 
 - इंडेक्स पूरी तरह स्थानीय है: कोई नेटवर्क कॉल नहीं, कोई टेलीमेट्री नहीं, कोई अपलोड नहीं। प्लगइन इंडेक्स की गई फ़ाइलों को कभी बदलता, हटाता या स्थानांतरित नहीं करता।
