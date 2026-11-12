@@ -62,7 +62,7 @@ O `dsh-locator` junta os dois em um único plugin:
 | Recurso | Como usar |
 |---|---|
 | Busca por nome / caminho | `locator_search`, ou o modo padrão do painel |
-| Busca no corpo dos arquivos | `locator_find`, ou o modo **Buscar conteúdo** do painel |
+| Busca no corpo dos arquivos | `locator_find`, ou o escopo **Conteúdo** do painel (ativo por padrão) |
 | Busca em sessões do DSH | As mesmas ferramentas; os resultados trazem `sessionId` / `messageId` e o painel pode voltar à conversa |
 | Abrir / revelar | As ferramentas devolvem caminhos; o painel revela com duplo clique, `Ctrl+O` abre e `Ctrl+Enter` insere `@"caminho"` no compositor |
 | Consumo externo | `locator_export` grava um espelho SQLite somente leitura |
@@ -162,23 +162,13 @@ A construção roda dentro do processo anfitrião do DSH, mas leituras de arquiv
 
 ## Painel web
 
-![Painel de busca do dsh-locator: modo conteúdo ativado, mostrando correspondências no corpo e trechos](docs/assets/panel-en.png)
-
-Pressione `Ctrl+Shift+F` em qualquer lugar da GUI web, ou clique na lupa no pé da barra lateral.
-
-- Consulta vazia lista as entradas modificadas mais recentemente; ao digitar, a mesma sintaxe das ferramentas é usada após 110 ms de debounce.
-- Clique no cabeçalho de uma coluna para ordenar por nome, tamanho, data de modificação ou caminho.
-- Alterne **somente arquivos** / **somente diretórios** para filtrar o tipo.
-- Marque **Buscar conteúdo** para trocar nomes por corpos de arquivo e mensagens de sessão; enquanto o índice é construído o rodapé mostra o estado e o painel consulta de novo.
-- `↑`/`↓` selecionam, `Enter` copia o caminho, `Ctrl+O` abre, `Ctrl+Enter` insere `@"caminho"` no compositor e `Esc` fecha.
-- Duplo clique em um arquivo revela no Explorer/Finder/`xdg-open`; duplo clique em uma sessão abre a conversa na mensagem encontrada.
-- O texto do painel segue `navigator.language` (zh/en/es/pt/hi).
-
-O painel usa rotas de mesma origem — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/combined`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — então não precisa de outro servidor nem de outra porta. Perfis sem servidor web não o montam.
+Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no pé da barra lateral. O painel usa rotas de mesma origem (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sem outro servidor nem outra porta.
 
 - **Os três escopos vêm ativados por padrão**: conteúdo (corpos + sessões), arquivos e pastas; desmarque qualquer um para restringir. Os resultados são agrupados **conteúdo → arquivos → pastas** com a contagem por grupo; o conteúdo é ordenado por relevância e os grupos de nomes seguem o menu de ordem.
 - **Duplo clique ou `Enter` ativa um resultado**: uma sessão abre a conversa e pinta as palavras encontradas com destaque âmbar translúcido que acompanha a rolagem, é centralizado ao chegar e é limpo com `Esc`; arquivos e pastas são mostrados no gerenciador de arquivos. `Ctrl+Shift+C` copia o caminho, `Ctrl+O` abre, `Ctrl+Enter` insere `@file` e `Alt+1–3` alterna os escopos.
-- Consultas de conteúdo exigem pelo menos dois caracteres; consultas vazias ou de um caractere não iniciam a construção do índice.
+- Consultas de conteúdo exigem pelo menos dois caracteres; consultas vazias ou de um caractere não iniciam a construção. Durante a construção o grupo de conteúdo mostra o progresso e os nomes respondem na hora; a escolha de escopos é lembrada.
+- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` movem, `Enter` ativa e `Esc` fecha; o diálogo prende o foco e o restaura ao fechar. O texto segue `navigator.language` (zh/en/es/pt/hi).
+
 
 ## Ferramentas
 
@@ -388,7 +378,7 @@ DeepSeek Harness
 - O macOS usa FSEvents (recursivo) nos binários publicados; uma compilação com `CGO_ENABLED=0` cai para kqueue, limitado a 4.096 diretórios, com mudanças de conteúdo dependendo da reconstrução periódica.
 - USN/MFT do Windows é opcional e só é usado se o processo puder ler o volume e o diário estiver ativo; caso contrário, usa-se a varredura portátil.
 
-- Resultados no corpo de arquivos abrem o gerenciador de arquivos por enquanto (a visualização por linha dentro do DSH é o próximo passo); mensagens do assistente são localizadas por frase porque as linhas do DOM não carregam o messageId.
+- Resultados no corpo de arquivos abrem o gerenciador de arquivos por enquanto (a visualização por linha dentro do DSH é o próximo passo); mensagens do assistente agora são ancoradas pela chave de nó `turn:step`, com frase apenas como reserva. Atualizar para 0.8.1 reconstrói uma vez o banco de conteúdo pelo novo campo.
 - O destaque dentro da conversa usa a API CSS Custom Highlight; navegadores antigos sem ela caem para um contorno na linha.
 
 ## Memória

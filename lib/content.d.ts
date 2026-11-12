@@ -23,6 +23,8 @@ export interface ContentHit {
     snippet: string;
     sessionId?: string;
     messageId?: string;
+    /** Exact `data-chat-node-key` of the rendered row, when the host has one. */
+    nodeKey?: string;
     score: number;
 }
 export interface ContentState {

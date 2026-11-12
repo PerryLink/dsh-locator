@@ -26,6 +26,34 @@ window.__ModuleLoader__.load({
       }
     }
     const store = createStore()
+
+    // Transient feedback used after the panel closes (a jump keeps the panel
+    // closed, so the panel-local toast would never be seen).
+    function createNoticeStore() {
+      const listeners = new Set()
+      let text = ''
+      let timer = 0
+      return {
+        get: () => text,
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+        show(next) {
+          text = next
+          for (const listener of listeners) listener()
+          clearTimeout(timer)
+          timer = setTimeout(() => { text = ''; for (const listener of listeners) listener() }, 3200)
+        },
+      }
+    }
+    const notices = createNoticeStore()
+    function showNotice(text) { notices.show(text) }
+    function Notice() {
+      const text = useSyncExternalStore(notices.subscribe, notices.get, notices.get)
+      return text === '' ? null : h('div', { className: 'dsh-locator-notice', role: 'status' }, text)
+    }
+
     function useOpen() {
       return useSyncExternalStore(store.subscribe, store.isOpen, store.isOpen)
     }
@@ -90,6 +118,11 @@ window.__ModuleLoader__.load({
 body[data-ds-dark-theme] .dsh-locator-panel{box-shadow:0 24px 64px rgba(0,0,0,.6)}
 body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.55))}
 .dsh-locator-target{outline:2px solid rgba(245,158,11,.75);outline-offset:2px;border-radius:6px}
+.dsh-locator-notice{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:90;pointer-events:none;
+  padding:7px 12px;border-radius:8px;font:12px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;
+  background:var(--dsw-alias-bg-layer-2,rgba(30,32,38,.92));color:var(--dsw-alias-label-primary,#fff);
+  border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));box-shadow:0 8px 24px rgba(0,0,0,.25);
+  animation:dsh-locator-in 120ms ease-out}
 ::highlight(dsh-locator-find){background-color:rgba(245,158,11,.28);color:inherit}
 ::highlight(dsh-locator-find-active){background-color:rgba(245,158,11,.45);color:inherit}
 `
@@ -428,10 +461,17 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       return scope === null ? null : scope.querySelector('[data-chat-flow]')
     }
 
-    function findMessageRow(flow, messageId) {
-      if (flow === null || !messageId) return null
+    function findMessageRow(flow, messageId, nodeKey) {
+      if (flow === null) return null
+      const rows = flow.querySelectorAll('[data-chat-node-key]')
+      if (nodeKey) {
+        for (const row of rows) {
+          if (row.getAttribute('data-chat-node-key') === String(nodeKey)) return row
+        }
+      }
+      if (!messageId) return null
       const id = String(messageId)
-      for (const row of flow.querySelectorAll('[data-chat-node-key]')) {
+      for (const row of rows) {
         const key = row.getAttribute('data-chat-node-key') || ''
         if (key === id || key.endsWith(id)) return row
       }
@@ -630,29 +670,38 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       return true
     }
 
-    let activeJump = null
+    let jumpSeq = 0
+    let activeHighlight = null
+
+    function clearJumpHighlight() {
+      clearFindHighlight()
+      if (activeHighlight !== null) {
+        const clear = activeHighlight
+        activeHighlight = null
+        clear()
+      }
+    }
 
     function cancelJump() {
-      clearFindHighlight()
-      if (activeJump !== null) {
-        const cancel = activeJump
-        activeJump = null
-        cancel()
-      }
+      jumpSeq++
+      clearJumpHighlight()
     }
 
     async function jumpToContentHit(hit, query, notify) {
       cancelJump()
+      const token = jumpSeq
+      const stale = () => token !== jumpSeq
       if (!hit || hit.kind !== 'session' || !hit.sessionId) return false
       if (!workspaceService || typeof workspaceService.openSession !== 'function') return false
       try { workspaceService.openSession(hit.sessionId) } catch { return false }
       const scope = await waitForScope(hit.sessionId, 10_000)
-      if (scope === null) { notify?.(t('jumpFailed')); return false }
+      if (stale()) return false
+      if (scope === null) { showNotice(t('jumpFailed')); return false }
       const flow = chatFlow(scope)
-      if (flow === null) { notify?.(t('jumpFailed')); return false }
+      if (flow === null) { showNotice(t('jumpFailed')); return false }
       const needles = needlesFromQuery(query)
       const finder = () => {
-        const row = findMessageRow(flow, hit.messageId)
+        const row = findMessageRow(flow, hit.messageId, hit.nodeKey)
         if (row !== null) {
           expandHidden(row)
           const ranges = rangesForNeedles(row, needles)
@@ -663,73 +712,83 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         }
         const phrase = phraseRange(flow, hit.snippet)
         if (phrase === null) return null
+        expandHidden(phrase.startContainer)
         const phraseRow = phrase.startContainer instanceof Element
           ? phrase.startContainer.closest('[data-chat-node-key]')
           : phrase.startContainer.parentElement?.closest('[data-chat-node-key]') ?? null
-        if (phraseRow !== null) expandHidden(phraseRow)
         const ranges = phraseRow === null ? [phrase] : rangesForNeedles(phraseRow, needles)
         return { row: phraseRow, ranges: ranges.length > 0 ? ranges : [phrase] }
       }
       let target = await waitFor(flow, finder, 6_000, 120)
       for (let attempt = 0; target === null && attempt < 10; attempt++) {
+        if (stale()) return false
+        for (const hidden of flow.querySelectorAll('[hidden="until-found"]')) hidden.dispatchEvent(new Event('beforematch'))
         if (!revealOlder(scope)) break
         target = await waitFor(flow, finder, 1_500, 150)
       }
-      if (target === null) { notify?.(t('phraseNotFound')); return false }
+      if (stale()) return false
+      if (target === null) { showNotice(t('phraseNotFound')); return false }
       setFindHighlight(target.ranges)
       centerRange(target.ranges[0])
       const start = target.ranges[0].startContainer
       const chain = scrollChain(start instanceof Element ? start : start.parentElement)
       const scroller = chain.length > 0 ? chain[chain.length - 1] : null
-      const cleanup = []
-      const release = () => {
-        while (cleanup.length > 0) {
-          const fn = cleanup.pop()
+      const lockCleanup = []
+      const highlightCleanup = []
+      const unlock = () => {
+        while (lockCleanup.length > 0) {
+          const fn = lockCleanup.pop()
           try { fn() } catch { /* ignore */ }
         }
       }
-      activeJump = release
+      const clearHighlight = () => {
+        while (highlightCleanup.length > 0) {
+          const fn = highlightCleanup.pop()
+          try { fn() } catch { /* ignore */ }
+        }
+        clearFindHighlight()
+      }
+      activeHighlight = clearHighlight
       if (scroller !== null) {
         let writing = false
-        const expected = scroller.scrollTop
+        let expected = scroller.scrollTop
         const recenter = () => {
-          if (activeJump !== release) return
+          if (token !== jumpSeq) return
           const rect = rangeRect(target.ranges[0])
-          if (rect === null) { release(); clearFindHighlight(); activeJump = null; return }
+          if (rect === null) { cancelJump(); return }
           writing = true
           centerRange(target.ranges[0])
+          expected = scroller.scrollTop
           requestAnimationFrame(() => { writing = false })
         }
         for (const delay of [80, 240, 800, 1600]) {
           const id = setTimeout(recenter, delay)
-          cleanup.push(() => clearTimeout(id))
+          lockCleanup.push(() => clearTimeout(id))
         }
-        const onUser = () => { if (!writing) release() }
+        const onUser = () => { if (!writing) unlock() }
         for (const type of GESTURES) {
           scroller.addEventListener(type, onUser, true)
-          cleanup.push(() => scroller.removeEventListener(type, onUser, true))
+          lockCleanup.push(() => scroller.removeEventListener(type, onUser, true))
         }
         const onScroll = event => {
           if (writing) return
           if (event.target === scroller && Math.abs(scroller.scrollTop - expected) <= 2) return
-          release()
+          unlock()
         }
         scroller.addEventListener('scroll', onScroll, true)
-        cleanup.push(() => scroller.removeEventListener('scroll', onScroll, true))
+        lockCleanup.push(() => scroller.removeEventListener('scroll', onScroll, true))
       }
       const onKey = event => {
-        if (event.key !== 'Escape') return
-        cancelJump()
+        if (event.key === 'Escape') cancelJump()
       }
       document.addEventListener('keydown', onKey, true)
-      cleanup.push(() => document.removeEventListener('keydown', onKey, true))
+      highlightCleanup.push(() => document.removeEventListener('keydown', onKey, true))
       const sessionWatch = setInterval(() => {
-        const still = target.ranges[0].startContainer.isConnected && conversationScope(hit.sessionId) !== null
-        if (!still) cancelJump()
+        const connected = target.ranges[0].startContainer.isConnected
+        if (!connected || conversationScope(hit.sessionId) === null) cancelJump()
       }, 1_000)
-      cleanup.push(() => clearInterval(sessionWatch))
-      cleanup.push(() => clearFindHighlight())
-      notify?.(t('jumped'))
+      highlightCleanup.push(() => clearInterval(sessionWatch))
+      showNotice(t('jumped'))
       return true
     }
 
@@ -834,7 +893,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
               files: data.files,
               dirs: data.dirs,
             })
-            if (typeof data.availableContent === 'boolean') setAvailableContent(data.availableContent)
+            if (typeof data.contentEnabled === 'boolean') setAvailableContent(data.contentEnabled)
             setTook(typeof data.tookMs === 'number' ? data.tookMs : 0)
             setLoading(false)
           }).catch(cause => {
@@ -857,11 +916,12 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         if (groups === null) return []
         const out = []
         for (const group of ['content', 'files', 'dirs']) {
+          if (!scopes[group]) continue
           const hits = groups[group] && Array.isArray(groups[group].hits) ? groups[group].hits : []
           for (const hit of hits) out.push({ group, hit })
         }
         return out
-      }, [groups])
+      }, [groups, scopes])
 
       useEffect(() => {
         setSelected(value => Math.min(Math.max(0, value), Math.max(0, rows.length - 1)))
@@ -878,17 +938,17 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       }, [notify])
 
       const reveal = useCallback(hit => {
-        if (!hit) return
+        if (!hit || loading) return
         post('/dsh-locator/reveal', { path: hit.path }).then(() => notify(t('revealed'))).catch(() => copy(hit))
       }, [copy, notify])
 
       const openFile = useCallback(hit => {
-        if (!hit || hit.dir) return
+        if (!hit || hit.dir || loading) return
         post('/dsh-locator/open', { path: hit.path }).then(() => notify(t('opened'))).catch(() => copy(hit))
       }, [copy, notify])
 
       const activate = useCallback(hit => {
-        if (!hit) return
+        if (!hit || loading) return
         if (hit.kind === 'session' && hit.sessionId) {
           close()
           void jumpToContentHit(hit, query, notify)
@@ -913,7 +973,6 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       }, [availableContent])
 
       const onKeyDown = useCallback(event => {
-        if (event.target instanceof HTMLSelectElement) return
         if (event.key === 'Escape') {
           event.preventDefault()
           close()
@@ -930,9 +989,16 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
           return
         }
-        if (event.altKey && ['1', '2', '3'].includes(event.key)) {
+        const interactive = event.target instanceof HTMLElement
+          && (event.target.tagName === 'BUTTON' || event.target.tagName === 'SELECT'
+            || (event.target.tagName === 'INPUT' && event.target.type !== 'text'))
+        if (interactive) return
+        const scopeDigit = event.altKey
+          ? (event.code === 'Digit1' ? '1' : event.code === 'Digit2' ? '2' : event.code === 'Digit3' ? '3' : ['1', '2', '3'].includes(event.key) ? event.key : '')
+          : ''
+        if (scopeDigit !== '') {
           event.preventDefault()
-          toggleScope(event.key === '1' ? 'content' : event.key === '2' ? 'files' : 'dirs')
+          toggleScope(scopeDigit === '1' ? 'content' : scopeDigit === '2' ? 'files' : 'dirs')
           return
         }
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -940,6 +1006,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           setSelected(value => Math.max(0, Math.min(rows.length - 1, value + (event.key === 'ArrowDown' ? 1 : -1))))
           return
         }
+        if ((event.key === 'Home' || event.key === 'End') && event.target === inputRef.current) return
         if (event.key === 'Home' || event.key === 'End') {
           event.preventDefault()
           setSelected(event.key === 'Home' ? 0 : Math.max(0, rows.length - 1))
@@ -975,7 +1042,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           event.preventDefault()
           insert(rows[selected]?.hit)
         }
-      }, [activate, close, copy, insert, openFile, reveal, rows, selected, toggleScope])
+      }, [activate, close, copy, insert, loading, openFile, reveal, rows, selected, toggleScope])
 
       useEffect(() => {
         const list = listRef.current
@@ -1060,6 +1127,13 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           ? (contentBuilding ? t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
             : (content?.capped ? t('contentCapped', { n: count }) : (query.trim() !== '' ? t('relevance') : null)))
           : (group.deduped > 0 ? t('deduped', { n: group.deduped }) : (group.truncated ? t('showing', { n: hits.length }) : null))
+        if (typeof group.error === 'string' && group.error !== '') {
+          return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
+            groupHead(key, label, count, null),
+            h('div', { className: 'dsh-locator-groupempty', role: 'alert' }, t('errorPrefix') + group.error,
+              h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry'))),
+          )
+        }
         return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
           groupHead(key, label, count, note),
           extra === undefined ? null : extra,
@@ -1136,21 +1210,22 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
                 })),
         ),
         h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },
+          error !== ''
+            ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, t('errorPrefix') + error,
+                h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry')))
+            : null,
           !anyScope
             ? h('div', { className: 'dsh-locator-empty' }, t('emptyScopes'))
-            : error !== ''
-              ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, t('errorPrefix') + error,
-                  h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry')))
-              : groups === null
-                ? h('div', { className: 'dsh-locator-empty' }, t('loading'))
-                : [
-                    renderGroup('content', t('groupContent'), content),
-                    renderGroup('files', t('groupFiles'), files),
-                    renderGroup('dirs', t('groupDirs'), dirs),
-                  ],
+            : groups === null
+              ? (error === '' ? h('div', { className: 'dsh-locator-empty' }, t('loading')) : null)
+              : [
+                  renderGroup('content', t('groupContent'), content),
+                  renderGroup('files', t('groupFiles'), files),
+                  renderGroup('dirs', t('groupDirs'), dirs),
+                ],
         ),
         h('div', { className: 'dsh-locator-foot' },
-          h('span', null, t('results', { content: contentCount, files: filesCount, dirs: dirsCount, ms: took.toFixed(1) })
+          h('span', null, (loading ? t('loading') + ' · ' : '') + t('results', { content: contentCount, files: filesCount, dirs: dirsCount, ms: took.toFixed(1) })
             + (status && status.scanning ? ' · ' + t('indexing') : '')
             + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
@@ -1192,6 +1267,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         ctx.effect(() => () => { cancelJump() }, 'dsh-locator: find highlight')
         try {
           ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-panel', order: 60 }, Panel))
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-notice', order: 61 }, Notice))
         } catch (error) {
           console.error('dsh-locator: overlay slot unavailable', error)
         }

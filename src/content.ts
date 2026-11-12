@@ -30,7 +30,7 @@ import { Worker } from 'node:worker_threads'
 import { searchContent } from './content-search.ts'
 import type { LocatorRuntime } from './runtime.ts'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 /** Work budget between two event-loop yields; keeps host latency low. */
 const SLICE_MS = 8
@@ -65,6 +65,8 @@ export interface ContentHit {
   snippet: string
   sessionId?: string
   messageId?: string
+  /** Exact `data-chat-node-key` of the rendered row, when the host has one. */
+  nodeKey?: string
   score: number
 }
 
@@ -110,6 +112,7 @@ interface DocRow {
   title: string
   sessionId: string | null
   messageId: string | null
+  nodeKey: string | null
   mtime: number
 }
 
@@ -332,7 +335,7 @@ export class ContentIndex {
       body, kind UNINDEXED, path UNINDEXED, title UNINDEXED,
       session_id UNINDEXED, message_id UNINDEXED, tokenize = 'trigram'
     )`)
-    this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT)')
+    this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT, node_key TEXT)')
     this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
     this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_path ON docs_meta(path)')
     if (fresh) {
@@ -509,7 +512,7 @@ export class ContentIndex {
       return false
     }
     this.deleteDoc(row.key)
-    const meta = this.db!.prepare('INSERT INTO docs_meta (doc_key, path, mtime, kind) VALUES (?, ?, ?, ?)').run(row.key, row.path, row.mtime, row.kind)
+    const meta = this.db!.prepare('INSERT INTO docs_meta (doc_key, path, mtime, kind, node_key) VALUES (?, ?, ?, ?, ?)').run(row.key, row.path, row.mtime, row.kind, row.nodeKey)
     const rowid = meta.lastInsertRowid
     this.db!.prepare('INSERT INTO docs (rowid, body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(rowid, row.body, row.kind, row.path, row.title, row.sessionId, row.messageId)
     this.totalBytes += row.body.length
@@ -623,7 +626,7 @@ export class ContentIndex {
     try { buffer = await readFile(path) } catch { return null }
     if (buffer.includes(0)) return null
     const body = buffer.toString('utf8').slice(0, this.options.maxFileBytes)
-    return { key: `file:${path}`, body, kind: 'file', path, title: name, sessionId: null, messageId: null, mtime }
+    return { key: `file:${path}`, body, kind: 'file', path, title: name, sessionId: null, messageId: null, nodeKey: null, mtime }
   }
 
   private async indexSessions(generation: number): Promise<void> {
@@ -680,7 +683,7 @@ export class ContentIndex {
       if (extracted === undefined) continue
       if (title === '') title = extracted.text.replace(/\s+/g, ' ').slice(0, 90)
       const body = extracted.text.slice(0, SESSION_BODY_BYTES)
-      const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, mtime: file.mtime }
+      const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, nodeKey: extracted.nodeKey, mtime: file.mtime }
       if (!this.addDoc(row)) return false
     }
     return true
@@ -766,7 +769,12 @@ async function archivedSessionIds(): Promise<Set<string>> {
   }
 }
 
-function messageText(event: { type?: string; data?: Record<string, unknown> }): { text: string; id: string } | undefined {
+/** Conversation node key format used by the host DOM (`${kind.length}:${kind}${id}`). */
+function conversationNodeKey(kind: string, id: string): string {
+  return `${kind.length}:${kind}${id}`
+}
+
+function messageText(event: { type?: string; data?: Record<string, unknown> }): { text: string; id: string; nodeKey: string | null } | undefined {
   if (event.type !== 'user/message' && event.type !== 'assistant/message') return undefined
   const data = event.data ?? {}
   if (event.type === 'user/message') {
@@ -783,7 +791,16 @@ function messageText(event: { type?: string; data?: Record<string, unknown> }): 
     .trim()
   if (text === '') return undefined
   const id = event.type === 'user/message' ? String(data.id ?? '') : String(message.id ?? '')
-  return { text, id: id || `seq-${String(data.seq ?? '')}` }
+  const safeId = id || `seq-${String(data.seq ?? '')}`
+  let nodeKey: string | null = null
+  if (event.type === 'user/message' && id !== '') {
+    nodeKey = conversationNodeKey('input-message', id)
+  } else if (event.type === 'assistant/message') {
+    const turn = Number(data.turn)
+    const step = Number(data.step)
+    if (Number.isInteger(turn) && Number.isInteger(step)) nodeKey = conversationNodeKey('assistant-step', `${turn}:${step}`)
+  }
+  return { text, id: safeId, nodeKey }
 }
 
 async function sessionFiles(roots: string[]): Promise<Array<{ path: string; mtime: number }>> {
