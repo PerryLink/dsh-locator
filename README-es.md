@@ -35,6 +35,7 @@ dsh plugin --profile web add dsh-locator
 - [Primera ejecución](#primera-ejecución)
 - [Dos búsquedas](#dos-búsquedas)
 - [Panel web](#panel-web)
+- [Buscar en la conversación (Ctrl+F)](#buscar-en-la-conversación-ctrlf)
 - [Herramientas](#herramientas)
 - [Lenguaje de consulta](#lenguaje-de-consulta)
 - [Configuración](#configuración)
@@ -162,20 +163,33 @@ La construcción ocurre dentro del proceso anfitrión de DSH, pero las lecturas 
 
 ## Panel web
 
-Pulsa `Ctrl+Shift+F` en la GUI web, o haz clic en la lupa del pie de la barra lateral. El panel usa rutas del mismo origen (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sin otro servidor ni otro puerto.
+Pulsa `Ctrl+Shift+F` en la GUI web, o haz clic en la lupa del pie de la barra lateral. El panel usa rutas del mismo origen (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sin otro servidor ni otro puerto. La ruta `/combined` acepta `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` y `count`; el grupo de contenido devuelve `count`/`warnings`, y sus aciertos de archivo incluyen `line`.
 
 - **Los tres ámbitos están activos por defecto**: contenido (cuerpos + sesiones), archivos y carpetas; desmarca cualquiera para acotar. Los resultados se agrupan **contenido → archivos → carpetas** con el recuento por grupo; el contenido se ordena por relevancia y los grupos de nombres siguen el menú de orden.
 - **Doble clic o `Enter` activa un resultado**: una sesión abre la conversación y pinta las palabras encontradas con un resaltado ámbar translúcido que sigue el desplazamiento, se centra al llegar y se limpia con `Esc`; archivos y carpetas se muestran en el gestor de archivos. `Ctrl+Shift+C` copia la ruta, `Ctrl+O` abre, `Ctrl+Enter` inserta `@file` y `Alt+1–3` alterna los ámbitos.
-- Las consultas de contenido requieren al menos dos caracteres; las consultas vacías o de un carácter no inician la construcción. Mientras construye, el grupo de contenido muestra el progreso y los nombres responden al momento; la elección de ámbitos se recuerda.
-- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` mueven, `Enter` activa y `Esc` cierra; el diálogo atrapa el foco y lo restaura al cerrar. El texto sigue `navigator.language` (zh/en/es/pt/hi).
+- **Recuentos**: cada encabezado de grupo muestra su número de aciertos; es exacto cuando el cálculo es barato y aparece como `≥ N` cuando hay un tope. La cabecera indica la posición seleccionada (`3/37`) y el pie resume los tres grupos. La consulta paginada del contenido ahora obtiene primero los rowid ordenados por `rank`, luego el cuerpo por rowid y genera el fragmento y la línea en JS: las palabras comunes bajaron de unos 2,7 s a menos de 300 ms.
+- **Opciones de búsqueda**: la barra de herramientas ofrece el modo (Normal / Extendido / Regex), `Aa` para distinguir mayúsculas y minúsculas, palabra completa y el ámbito de la conversación actual. El modo y las opciones de mayúsculas/palabra completa se aplican a nombres de archivos y carpetas; el contenido admite Normal/Extendido, mayúsculas y palabra completa, pero **en modo regex el grupo de contenido se pausa** y muestra un aviso (los nombres sí admiten regex), de modo que ninguna pulsación del panel recorre toda la biblioteca.
+- **Ámbito de la conversación actual**: solo busca los mensajes ya indexados de esa sesión (una sesión activa tarda unos 2 minutos en quedar indexada), y los ámbitos de archivos y carpetas se desactivan, pero conservan la marca de verificación. Para recorrer coincidencias en vivo usa la barra de `Ctrl+F` que se describe más abajo.
+- Las consultas de contenido requieren al menos dos caracteres; las consultas vacías o de un carácter no inician la construcción. Mientras construye, el grupo de contenido muestra el progreso y los nombres responden al momento; los ámbitos y las opciones de búsqueda se recuerdan.
+- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` mueven, `F3`/`Shift+F3` recorren las filas de resultados en ciclo, `Enter` activa y `Esc` cierra; el diálogo atrapa el foco y lo restaura al cerrar. El texto sigue `navigator.language` (zh/en/es/pt/hi).
 
+## Buscar en la conversación (Ctrl+F)
+
+En una conversación, pulsa `Ctrl+F` (o el botón `⌕` de la cabecera de la sesión) para abrir una barra de búsqueda no modal en la esquina superior derecha. La barra solo busca en los mensajes **cargados** de la conversación actual, sin depender del índice de contenido ni de su retraso de unos dos minutos:
+
+- **Recuento y navegación**: muestra `3/17`; `Enter`/`F3` van a la siguiente coincidencia y `Shift+Enter`/`Shift+F3` a la anterior. El recorrido circular (continuar al inicio) está activo por defecto: al llegar a un extremo, la búsqueda sigue por el otro y lo indica. Todas las coincidencias llevan un resaltado translúcido; la actual es más intensa y va subrayada.
+- **Opciones**: `Aa` distingue mayúsculas y minúsculas, palabra completa (límites ASCII `[A-Za-z0-9_]`; los caracteres CJK cuentan como no palabra), continuar al inicio (`↻`) y búsqueda en sentido inverso (`⇅`, que cambia el sentido de `Enter`); los botones de anterior y siguiente están siempre visibles.
+- **Modos**: Normal (literal), Extendido (`\n` `\r` `\t` `\0` `\xHH` `\\`; las secuencias desconocidas se buscan tal cual) y Regex (JS RegExp en un hilo worker con un límite de 500 ms; un patrón no válido muestra el error en línea). Las coincidencias de longitud cero se omiten en vez de bloquear la interfaz.
+- **Selección**: selecciona texto en la conversación y pulsa `Ctrl+F`; la barra empieza limitada a esa selección y muestra un chip. Las selecciones que cruzan mensajes también funcionan; si la selección caduca, la barra vuelve a toda la conversación.
+- **Ventana cargada**: solo se buscan los mensajes cargados; en conversaciones largas usa «Cargar mensajes anteriores y reintentar» en vez de paginar automáticamente.
+- `Esc` cierra la barra y limpia los resaltados; cambiar de conversación, abrir el panel o desmontar el plugin también limpian. El panel global se encarga de descubrir archivos y sesiones; la barra recorre coincidencias dentro de la conversación actual, y sus resaltados nunca se superponen.
 
 ## Herramientas
 
 | Herramienta | Qué hace |
 |---|---|
 | `locator_search` | Consulta nombres y rutas con filtros `ext:`, `size:`, `dm:`, `path:`, ordenación y paginación. |
-| `locator_find` | Busca en cuerpos de archivo y mensajes de sesión; devuelve fragmentos, `sessionId`/`messageId` y el estado del índice de contenido. |
+| `locator_find` | Busca en cuerpos de archivo y mensajes de sesión; devuelve fragmentos, `sessionId`/`messageId`, el estado del índice de contenido y el campo opcional `line` en los aciertos de archivo. |
 | `locator_status` | Raíces, recuentos del índice de nombres, estado del watcher, directorio de estado y ruta del motor. (El progreso del contenido lo informan `locator_find` y el panel). |
 | `locator_rebuild` | Sustituye el índice de nombres por un escaneo en segundo plano; las búsquedas usan el índice antiguo hasta que el nuevo esté listo. |
 | `locator_reindex` | Actualiza o reconstruye el índice de contenido: incremental por defecto, `full: true` lo borra y reconstruye. |
@@ -378,7 +392,9 @@ DeepSeek Harness
 - macOS usa FSEvents (recursivo) en los binarios publicados; una compilación con `CGO_ENABLED=0` cae a kqueue, limitado a 4.096 directorios, con cambios de contenido dependientes de la reconstrucción periódica.
 - USN/MFT de Windows es opcional y solo se usa si el proceso puede leer el volumen y el diario está activo; si no, se usa el recorrido portátil.
 
-- Los aciertos en el cuerpo de un archivo se muestran por ahora en el gestor de archivos (la vista por línea dentro de DSH es el siguiente paso); los mensajes del asistente ahora se anclan por su clave de nodo `turn:step`, con frase solo como reserva. Actualizar a 0.8.1 reconstruye una vez la base de contenido por el nuevo campo.
+- Los aciertos en el cuerpo de un archivo se muestran por ahora en el gestor de archivos (la vista por línea dentro de DSH es el siguiente paso; los resultados ya incluyen el campo de número de línea `line`); los mensajes del asistente se anclan por su clave de nodo `turn:step`, con la frase solo como reserva. Actualizar de 0.8.0 a 0.8.1 reconstruye una vez la base de contenido por el nuevo campo de clave de nodo.
+- **La regex de contenido en toda la biblioteca queda fuera del P0**: el modo regex pausa el grupo de contenido (los nombres de archivos y carpetas sí admiten regex) para evitar recorrer una biblioteca de 1 GB y riesgos de ReDoS; la barra de búsqueda dentro de la conversación sí admite regex.
+- El ámbito de la conversación actual solo cubre los mensajes de sesión ya asentados en el índice (una sesión activa tarda unos 2 minutos en indexarse); para buscar en vivo usa `Ctrl+F`. La barra de búsqueda solo cubre la ventana cargada; el historial anterior se carga a mano.
 - El resaltado dentro de la conversación usa la API CSS Custom Highlight; los navegadores antiguos sin ella caen a un contorno de fila.
 
 ## Memoria

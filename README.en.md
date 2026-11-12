@@ -35,6 +35,7 @@ dsh plugin --profile web add dsh-locator
 - [First run](#first-run)
 - [Two searches](#two-searches)
 - [Web panel](#web-panel)
+- [Find in the conversation (Ctrl+F)](#find-in-the-conversation-ctrlf)
 - [Tools](#tools)
 - [Query language](#query-language)
 - [Configuration](#configuration)
@@ -162,12 +163,26 @@ The build runs inside the DSH host process, but file reads and zstd decoding are
 
 ## Web panel
 
-Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot. The panel uses same-origin routes (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), so it needs no second server and no extra port.
+Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the sidebar foot. The panel uses same-origin routes (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), so it needs no second server and no extra port. `/combined` accepts `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` and `count`; the content group returns `count`/`warnings` and file hits carry `line`.
 
 - **All three scopes are on by default**: content (bodies + sessions), files and folders; uncheck any scope to narrow the search. Results are grouped **content → files → folders** with a count per group; content is ranked by relevance and name groups follow the sort menu.
 - **Double-click or `Enter` activates a hit**: a session hit opens the conversation and paints the matched words with a translucent amber highlight that follows scrolling, is centered on arrival and clears with `Esc`; file/folder hits are revealed in the file manager. `Ctrl+Shift+C` copies the path, `Ctrl+O` opens, `Ctrl+Enter` inserts `@file`, and `Alt+1–3` toggles the scopes.
-- Content queries need at least two characters; empty and one-character queries never start the content build. While it builds the content group shows progress and name results return immediately; the scope choice is remembered.
-- Keyboard: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` move, `Enter` activates, `Esc` closes; the dialog traps focus and restores it on close. Panel text follows `navigator.language` (zh/en/es/pt/hi).
+- **Counts**: group headers show the match count; exact when cheap, `≥ N` when capped. The header shows the selected position (`3/37`) and the footer summarises all groups. The content page path now runs rank-rowids → body-by-rowid → JS snippet/line, so common words dropped from about 2.7 s to under 300 ms.
+- **Find options**: the toolbar offers mode (Normal / Extended / Regex), `Aa` match case, whole word and a current-conversation scope. Mode/case/whole-word apply to file and folder names; content supports Normal/Extended/case/whole-word, while **regex pauses the content group** (names still allow regex) so a panel keystroke never scans the whole corpus.
+- **Current conversation scope**: only indexed messages of that session are searched (an active session is indexed after roughly two minutes), and file/folder scopes are disabled but keep their ticks. For live per-match navigation use the `Ctrl+F` find bar below.
+- Content queries need at least two characters; empty and one-character queries never start the content build. While it builds the content group shows progress and name results return immediately; scopes and find options are remembered.
+- Keyboard: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` move, `F3`/`Shift+F3` cycle result rows, `Enter` activates, `Esc` closes; the dialog traps focus and restores it on close. Panel text follows `navigator.language` (zh/en/es/pt/hi).
+
+## Find in the conversation (Ctrl+F)
+
+Press `Ctrl+F` in a conversation (or click `⌕` in the session header) to open a non-modal find bar that searches only the **loaded** messages of the current conversation — no content index, no two-minute delay:
+
+- **Count and navigation**: shows `3/17`; `Enter`/`F3` next, `Shift+Enter`/`Shift+F3` previous, wrap around on by default (reaching an edge continues from the other side). All matches are painted with a translucent highlight; the current match is darker and underlined.
+- **Options**: `Aa` match case, whole word (ASCII `[A-Za-z0-9_]` boundaries; CJK is treated as non-word), wrap and reverse (flips the `Enter` direction); explicit previous/next buttons are always available.
+- **Modes**: Normal (literal), Extended (`\n` `\r` `\t` `\0` `\xHH` `\\`, unknown escapes stay literal), Regex (JS RegExp in a worker with a 500 ms timeout; invalid patterns show an inline error). Zero-width matches are skipped instead of freezing the UI.
+- **Selection scope**: select text in the conversation and press `Ctrl+F`; the bar starts scoped to that selection and shows a selection chip. Cross-message selections are supported; if the selection expires the bar falls back to the whole conversation.
+- **Loaded window**: only loaded messages are searched; on long conversations use “Load earlier messages and retry” rather than automatic paging.
+- `Esc` closes the bar and clears highlights; switching conversations, opening the panel or disposing the plugin also cleans up. The global panel handles cross-file/cross-session discovery while the find bar handles per-match navigation in the current conversation; their highlights never stack.
 
 
 ## Tools
@@ -175,7 +190,7 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 | Tool | What it does |
 |---|---|
 | `locator_search` | Query names and paths, with `ext:`, `size:`, `dm:`, `path:` filters plus sorting and pagination. |
-| `locator_find` | Search file bodies and session messages; hits carry snippets and `sessionId`/`messageId`, plus the content-index state. |
+| `locator_find` | Search file bodies and session messages; hits carry snippets, an optional `line` number, `sessionId`/`messageId`, and the content-index state. |
 | `locator_status` | Roots, name-index counts, watcher state, state directory and engine path. (Content progress is reported by `locator_find` and the panel, not here.) |
 | `locator_rebuild` | Replace the name index with a fresh background scan; searches keep using the old index until the new one is ready. |
 | `locator_reindex` | Refresh or rebuild the content index: incremental by default, `full: true` drops and rebuilds it. |
@@ -378,7 +393,9 @@ DeepSeek Harness
 - macOS uses FSEvents (recursive) in the shipped binaries; a `CGO_ENABLED=0` build falls back to kqueue, capped at 4,096 directories, with content changes relying on the periodic rebuild.
 - Windows USN/MFT is optional and only used when the process can read the volume and the journal is active; otherwise the portable walk is used.
 
-- File-body hits currently reveal the file in the file manager (line-level preview inside DSH is next); assistant messages now anchor exactly through their `turn:step` node key, with a phrase fallback only when that row is missing. Upgrading to 0.8.1 rebuilds the content database once for the new node-key field.
+- File-body hits currently reveal the file in the file manager (line-level preview inside DSH is next; hits now carry a `line` number); assistant messages anchor exactly through their `turn:step` node key with a phrase fallback. Upgrading from 0.8.0 to 0.8.1 rebuilds the content database once for the node-key field.
+- **Whole-corpus content regex is not in P0**: regex pauses the content group (names still allow regex) to avoid scanning a 1 GB corpus and ReDoS; the in-conversation find bar supports regex.
+- The current-conversation panel scope covers indexed, settled session messages only (roughly a two-minute delay for an active session); use `Ctrl+F` for live search. The find bar covers the loaded window only; load earlier messages explicitly.
 - In-conversation highlighting uses the CSS Custom Highlight API; older browsers without it fall back to a row outline.
 
 ## Memory

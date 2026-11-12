@@ -8,6 +8,7 @@ import {
 } from '../src/combined.ts'
 import type { ContentHit, ContentState } from '../src/content.ts'
 import type { SearchArgs, SearchHit, SearchResult } from '../src/runtime.ts'
+import type { ContentCount, ContentSearchOptions, ContentSearchResult } from '../src/content-search.ts'
 
 function fileHit(path: string): SearchHit {
   return { path, name: path.split('/').pop() ?? path, size: 10, mtime: 1, ext: 'md', dir: false }
@@ -32,6 +33,14 @@ function result(hits: SearchHit[], tookNs = 1_000_000): SearchResult {
   return { total: hits.length, returned: hits.length, offset: 0, truncated: false, tookNs, hits }
 }
 
+function contentResult(
+  hits: ContentHit[],
+  count: ContentCount = { value: hits.length, kind: 'exact' },
+  warnings: string[] = [],
+): ContentSearchResult {
+  return { hits, count, warnings }
+}
+
 function state(extra: Partial<ContentState> = {}): ContentState {
   return { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', updatedAt: 0, ...extra }
 }
@@ -40,7 +49,7 @@ function deps(overrides: Partial<CombinedDeps> = {}): CombinedDeps {
   return {
     maxResults: 100,
     search: async () => result([]),
-    contentSearch: async () => [],
+    contentSearch: async () => contentResult([]),
     contentStatus: () => state(),
     ensure: () => {},
     ...overrides,
@@ -81,14 +90,14 @@ describe('combined search', () => {
     let searched = 0
     const response = await runCombinedSearch(deps({
       ensure: () => { ensured++ },
-      contentSearch: async () => { searched++; return [] },
+      contentSearch: async () => { searched++; return contentResult([]) },
     }), readCombinedRequest({ query: '   ' }, 100))
     expect(ensured).toBe(0)
     expect(searched).toBe(0)
     expect(response.content).toMatchObject({ hits: [], building: false })
     const short = await runCombinedSearch(deps({
       ensure: () => { ensured++ },
-      contentSearch: async () => { searched++; return [] },
+      contentSearch: async () => { searched++; return contentResult([]) },
     }), readCombinedRequest({ query: 'x' }, 100))
     expect(ensured).toBe(0)
     expect(searched).toBe(0)
@@ -100,7 +109,7 @@ describe('combined search', () => {
     let searched = 0
     const withContent = deps({
       ensure: () => { ensured++ },
-      contentSearch: async () => { searched++; return [] },
+      contentSearch: async () => { searched++; return contentResult([]) },
     })
     await runCombinedSearch(withContent, readCombinedRequest({ query: 'x', content: false }, 100))
     expect(ensured).toBe(0)
@@ -120,7 +129,7 @@ describe('combined search', () => {
     const response = await runCombinedSearch(deps({
       search: async args => { calls.push(args); return args.filesOnly ? result([fileHit('/tmp/a.md')]) : result([dirHit('/tmp/dir')]) },
       ensure: () => { ensured++ },
-      contentSearch: async query => { contentQuery = query; return [contentHit('file', '/tmp/a.md')] },
+      contentSearch: async query => { contentQuery = query; return contentResult([contentHit('file', '/tmp/a.md')]) },
       contentStatus: () => state({ building: true }),
     }), readCombinedRequest({ query: 'note', limit: 5 }, 100))
     expect(ensured).toBe(1)
@@ -142,7 +151,7 @@ describe('combined search', () => {
 
     const nonEmpty = await runCombinedSearch(deps({
       contentStatus: () => { throw new Error('db gone') },
-      contentSearch: async () => [contentHit('file', '/tmp/a.md')],
+      contentSearch: async () => contentResult([contentHit('file', '/tmp/a.md')]),
     }), readCombinedRequest({ query: 'note' }, 100))
     expect(nonEmpty.content?.error).toBe('db gone')
     expect(nonEmpty.files).toBeDefined()
@@ -159,5 +168,102 @@ describe('combined search', () => {
     expect(response.files?.error).toBe('engine offline')
     expect(response.files?.hits).toEqual([])
     expect(response.dirs?.hits).toHaveLength(1)
+  })
+
+  it('parses the advanced match options with safe fallbacks', () => {
+    const request = readCombinedRequest({
+      query: 'note',
+      matchMode: 'extended',
+      caseSensitive: true,
+      wholeWord: true,
+      sessionId: 'session-1',
+      count: 'bounded',
+      countLimit: 99_999,
+    }, 100)
+    expect(request).toMatchObject({
+      matchMode: 'extended',
+      caseSensitive: true,
+      wholeWord: true,
+      sessionId: 'session-1',
+      count: 'bounded',
+      countLimit: 5000,
+    })
+
+    const fallback = readCombinedRequest({ matchMode: 'nope', count: 'nope', countLimit: 0, sessionId: '   ' }, 100)
+    expect(fallback).toMatchObject({ matchMode: 'normal', caseSensitive: false, wholeWord: false, sessionId: null, count: 'exact', countLimit: 1 })
+  })
+
+  it('pauses the content group in regex mode instead of scanning the corpus', async () => {
+    let ensured = 0
+    let searched = 0
+    const nameArgs: SearchArgs[] = []
+    const response = await runCombinedSearch(deps({
+      ensure: () => { ensured++ },
+      contentSearch: async () => { searched++; return contentResult([]) },
+      search: async args => { nameArgs.push(args); return result([fileHit('/tmp/a.md')]) },
+    }), readCombinedRequest({ query: 'note', matchMode: 'regex' }, 100))
+    expect(response.content).toMatchObject({ hits: [], returned: 0, error: 'content-regex-not-supported', warnings: ['content-regex-paused'] })
+    expect(ensured).toBe(0)
+    expect(searched).toBe(0)
+    expect(nameArgs[0]?.regex).toBe(true)
+    expect(response.files?.hits).toHaveLength(1)
+  })
+
+  it('passes match options and count to the content store and returns per-group counts', async () => {
+    const calls: Array<{ query: string; limit: number; options: ContentSearchOptions }> = []
+    const response = await runCombinedSearch(deps({
+      contentSearch: async (query, limit, options) => {
+        calls.push({ query, limit, options })
+        return contentResult([contentHit('session', '/tmp/session.log')], { value: 42, kind: 'exact' })
+      },
+      search: async args => result(args.filesOnly ? [fileHit('/tmp/a.md')] : [dirHit('/tmp/dir')]),
+    }), readCombinedRequest({
+      query: 'note',
+      matchMode: 'extended',
+      caseSensitive: true,
+      wholeWord: true,
+      sessionId: 'session-1',
+      count: 'bounded',
+      countLimit: 7,
+    }, 100))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      query: 'note',
+      limit: 30,
+      options: { matchMode: 'extended', caseSensitive: true, wholeWord: true, sessionId: 'session-1', count: 'bounded', countLimit: 7 },
+    })
+    expect(response.content?.count).toEqual({ value: 42, kind: 'exact' })
+    expect(response.content?.warnings).toEqual([])
+    expect(response.files?.count).toEqual({ value: 1, kind: 'exact' })
+    expect(response.dirs?.count).toEqual({ value: 1, kind: 'exact' })
+  })
+
+  it('decodes extended escapes for the name engine and drops control characters', async () => {
+    const nameArgs: SearchArgs[] = []
+    const response = await runCombinedSearch(deps({
+      search: async args => { nameArgs.push(args); return result([fileHit('/tmp/a.md')]) },
+    }), readCombinedRequest({ query: 'foo\\tbar', matchMode: 'extended', content: false }, 100))
+    expect(nameArgs[0]?.query).toBe('foobar')
+    expect(response.files?.warnings).toContain('name-extended-control-char')
+
+    const invalid = await runCombinedSearch(deps({
+      search: async args => { nameArgs.push(args); return result([]) },
+    }), readCombinedRequest({ query: 'bad\\xZZ', matchMode: 'extended', content: false }, 100))
+    expect(invalid.files?.error).toBe('invalid-escape')
+    expect(invalid.files?.hits).toEqual([])
+  })
+
+  it('passes case and whole-word flags to the name engine in normal mode', async () => {
+    const nameArgs: SearchArgs[] = []
+    await runCombinedSearch(deps({
+      search: async args => { nameArgs.push(args); return result([]) },
+      contentSearch: async () => contentResult([]),
+    }), readCombinedRequest({ query: 'note', caseSensitive: true, wholeWord: true }, 100))
+    expect(nameArgs).toHaveLength(2)
+    for (const args of nameArgs) {
+      expect(args.regex).toBe(false)
+      expect(args.caseSensitive).toBe(true)
+      expect(args.wholeWord).toBe(true)
+    }
   })
 })

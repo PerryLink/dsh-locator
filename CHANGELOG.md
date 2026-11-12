@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.0 — 2026-11-12
+
+Advanced find and a two-surface search model, informed by Notepad++/Notepad--/VS Code and a live-DB benchmark.
+
+* **Counts**: `/combined` returns `count: { value, kind: exact|bounded }` per group; the panel shows exact counts where cheap and `≥ N` for bounded counts, plus the selected position and footer summary. Name groups keep exact totals.
+* **Match options**: mode (Normal / Extended / Regex), match case and whole word. Names use the existing engine flags; content gains Normal/Extended/case/whole-word with GLOB/LIKE/JS-boundary paths. Regex pauses the content group (names still work) so a keystroke never scans the corpus.
+* **Current conversation scope**: the panel can restrict content to one session; the content index keeps a session-id → log-path map and queries `rowid IN (docs_meta.path = ?)` (0.1–0.9 ms). Unknown sessions return an empty group plus a warning.
+* **In-conversation find bar (`Ctrl+F`)**: non-modal bar anchored to the conversation; counts `i/N`, next/previous, wrap (on by default), reverse direction, match case, whole word, Normal/Extended/Regex, selection scoping (`Ctrl+F` with a selection starts in that selection), loaded-window notice with “load earlier messages and retry”, current match underlined, Esc clears the highlight and restores focus.
+* **Performance**: the content page path no longer evaluates `snippet()`/`bm25` with `ORDER BY score` for every matching row. It fetches rank rowids, then bodies by rowid (no MATCH on that statement), and builds snippets/line numbers in JS: normal `the` on the live 1 GB corpus went from about **2.7 s to 65 ms**; case/whole/extended/session paths are bounded.
+* **Robustness**: the find bar uses an owner-aware CSS-Highlight manager (jump vs find), cancels pending scans with a sequence token, debounces DOM mutations, caps matches/text, runs regex in a worker with a 500 ms timeout, ignores IME composition, drops a dead selection back to the session, closes on conversation switch/panel open/dispose, and cleans all timers/observers/style tags.
+* **Tests**: 52 (26 content, 13 combined, plus find/plugin/runtime/lag/export/reveal); verify checks the find-bar and owner-highlight markers.
+* No content schema change and no rebuild: 0.9.0 runs on the 0.8.1 schema v3 database. Whole-corpus content regex remains intentionally out of P0 (ReDoS/cost); use the conversation find bar.
+
 ## 0.8.2 — 2026-11-12
 
 Robustness pass over the 0.8.1 review fixes.

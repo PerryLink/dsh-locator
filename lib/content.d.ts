@@ -15,6 +15,7 @@
  * alone unless `includeArchived` is set.
  * @module dsh-locator/content
  */
+import { type ContentSearchOptions, type ContentSearchResult } from './content-search.ts';
 import type { LocatorRuntime } from './runtime.ts';
 export interface ContentHit {
     kind: 'file' | 'session';
@@ -25,6 +26,8 @@ export interface ContentHit {
     messageId?: string;
     /** Exact `data-chat-node-key` of the rendered row, when the host has one. */
     nodeKey?: string;
+    /** 1-based line of the first match inside the stored body, for file hits. */
+    line?: number;
     score: number;
 }
 export interface ContentState {
@@ -73,6 +76,8 @@ export declare class ContentIndex {
     private workerSeq;
     private pendingStart;
     private dbIdentity;
+    /** Session id → indexed session log path, for session-scoped content search. */
+    private readonly sessionPaths;
     private readonly pending;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
@@ -143,6 +148,12 @@ export declare class ContentIndex {
     /** True when a session log has been quiet long enough to be read safely. */
     private settled;
     private finish;
+    /**
+     * Rebuild the session id → session log path map from the persisted sources.
+     * Runs after `open()` and after every build/refresh, so session-scoped
+     * searches work against an existing database before the first refresh ends.
+     */
+    private refreshSessionPaths;
     private addDoc;
     private deleteDoc;
     private deletePath;
@@ -161,11 +172,20 @@ export declare class ContentIndex {
      * Search file bodies and session messages. With `searchWorker` enabled the
      * query itself runs off the host thread; a failed or wedged worker falls back
      * to the in-process query so a result is still produced.
+     *
+     * The two-argument form returns the hit array (tools and the legacy
+     * `/content` route). The three-argument form returns hits plus count,
+     * warnings and an error code, and understands the advanced match options.
      * @param query - words or a phrase to find.
      * @param limit - maximum hits.
+     * @param options - match mode, case/whole-word flags, session scope, count mode.
      * @returns matching documents ordered by relevance.
      */
     search(query: string, limit: number): Promise<ContentHit[]>;
+    search(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult>;
+    private searchDetailed;
+    /** Map a request's sessionId onto the indexed session log path. */
+    private resolveSession;
     private searchSync;
 }
 //# sourceMappingURL=content.d.ts.map

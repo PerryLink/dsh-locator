@@ -4,12 +4,21 @@
  *
  * The name index and the content index live in different stores, so this module
  * owns the orchestration and the merge rules as pure, injectable functions:
- * scope gating, the lazy-build guard for empty queries, per-group degradation
- * and de-duplication of a path that appears both as a body hit and a name hit.
+ * scope gating, the lazy-build guard for empty queries, per-group degradation,
+ * match-option routing (content vs name engine), page counts and de-duplication
+ * of a path that appears both as a body hit and a name hit.
  * @module dsh-locator/combined
  */
 
 import type { ContentHit, ContentState } from './content.ts'
+import { decodeExtendedForNames } from './content-search.ts'
+import type {
+  ContentCount,
+  ContentCountMode,
+  ContentMatchMode,
+  ContentSearchOptions,
+  ContentSearchResult,
+} from './content-search.ts'
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts'
 
 /** Which groups a combined request asked for; every scope is on by default. */
@@ -27,6 +36,15 @@ export interface CombinedRequest {
   sort: string
   desc: boolean
   scopes: CombinedScopes
+  /** How the query text is interpreted (`normal` by default). */
+  matchMode: ContentMatchMode
+  caseSensitive: boolean
+  wholeWord: boolean
+  /** Restrict the content group to one session (null means every document). */
+  sessionId: string | null
+  /** How much counting work the groups may spend. */
+  count: ContentCountMode
+  countLimit: number
 }
 
 /** One name-index group: files or directories. */
@@ -37,7 +55,10 @@ export interface NameGroup {
   truncated: boolean
   /** Rows dropped because the same path already appears in the content group. */
   deduped: number
+  /** The name engine always returns an exact total. */
+  count: ContentCount
   tookMs: number
+  warnings?: string[]
   error?: string
 }
 
@@ -47,6 +68,9 @@ export interface ContentGroup {
   returned: number
   /** True when the group was cut off by its page limit. */
   capped: boolean
+  /** Exact or bounded match count; `unknown` when counting was skipped. */
+  count: ContentCount
+  warnings: string[]
   building: boolean
   files: number
   sessions: number
@@ -71,7 +95,7 @@ export interface CombinedResponse {
 /** Dependencies required to run a combined search; the HTTP layer supplies them. */
 export interface CombinedDeps {
   search(args: SearchArgs): Promise<SearchResult>
-  contentSearch?: (query: string, limit: number) => Promise<ContentHit[]>
+  contentSearch?: (query: string, limit: number, options: ContentSearchOptions) => Promise<ContentSearchResult>
   contentStatus?: () => ContentState
   ensure?: () => void
   maxResults: number
@@ -109,6 +133,12 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
     sort: sortKey(body.sort),
     desc: body.desc === true,
     scopes: readScopes(body),
+    matchMode: matchMode(body.matchMode),
+    caseSensitive: body.caseSensitive === true,
+    wholeWord: body.wholeWord === true,
+    sessionId: typeof body.sessionId === 'string' && body.sessionId.trim() !== '' ? body.sessionId : null,
+    count: countMode(body.count),
+    countLimit: clamp(body.countLimit, 1, 5000, 1000),
   }
 }
 
@@ -188,16 +218,40 @@ export async function runCombinedSearch(deps: CombinedDeps, request: CombinedReq
 /** Page through a directory-shaped name query. */
 async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: boolean): Promise<NameGroup> {
   const started = Date.now()
+  const empty = (error?: string, warnings?: string[]): NameGroup => ({
+    hits: [],
+    returned: 0,
+    total: 0,
+    truncated: false,
+    deduped: 0,
+    count: { value: 0, kind: 'exact' },
+    tookMs: Date.now() - started,
+    ...(warnings === undefined || warnings.length === 0 ? {} : { warnings }),
+    ...(error === undefined ? {} : { error }),
+  })
+  // The name engine understands everything except Notepad++-style escapes:
+  // decode them here and drop control characters (file names cannot contain
+  // them) instead of searching for a literal backslash sequence.
+  let nameQuery = request.query
+  let warnings: string[] = []
+  if (request.matchMode === 'extended') {
+    const decoded = decodeExtendedForNames(request.query)
+    warnings = decoded.warnings
+    if (!decoded.ok) return empty(decoded.error ?? 'invalid-escape', warnings)
+    nameQuery = decoded.text
+    // An all-control-escape query must not degrade into "match everything".
+    if (nameQuery.trim() === '') return empty(undefined, [...new Set([...warnings, 'name-extended-empty'])])
+  }
   try {
     const result = await deps.search({
-      query: request.query,
+      query: nameQuery,
       limit: request.limit,
       offset: 0,
       sort: request.sort,
       desc: request.desc,
-      regex: false,
-      caseSensitive: false,
-      wholeWord: false,
+      regex: request.matchMode === 'regex',
+      caseSensitive: request.caseSensitive,
+      wholeWord: request.wholeWord,
       filesOnly: files,
       dirsOnly: !files,
     })
@@ -207,23 +261,27 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
       total: result.total,
       truncated: result.truncated,
       deduped: 0,
+      count: { value: result.total, kind: 'exact' },
       tookMs: result.tookNs / 1e6,
+      ...(warnings.length === 0 ? {} : { warnings: [...new Set(warnings)] }),
     }
   } catch (error) {
-    return { hits: [], returned: 0, total: 0, truncated: false, deduped: 0, tookMs: Date.now() - started, error: messageOf(error) }
+    return { ...empty(messageOf(error)), tookMs: Date.now() - started }
   }
 }
 
 /** Query the content store, or report its state without starting a build. */
 async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: boolean): Promise<ContentGroup> {
   const started = Date.now()
-  const empty = (): ContentGroup => {
+  const empty = (warnings: string[] = []): ContentGroup => {
     let state: ContentState | undefined
     try { state = deps.contentStatus?.() } catch { state = undefined }
     return {
       hits: [],
       returned: 0,
       capped: false,
+      count: { value: 0, kind: 'unknown' },
+      warnings,
       building: state?.building ?? false,
       files: state?.files ?? 0,
       sessions: state?.sessions ?? 0,
@@ -232,21 +290,37 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
       tookMs: 0,
     }
   }
+  // 0.9.0 never scans the whole corpus from a panel keystroke: the content
+  // group pauses itself in regex mode while the name groups still run.
+  if (request.matchMode === 'regex') {
+    return { ...empty(['content-regex-paused']), error: 'content-regex-not-supported' }
+  }
   if (!ask || deps.contentSearch === undefined) return empty()
+  const options: ContentSearchOptions = {
+    matchMode: request.matchMode,
+    caseSensitive: request.caseSensitive,
+    wholeWord: request.wholeWord,
+    count: request.count,
+    countLimit: request.countLimit,
+    ...(request.sessionId === null ? {} : { sessionId: request.sessionId }),
+  }
   try {
     deps.ensure?.()
-    const hits = await deps.contentSearch(request.query, request.contentLimit)
+    const result = await deps.contentSearch(request.query, request.contentLimit, options)
     const state = deps.contentStatus?.()
     return {
-      hits,
-      returned: hits.length,
-      capped: hits.length >= request.contentLimit,
+      hits: result.hits,
+      returned: result.hits.length,
+      capped: result.hits.length >= request.contentLimit,
+      count: result.count,
+      warnings: result.warnings,
       building: state?.building ?? false,
       files: state?.files ?? 0,
       sessions: state?.sessions ?? 0,
       messages: state?.messages ?? 0,
       truncated: state?.truncated ?? false,
       tookMs: Date.now() - started,
+      ...(result.error === undefined ? {} : { error: result.error }),
     }
   } catch (error) {
     return { ...empty(), error: messageOf(error), tookMs: Date.now() - started }
@@ -258,6 +332,14 @@ function clamp(value: unknown, min: number, max: number, fallback: number): numb
   return Math.min(max, Math.max(min, Math.trunc(value)))
 }
 
+function matchMode(value: unknown): ContentMatchMode {
+  return value === 'extended' || value === 'regex' ? value : 'normal'
+}
+
+function countMode(value: unknown): ContentCountMode {
+  return value === 'bounded' || value === 'none' ? value : 'exact'
+}
+
 function sortKey(value: unknown): string {
   return value === 'name' || value === 'path' || value === 'size' || value === 'mtime' || value === 'ext' ? value : 'mtime'
 }
@@ -265,4 +347,3 @@ function sortKey(value: unknown): string {
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-

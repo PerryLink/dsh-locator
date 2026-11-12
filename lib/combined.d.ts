@@ -4,11 +4,13 @@
  *
  * The name index and the content index live in different stores, so this module
  * owns the orchestration and the merge rules as pure, injectable functions:
- * scope gating, the lazy-build guard for empty queries, per-group degradation
- * and de-duplication of a path that appears both as a body hit and a name hit.
+ * scope gating, the lazy-build guard for empty queries, per-group degradation,
+ * match-option routing (content vs name engine), page counts and de-duplication
+ * of a path that appears both as a body hit and a name hit.
  * @module dsh-locator/combined
  */
 import type { ContentHit, ContentState } from './content.ts';
+import type { ContentCount, ContentCountMode, ContentMatchMode, ContentSearchOptions, ContentSearchResult } from './content-search.ts';
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts';
 /** Which groups a combined request asked for; every scope is on by default. */
 export interface CombinedScopes {
@@ -24,6 +26,15 @@ export interface CombinedRequest {
     sort: string;
     desc: boolean;
     scopes: CombinedScopes;
+    /** How the query text is interpreted (`normal` by default). */
+    matchMode: ContentMatchMode;
+    caseSensitive: boolean;
+    wholeWord: boolean;
+    /** Restrict the content group to one session (null means every document). */
+    sessionId: string | null;
+    /** How much counting work the groups may spend. */
+    count: ContentCountMode;
+    countLimit: number;
 }
 /** One name-index group: files or directories. */
 export interface NameGroup {
@@ -33,7 +44,10 @@ export interface NameGroup {
     truncated: boolean;
     /** Rows dropped because the same path already appears in the content group. */
     deduped: number;
+    /** The name engine always returns an exact total. */
+    count: ContentCount;
     tookMs: number;
+    warnings?: string[];
     error?: string;
 }
 /** The content group: body/session hits plus the index state at query time. */
@@ -42,6 +56,9 @@ export interface ContentGroup {
     returned: number;
     /** True when the group was cut off by its page limit. */
     capped: boolean;
+    /** Exact or bounded match count; `unknown` when counting was skipped. */
+    count: ContentCount;
+    warnings: string[];
     building: boolean;
     files: number;
     sessions: number;
@@ -64,7 +81,7 @@ export interface CombinedResponse {
 /** Dependencies required to run a combined search; the HTTP layer supplies them. */
 export interface CombinedDeps {
     search(args: SearchArgs): Promise<SearchResult>;
-    contentSearch?: (query: string, limit: number) => Promise<ContentHit[]>;
+    contentSearch?: (query: string, limit: number, options: ContentSearchOptions) => Promise<ContentSearchResult>;
     contentStatus?: () => ContentState;
     ensure?: () => void;
     maxResults: number;

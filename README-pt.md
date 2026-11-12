@@ -35,6 +35,7 @@ dsh plugin --profile web add dsh-locator
 - [Primeira execução](#primeira-execução)
 - [Duas buscas](#duas-buscas)
 - [Painel web](#painel-web)
+- [Busca na conversa (Ctrl+F)](#busca-na-conversa-ctrlf)
 - [Ferramentas](#ferramentas)
 - [Linguagem de consulta](#linguagem-de-consulta)
 - [Configuração](#configuração)
@@ -162,12 +163,26 @@ A construção roda dentro do processo anfitrião do DSH, mas leituras de arquiv
 
 ## Painel web
 
-Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no pé da barra lateral. O painel usa rotas de mesma origem (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sem outro servidor nem outra porta.
+Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no pé da barra lateral. O painel usa rotas de mesma origem (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sem outro servidor nem outra porta. O `/combined` aceita `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` e `count`; o grupo de conteúdo devolve `count`/`warnings`, e os resultados de arquivo trazem `line`.
 
 - **Os três escopos vêm ativados por padrão**: conteúdo (corpos + sessões), arquivos e pastas; desmarque qualquer um para restringir. Os resultados são agrupados **conteúdo → arquivos → pastas** com a contagem por grupo; o conteúdo é ordenado por relevância e os grupos de nomes seguem o menu de ordem.
 - **Duplo clique ou `Enter` ativa um resultado**: uma sessão abre a conversa e pinta as palavras encontradas com destaque âmbar translúcido que acompanha a rolagem, é centralizado ao chegar e é limpo com `Esc`; arquivos e pastas são mostrados no gerenciador de arquivos. `Ctrl+Shift+C` copia o caminho, `Ctrl+O` abre, `Ctrl+Enter` insere `@file` e `Alt+1–3` alterna os escopos.
-- Consultas de conteúdo exigem pelo menos dois caracteres; consultas vazias ou de um caractere não iniciam a construção. Durante a construção o grupo de conteúdo mostra o progresso e os nomes respondem na hora; a escolha de escopos é lembrada.
-- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` movem, `Enter` ativa e `Esc` fecha; o diálogo prende o foco e o restaura ao fechar. O texto segue `navigator.language` (zh/en/es/pt/hi).
+- **Contagem**: os cabeçalhos de grupo mostram quantos resultados há — exato quando dá para contar, `≥ N` quando o total é limitado por um teto; o cabeçalho do painel mostra a posição selecionada (`3/37`) e o rodapé resume os três grupos. A página de conteúdo agora é montada em três passos — rowids do rank, corpo por rowid e trecho/linha em JS —, então palavras comuns caíram de ~2,7 s para menos de 300 ms.
+- **Opções de busca**: a barra de ferramentas oferece modo (Normal / Estendido / Regex), `Aa` para diferenciar maiúsculas, palavra inteira e o escopo da conversa atual. Modo, maiúsculas e palavra inteira valem para nomes de arquivos e pastas; o conteúdo aceita Normal/Estendido/maiúsculas/palavra inteira, e **no modo Regex o escopo de conteúdo pausa** (nomes ainda aceitam regex), para que nenhuma tecla digitada no painel varra o corpus inteiro.
+- **Escopo da conversa atual**: consulta apenas as mensagens já indexadas dessa sessão (uma sessão ativa leva cerca de 2 minutos para entrar no índice); os escopos de arquivos e pastas ficam desabilitados, mas mantêm a marcação. Para navegar ocorrência por ocorrência ao vivo, use a busca na conversa com `Ctrl+F`, logo abaixo.
+- Consultas de conteúdo exigem pelo menos dois caracteres; consultas vazias ou de um caractere não iniciam a construção. Durante a construção o grupo de conteúdo mostra o progresso e os nomes respondem na hora; os escopos e as opções de busca são lembrados.
+- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` movem, `F3`/`Shift+F3` percorrem os resultados em ciclo, `Enter` ativa e `Esc` fecha; o diálogo prende o foco e o restaura ao fechar. O texto segue `navigator.language` (zh/en/es/pt/hi).
+
+## Busca na conversa (Ctrl+F)
+
+Pressione `Ctrl+F` numa conversa (ou clique em `⌕` no cabeçalho da sessão) para abrir uma barra de busca não modal no canto superior direito da conversa, que pesquisa apenas as mensagens **carregadas** da conversa atual — sem índice de conteúdo e sem a espera de dois minutos:
+
+- **Contagem e navegação**: mostra `3/17`; `Enter`/`F3` vão para a próxima ocorrência, `Shift+Enter`/`Shift+F3` para a anterior, e a busca dá a volta por padrão (ao chegar a uma ponta, retoma do outro lado e avisa). Todas as ocorrências ficam com destaque translúcido; a ocorrência atual fica mais escura e sublinhada.
+- **Opções**: `Aa` diferencia maiúsculas, palavra inteira (limites `[A-Za-z0-9_]`; CJK conta como não palavra), continuar do início e buscar para trás (inverte a direção do `Enter`); os botões de anterior e próxima estão sempre disponíveis.
+- **Modos**: Normal (literal), Estendido (`\n` `\r` `\t` `\0` `\xHH` `\\`; escapes desconhecidos ficam literais) e Regex (JS RegExp em uma worker thread, com timeout de 500 ms; padrão inválido mostra o erro na própria barra). Correspondências de largura zero são ignoradas em vez de travar a interface.
+- **Busca na seleção**: selecione texto na conversa e pressione `Ctrl+F`; a barra começa restrita à seleção e mostra um chip com o tamanho da seleção. Seleções que cruzam mensagens também funcionam; se a seleção expirar, a barra volta para a conversa inteira.
+- **Janela carregada**: só as mensagens já carregadas entram na busca; em conversas longas, use “Carregar mensagens anteriores e tentar novamente” em vez de paginação automática.
+- `Esc` fecha a barra e limpa os destaques; trocar de conversa, abrir o painel ou descarregar o plugin também limpam. O painel global cuida da descoberta entre arquivos e sessões; a barra cuida da navegação ocorrência por ocorrência na conversa atual, e os destaques das duas nunca se sobrepõem.
 
 
 ## Ferramentas
@@ -175,7 +190,7 @@ Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no pé da barra lateral. 
 | Ferramenta | O que faz |
 |---|---|
 | `locator_search` | Consulta nomes e caminhos com filtros `ext:`, `size:`, `dm:`, `path:`, ordenação e paginação. |
-| `locator_find` | Busca em corpos de arquivo e mensagens de sessão; devolve trechos, `sessionId`/`messageId` e o estado do índice de conteúdo. |
+| `locator_find` | Busca em corpos de arquivo e mensagens de sessão; devolve trechos, `sessionId`/`messageId` e o estado do índice de conteúdo. Resultados de arquivo podem trazer `line`. |
 | `locator_status` | Raízes, contagens do índice de nomes, estado do watcher, diretório de estado e caminho do motor. (O progresso do conteúdo é informado pelo `locator_find` e pelo painel.) |
 | `locator_rebuild` | Substitui o índice de nomes por uma varredura em segundo plano; as buscas usam o índice antigo até o novo ficar pronto. |
 | `locator_reindex` | Atualiza ou reconstrói o índice de conteúdo: incremental por padrão, `full: true` apaga e reconstrói. |
@@ -378,7 +393,9 @@ DeepSeek Harness
 - O macOS usa FSEvents (recursivo) nos binários publicados; uma compilação com `CGO_ENABLED=0` cai para kqueue, limitado a 4.096 diretórios, com mudanças de conteúdo dependendo da reconstrução periódica.
 - USN/MFT do Windows é opcional e só é usado se o processo puder ler o volume e o diário estiver ativo; caso contrário, usa-se a varredura portátil.
 
-- Resultados no corpo de arquivos abrem o gerenciador de arquivos por enquanto (a visualização por linha dentro do DSH é o próximo passo); mensagens do assistente agora são ancoradas pela chave de nó `turn:step`, com frase apenas como reserva. Atualizar para 0.8.1 reconstrói uma vez o banco de conteúdo pelo novo campo.
+- Resultados no corpo de arquivos abrem o gerenciador de arquivos por enquanto (a visualização por linha dentro do DSH é o próximo passo; os resultados já trazem um número de `line`); mensagens do assistente ficam ancoradas pela chave de nó `turn:step`, com frase apenas como reserva. Atualizar de 0.8.0 para 0.8.1 reconstrói uma vez o banco de conteúdo pelo novo campo.
+- **Regex de conteúdo em todo o corpus fica fora do P0**: o modo Regex pausa o grupo de conteúdo (nomes de arquivo e pasta continuam aceitando regex) para evitar varrer um corpus de 1 GB e ReDoS; a busca na conversa aceita regex.
+- O escopo de conversa atual do painel cobre apenas mensagens de sessão já indexadas (uma sessão ativa entra no índice após cerca de 2 minutos de quietude); para busca ao vivo use `Ctrl+F`. A busca na conversa cobre apenas a janela carregada; carregue mensagens anteriores explicitamente.
 - O destaque dentro da conversa usa a API CSS Custom Highlight; navegadores antigos sem ela caem para um contorno na linha.
 
 ## Memória

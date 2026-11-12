@@ -27,7 +27,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
-import { searchContent } from './content-search.ts'
+import { searchContent, type ContentSearchOptions, type ContentSearchResult } from './content-search.ts'
 import type { LocatorRuntime } from './runtime.ts'
 
 const SCHEMA_VERSION = 3
@@ -67,6 +67,8 @@ export interface ContentHit {
   messageId?: string
   /** Exact `data-chat-node-key` of the rendered row, when the host has one. */
   nodeKey?: string
+  /** 1-based line of the first match inside the stored body, for file hits. */
+  line?: number
   score: number
 }
 
@@ -128,7 +130,9 @@ export class ContentIndex {
   private workerSeq = 0
   private pendingStart = false
   private dbIdentity: { dev: number; ino: number } | null = null
-  private readonly pending = new Map<number, { resolve: (hits: ContentHit[]) => void; reject: (error: Error) => void }>()
+  /** Session id → indexed session log path, for session-scoped content search. */
+  private readonly sessionPaths = new Map<string, string>()
+  private readonly pending = new Map<number, { resolve: (result: ContentSearchResult) => void; reject: (error: Error) => void }>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
 
@@ -176,6 +180,7 @@ export class ContentIndex {
     this.releaseLock()
     this.pendingStart = false
     this.dbIdentity = null
+    this.sessionPaths.clear()
   }
 
   /** Build everything from scratch. */
@@ -347,6 +352,7 @@ export class ContentIndex {
       this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('complete', 0)")
     }
     if (fresh) this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    this.refreshSessionPaths()
     this.reopenWorker()
   }
 
@@ -358,7 +364,7 @@ export class ContentIndex {
   private stopWorker(): void {
     const worker = this.worker
     this.worker = null
-    for (const entry of this.pending.values()) entry.resolve([])
+    for (const entry of this.pending.values()) entry.resolve(emptySearchResult())
     this.pending.clear()
     if (worker !== null) void worker.terminate()
   }
@@ -373,11 +379,15 @@ export class ContentIndex {
       const worker = new Worker(workerPath, {
         workerData: { dbPath: join(this.options.stateDir, 'content.db') },
       })
-      worker.on('message', (message: { id: number; hits?: ContentHit[] }) => {
+      worker.on('message', (message: { id: number; result?: ContentSearchResult; error?: string }) => {
         const entry = this.pending.get(message.id)
         if (entry === undefined) return
         this.pending.delete(message.id)
-        entry.resolve(message.hits ?? [])
+        if (typeof message.error === 'string' && message.error !== '') {
+          entry.reject(new Error(message.error))
+          return
+        }
+        entry.resolve(message.result ?? emptySearchResult())
       })
       const fail = (): void => {
         if (this.worker !== worker) return
@@ -424,6 +434,7 @@ export class ContentIndex {
     this.dbIdentity = null
     this.stopWorker()
     this.totalBytes = 0
+    this.sessionPaths.clear()
     this.state.updatedAt = 0
     this.state.error = ''
     this.state.truncated = false
@@ -502,7 +513,30 @@ export class ContentIndex {
     this.state.updatedAt = Date.now()
     this.writeTotalBytes()
     this.writeFlag('complete', 1)
+    this.refreshSessionPaths()
     this.reopenWorker()
+  }
+
+  /**
+   * Rebuild the session id → session log path map from the persisted sources.
+   * Runs after `open()` and after every build/refresh, so session-scoped
+   * searches work against an existing database before the first refresh ends.
+   */
+  private refreshSessionPaths(): void {
+    this.sessionPaths.clear()
+    if (this.db === null) return
+    try {
+      const rows = this.db.prepare('SELECT path FROM sources').all() as Array<{ path?: string }>
+      for (const row of rows) {
+        const path = row.path
+        if (typeof path !== 'string' || path === '') continue
+        const sessionId = basename(dirname(path))
+        if (sessionId !== '') this.sessionPaths.set(sessionId, path)
+      }
+    } catch {
+      // A database from an older schema cannot answer session-scoped queries
+      // until its next rebuild; leave the map empty instead of failing boot.
+    }
   }
 
   private addDoc(row: DocRow): boolean {
@@ -669,6 +703,7 @@ export class ContentIndex {
     try { text = (await zstdDecompressAsync(await readFile(file.path))).toString('utf8') } catch { return true }
     if (generation !== this.generation) return false
     const sessionId = basename(dirname(file.path))
+    this.sessionPaths.set(sessionId, file.path)
     let title = ''
     let parsed = 0
     for (const line of text.split('\n')) {
@@ -712,45 +747,73 @@ export class ContentIndex {
    * Search file bodies and session messages. With `searchWorker` enabled the
    * query itself runs off the host thread; a failed or wedged worker falls back
    * to the in-process query so a result is still produced.
+   *
+   * The two-argument form returns the hit array (tools and the legacy
+   * `/content` route). The three-argument form returns hits plus count,
+   * warnings and an error code, and understands the advanced match options.
    * @param query - words or a phrase to find.
    * @param limit - maximum hits.
+   * @param options - match mode, case/whole-word flags, session scope, count mode.
    * @returns matching documents ordered by relevance.
    */
-  async search(query: string, limit: number): Promise<ContentHit[]> {
-    if (this.db === null) return []
+  async search(query: string, limit: number): Promise<ContentHit[]>
+  async search(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult>
+  async search(query: string, limit: number, options?: ContentSearchOptions): Promise<ContentHit[] | ContentSearchResult> {
+    const result = await this.searchDetailed(query, limit, options ?? {})
+    return options === undefined ? result.hits : result
+  }
+
+  private async searchDetailed(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult> {
+    const resolved = this.resolveSession(options)
+    if (resolved === null) return emptySearchResult(['unknown-session'])
+    if (this.db === null) return emptySearchResult()
     if (!this.databaseIsCurrent()) {
       this.recoverExternal()
-      return []
+      return emptySearchResult()
     }
-    if (this.options.searchWorker !== true) return this.searchSync(query, limit)
+    if (this.options.searchWorker !== true) return this.searchSync(query, limit, resolved)
     this.ensureWorker()
-    if (this.worker === null) return this.searchSync(query, limit)
+    if (this.worker === null) return this.searchSync(query, limit, resolved)
     const id = ++this.workerSeq
     const worker = this.worker
-    const response = new Promise<ContentHit[]>((resolve, reject) => { this.pending.set(id, { resolve, reject }) })
-    worker.postMessage({ id, query, limit })
+    const response = new Promise<ContentSearchResult>((resolve, reject) => { this.pending.set(id, { resolve, reject }) })
+    worker.postMessage({ id, query, limit, options: resolved })
     let timer: NodeJS.Timeout | undefined
-    const timeout = new Promise<ContentHit[]>((_resolve, reject) => {
+    const timeout = new Promise<ContentSearchResult>((_resolve, reject) => {
       timer = setTimeout(() => { this.pending.delete(id); reject(new Error('content search worker timed out')) }, 5_000)
     })
     try {
       return await Promise.race([response, timeout])
     } catch {
-      return this.searchSync(query, limit)
+      return this.searchSync(query, limit, resolved)
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
   }
 
-  private searchSync(query: string, limit: number): ContentHit[] {
-    if (this.db === null) return []
+  /** Map a request's sessionId onto the indexed session log path. */
+  private resolveSession(options: ContentSearchOptions): ContentSearchOptions | null {
+    if (options.sessionPath !== undefined && options.sessionPath !== null) return options
+    if (options.sessionId === undefined || options.sessionId === '') return { ...options, sessionPath: null }
+    const path = this.sessionPaths.get(options.sessionId)
+    if (path === undefined) return null
+    return { ...options, sessionPath: path }
+  }
+
+  private searchSync(query: string, limit: number, options: ContentSearchOptions): ContentSearchResult {
+    if (this.db === null) return emptySearchResult()
     try {
-      return searchContent(this.db, query, limit)
+      return searchContent(this.db, query, limit, options)
     } catch (error) {
       this.state.error = messageOf(error)
-      return []
+      return emptySearchResult()
     }
   }
+}
+
+/** Result used when a content query could not run at all. */
+function emptySearchResult(warnings: string[] = []): ContentSearchResult {
+  return { hits: [], count: { value: 0, kind: 'unknown' }, warnings }
 }
 
 function dshHome(): string {

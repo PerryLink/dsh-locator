@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
 import type { ContentIndex } from './content.ts'
+import type { ContentSearchOptions } from './content-search.ts'
 import { readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
 import { openWithDefaultApp, revealInFileManager, withinRoots } from './reveal.ts'
 import { statSync } from 'node:fs'
@@ -176,14 +177,22 @@ async function combined(
     search: async args => await rt.search(args),
     maxResults: rt.config.maxResults,
     ...(content === undefined ? {} : {
-      contentSearch: async (query: string, limit: number) => await content.search(query, limit),
+      contentSearch: async (query: string, limit: number, options: ContentSearchOptions) =>
+        await content.search(query, limit, options),
       contentStatus: () => content.status(),
       ...(ensure === undefined ? {} : { ensure }),
     }),
   }
   const request = readCombinedRequest(raw, rt.config.maxResults)
   const result = await runCombinedSearch(deps, request)
-  return { query: request.query, ...result }
+  return {
+    query: request.query,
+    matchMode: request.matchMode,
+    caseSensitive: request.caseSensitive,
+    wholeWord: request.wholeWord,
+    sessionId: request.sessionId,
+    ...result,
+  }
 }
 
 async function reveal(rt: LocatorRuntime, raw: Record<string, unknown>): Promise<unknown> {

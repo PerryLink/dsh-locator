@@ -1,14 +1,13 @@
 /**
- * Search worker: the FTS5 query runs here so a slow content query can never
- * stall the DSH host's event loop. A read-only connection makes the build's
- * writes in the main thread safe to observe concurrently (WAL).
+ * Search worker: content queries run here so a slow query can never stall the
+ * DSH host's event loop. A read-only connection makes the build's writes in the
+ * main thread safe to observe concurrently (WAL).
  * @module dsh-locator/content-search-worker
  */
 
 import { parentPort, workerData } from 'node:worker_threads'
 import { DatabaseSync } from 'node:sqlite'
-import { searchContent } from './content-search.ts'
-import type { ContentHit } from './content.ts'
+import { searchContent, type ContentSearchOptions, type ContentSearchResult } from './content-search.ts'
 
 interface Request {
   id: number
@@ -16,6 +15,7 @@ interface Request {
   close?: boolean
   query?: string
   limit?: number
+  options?: ContentSearchOptions
 }
 
 let db: DatabaseSync | null = null
@@ -41,12 +41,19 @@ parentPort?.on('message', (request: Request) => {
     parentPort?.postMessage({ id: request.id, ok: true })
     return
   }
-  let hits: ContentHit[] = []
+  let result: ContentSearchResult = {
+    hits: [],
+    count: { value: 0, kind: 'unknown' },
+    warnings: [],
+    error: 'content-index-unavailable',
+  }
   let error = ''
   if (db !== null) {
-    try { hits = searchContent(db, request.query ?? '', request.limit ?? 30) } catch (cause) {
+    try {
+      result = searchContent(db, request.query ?? '', request.limit ?? 30, request.options ?? {})
+    } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause)
     }
   }
-  parentPort?.postMessage({ id: request.id, hits, error })
+  parentPort?.postMessage({ id: request.id, result, error })
 })
