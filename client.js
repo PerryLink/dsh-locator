@@ -228,6 +228,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelRegexPaused: 'Content scope paused in regex mode', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget reached; some files are not indexed', contentTooShort: 'Content needs at least 3 characters (use Ctrl+F for shorter searches)', contentTimeout: 'Content search timed out; narrow the query or scope', contentBadChars: 'Content search does not support NUL/control characters',
         panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
+        watchDegraded: 'watcher degraded; periodic refresh active',
       },
       zh: {
         scopeContent: '内容', scopeFiles: '文件', scopeDirs: '目录',
@@ -273,6 +274,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         panelRegexPaused: '正则模式下内容范围暂停', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预算上限，部分文件未被收录', contentTooShort: '内容搜索至少需要 3 个字符（更短的词请用 Ctrl+F 在会话内查找）', contentTimeout: '内容搜索超时，请缩小关键词或范围', contentBadChars: '内容搜索不支持 NUL/控制字符',
         panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
+        watchDegraded: '文件监听降级，正在周期刷新',
       },
       es: {
         scopeContent: 'Contenido', scopeFiles: 'Archivos', scopeDirs: 'Carpetas',
@@ -318,6 +320,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         panelRegexPaused: 'Ámbito de contenido en pausa en modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el presupuesto del índice; algunos archivos no están indexados', contentTooShort: 'El contenido requiere al menos 3 caracteres (usa Ctrl+F para búsquedas más cortas)', contentTimeout: 'La búsqueda de contenido agotó el tiempo; reduce la consulta o el ámbito', contentBadChars: 'La búsqueda de contenido no admite NUL/caracteres de control',
         panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
+        watchDegraded: 'vigilante degradado; refresco periódico activo',
       },
       pt: {
         scopeContent: 'Conteúdo', scopeFiles: 'Arquivos', scopeDirs: 'Pastas',
@@ -363,6 +366,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         panelRegexPaused: 'Escopo de conteúdo pausado no modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índice foi atingido; alguns arquivos não estão indexados', contentTooShort: 'O conteúdo exige pelo menos 3 caracteres (use Ctrl+F para buscas menores)', contentTimeout: 'A busca de conteúdo excedeu o tempo; reduza a consulta ou o escopo', contentBadChars: 'A busca de conteúdo não suporta NUL/caracteres de controle',
         panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
+        watchDegraded: 'watcher degradado; atualização periódica ativa',
       },
       hi: {
         scopeContent: 'सामग्री', scopeFiles: 'फ़ाइलें', scopeDirs: 'फ़ोल्डर',
@@ -408,6 +412,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         panelRegexPaused: 'रेगेक्स मोड में सामग्री क्षेत्र रुका है', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'इंडेक्स चेतावनी: {list}', contentBudget: 'सामग्री इंडेक्स बजट पूरा; कुछ फ़ाइलें इंडेक्स नहीं हैं', contentTooShort: 'सामग्री के लिए कम से कम 3 अक्षर चाहिए (छोटी खोज के लिए Ctrl+F)', contentTimeout: 'सामग्री खोज का समय समाप्त; क्वेरी या क्षेत्र घटाएँ', contentBadChars: 'सामग्री खोज NUL/नियंत्रण अक्षर नहीं लेती',
         panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
+        watchDegraded: 'वॉचर क्षीण; आवधिक रिफ्रेश सक्रिय',
       },
     }
     const LANG = (() => {
@@ -2236,7 +2241,9 @@ self.onmessage = event => {
                   entries: (status.entries || 0).toLocaleString(),
                   mode: status.watching ? t('live') : t('snapshot'),
                   roots: (status.roots || []).length,
-                })),
+                }) + (status.watchDegraded === true || status.refreshFallback === true
+                  ? ' · ' + t('watchDegraded')
+                  : '')),
         ),
         sessionOnly ? h('div', { className: 'dsh-locator-groupempty' }, t('panelSessionHint')) : null,
         h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },

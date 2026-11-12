@@ -72,6 +72,13 @@ export interface EngineStatus {
   nameBytes: number
   deleted: number
   watching: boolean
+  /** The native watcher covers only part of the configured roots. */
+  watchDegraded?: boolean
+  watchReason?: string
+  /** Number of roots actually watched. */
+  watchRoots?: number
+  /** Periodic rebuild fallback is active because the watcher is incomplete. */
+  refreshFallback?: boolean
   scanning: boolean
   usn: boolean
   uptimeSec: number
@@ -261,6 +268,10 @@ export class LocatorRuntime {
       nameBytes: numberOr(params.nameBytes, 0),
       deleted: numberOr(params.deleted, 0),
       watching: params.watching === true,
+      ...(params.watchDegraded === true ? { watchDegraded: true } : {}),
+      ...(typeof params.watchReason === 'string' ? { watchReason: params.watchReason } : {}),
+      ...(typeof params.watchRoots === 'number' ? { watchRoots: params.watchRoots } : {}),
+      ...(params.refreshFallback === true ? { refreshFallback: true } : {}),
       scanning: params.scanning === true,
       usn: params.usn === true,
       uptimeSec: numberOr(params.uptimeSec, 0),
