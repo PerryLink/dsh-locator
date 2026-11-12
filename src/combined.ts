@@ -218,7 +218,8 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
 async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: boolean): Promise<ContentGroup> {
   const started = Date.now()
   const empty = (): ContentGroup => {
-    const state = deps.contentStatus?.()
+    let state: ContentState | undefined
+    try { state = deps.contentStatus?.() } catch { state = undefined }
     return {
       hits: [],
       returned: 0,
