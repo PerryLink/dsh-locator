@@ -19,7 +19,17 @@ const cleanups: Array<() => void> = []
 // macOS runners; retry the temporary-directory removal instead of failing the
 // suite with ENOTEMPTY when a state file is still being closed.
 function removeTree(path: string): void {
-  rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  for (let attempt = 0; attempt < 80; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOTEMPTY' && code !== 'EBUSY' && code !== 'EPERM') throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
+    }
+  }
+  rmSync(path, { recursive: true, force: true })
 }
 afterAll(() => {
   for (const cleanup of cleanups.reverse()) cleanup()

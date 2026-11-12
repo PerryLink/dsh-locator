@@ -16,7 +16,7 @@ import {
 } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -103,16 +103,24 @@ function tempDir(prefix: string): string {
   return dir
 }
 
+function canonical(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return join(realpathSync(dirname(path)), basename(path))
+  }
+}
+
 describe('canonical path containment', () => {
   it('authorizes the root, existing descendants and not-yet-existing descendants', () => {
     const root = tempDir('locator-path-root-')
     mkdirSync(join(root, 'docs'))
     writeFileSync(join(root, 'docs', 'report.pdf'), 'x')
     expect(withinRoots(root, [root])).toBe(true)
-    expect(resolveWithinRoots(join(root, 'docs', 'report.pdf'), [root])?.path).toBe(join(root, 'docs', 'report.pdf'))
+    expect(resolveWithinRoots(join(root, 'docs', 'report.pdf'), [root])?.path).toBe(canonical(join(root, 'docs', 'report.pdf')))
     const future = resolveWithinRoots(join(root, 'docs', 'later.txt'), [root])
     expect(future?.exists).toBe(false)
-    expect(future?.path).toBe(join(root, 'docs', 'later.txt'))
+    expect(future?.path).toBe(canonical(join(root, 'docs', 'later.txt')))
   })
 
   it('rejects prefix siblings, parent escapes and relative paths', () => {
@@ -137,7 +145,7 @@ describe('canonical path containment', () => {
     expect(withinRoots(link, [root])).toBe(false)
     expect(resolveWithinRoots(link, [root])).toBeUndefined()
     // The same file is fine when the root really contains it.
-    expect(resolveWithinRoots(secret, [outside])?.path).toBe(realpathSync(secret))
+    expect(resolveWithinRoots(secret, [outside])?.path).toBe(canonical(secret))
   })
 
   it('rejects a symlinked parent directory that leaves the root', () => {
