@@ -403,7 +403,7 @@ El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` 
 
 ## Notas de actualización 0.11.0
 
-- **Índice de contenido completo**: `contentMaxTotalBytes: 0` y `contentMaxFiles: 0` indexan todos los archivos de texto elegibles (~185k archivos / 2.0 GB, ~5.9 GB de FTS en la máquina de referencia); la primera construcción tarda unos minutos y las consultas rondan 0.04–0.7 s. Los límites por defecto siguen activos para no consumir decenas de GB sin avisar.
+- **Índice de contenido completo**: `contentFullIndex: true` (o ambos caps a `0`) indexa todos los archivos de texto elegibles (~185k archivos / 2.0 GB, ~5.9 GB de FTS en la máquina de referencia); la primera construcción tarda unos minutos y las consultas rondan 0.04–0.7 s. Los límites por defecto siguen activos para no consumir decenas de GB sin avisar.
 - `locator_find` sigue limitado al workspace; si el cwd no está dentro de ningún root indexado, ya no restringe los archivos a ese cwd (antes devolvía vacío) y busca en los roots; las sesiones siguen limitadas a la actual. Usa `scope: "all"` para cruzar ámbitos.
 - Panel: **cargar más** (paginación por offset), **búsquedas recientes** y **filtro de resultados cargados**.
 - Seguridad: se rechazan destinos bajo mount points anidados dentro de un root en Linux; `/open` usa `O_NOFOLLOW` y verifica el inodo.

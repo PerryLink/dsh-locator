@@ -5,7 +5,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { Config as ConfigSchema } from './config.ts'
+import { Config as ConfigSchema, contentLimits } from './config.ts'
 import type { Config } from './config.ts'
 import { ContentIndex } from './content.ts'
 import { makeExportTool } from './export.ts'
@@ -84,8 +84,8 @@ export function apply(ctx: Context, config: Config): void {
         activeSessionDelayMs: config.contentActiveSessionDelayMs,
         searchWorker: true,
         maxFileBytes: config.contentMaxFileBytes,
-        maxTotalBytes: config.contentMaxTotalBytes,
-        maxFiles: config.contentMaxFiles,
+        maxTotalBytes: contentLimits(config).maxTotalBytes,
+        maxFiles: contentLimits(config).maxFiles,
         maxSessions: config.contentMaxSessions,
       })
     : undefined
