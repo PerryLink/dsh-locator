@@ -174,7 +174,11 @@ Pulsa `Ctrl+Shift+F` en cualquier parte de la GUI web, o haz clic en la lupa del
 - Doble clic en un archivo lo muestra en Explorer/Finder/`xdg-open`; doble clic en una sesión abre la conversación en el mensaje encontrado.
 - El texto del panel sigue `navigator.language` (zh/en/es/pt/hi).
 
-El panel usa rutas del mismo origen — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — así que no necesita otro servidor ni otro puerto. Los perfiles sin servidor web no lo montan.
+El panel usa rutas del mismo origen — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/combined`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — así que no necesita otro servidor ni otro puerto. Los perfiles sin servidor web no lo montan.
+
+- **Los tres ámbitos están activos por defecto**: contenido (cuerpos + sesiones), archivos y carpetas; desmarca cualquiera para acotar. Los resultados se agrupan **contenido → archivos → carpetas** con el recuento por grupo; el contenido se ordena por relevancia y los grupos de nombres siguen el menú de orden.
+- **Doble clic o `Enter` activa un resultado**: una sesión abre la conversación y pinta las palabras encontradas con un resaltado ámbar translúcido que sigue el desplazamiento, se centra al llegar y se limpia con `Esc`; archivos y carpetas se muestran en el gestor de archivos. `Ctrl+Shift+C` copia la ruta, `Ctrl+O` abre, `Ctrl+Enter` inserta `@file` y `Alt+1–3` alterna los ámbitos.
+- Las consultas de contenido requieren al menos dos caracteres; las consultas vacías o de un carácter no inician la construcción del índice.
 
 ## Herramientas
 
@@ -383,6 +387,9 @@ DeepSeek Harness
 - Dos procesos de DSH compartiendo un `stateDir` deben evitarse: el lock de construcción serializa escritores, pero no puede compartir un handle de base de datos abierto.
 - macOS usa FSEvents (recursivo) en los binarios publicados; una compilación con `CGO_ENABLED=0` cae a kqueue, limitado a 4.096 directorios, con cambios de contenido dependientes de la reconstrucción periódica.
 - USN/MFT de Windows es opcional y solo se usa si el proceso puede leer el volumen y el diario está activo; si no, se usa el recorrido portátil.
+
+- Los aciertos en el cuerpo de un archivo se muestran por ahora en el gestor de archivos (la vista por línea dentro de DSH es el siguiente paso); los mensajes del asistente se localizan por frase porque sus filas del DOM no llevan messageId.
+- El resaltado dentro de la conversación usa la API CSS Custom Highlight; los navegadores antiguos sin ella caen a un contorno de fila.
 
 ## Memoria
 

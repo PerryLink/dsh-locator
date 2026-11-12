@@ -174,7 +174,11 @@ Pressione `Ctrl+Shift+F` em qualquer lugar da GUI web, ou clique na lupa no pé 
 - Duplo clique em um arquivo revela no Explorer/Finder/`xdg-open`; duplo clique em uma sessão abre a conversa na mensagem encontrada.
 - O texto do painel segue `navigator.language` (zh/en/es/pt/hi).
 
-O painel usa rotas de mesma origem — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — então não precisa de outro servidor nem de outra porta. Perfis sem servidor web não o montam.
+O painel usa rotas de mesma origem — `/dsh-locator/search`, `/dsh-locator/content`, `/dsh-locator/content/rebuild`, `/dsh-locator/combined`, `/dsh-locator/status`, `/dsh-locator/reveal`, `/dsh-locator/open` — então não precisa de outro servidor nem de outra porta. Perfis sem servidor web não o montam.
+
+- **Os três escopos vêm ativados por padrão**: conteúdo (corpos + sessões), arquivos e pastas; desmarque qualquer um para restringir. Os resultados são agrupados **conteúdo → arquivos → pastas** com a contagem por grupo; o conteúdo é ordenado por relevância e os grupos de nomes seguem o menu de ordem.
+- **Duplo clique ou `Enter` ativa um resultado**: uma sessão abre a conversa e pinta as palavras encontradas com destaque âmbar translúcido que acompanha a rolagem, é centralizado ao chegar e é limpo com `Esc`; arquivos e pastas são mostrados no gerenciador de arquivos. `Ctrl+Shift+C` copia o caminho, `Ctrl+O` abre, `Ctrl+Enter` insere `@file` e `Alt+1–3` alterna os escopos.
+- Consultas de conteúdo exigem pelo menos dois caracteres; consultas vazias ou de um caractere não iniciam a construção do índice.
 
 ## Ferramentas
 
@@ -383,6 +387,9 @@ DeepSeek Harness
 - Dois processos do DSH compartilhando um `stateDir` devem ser evitados: o lock de construção serializa escritores, mas não compartilha um handle de banco aberto.
 - O macOS usa FSEvents (recursivo) nos binários publicados; uma compilação com `CGO_ENABLED=0` cai para kqueue, limitado a 4.096 diretórios, com mudanças de conteúdo dependendo da reconstrução periódica.
 - USN/MFT do Windows é opcional e só é usado se o processo puder ler o volume e o diário estiver ativo; caso contrário, usa-se a varredura portátil.
+
+- Resultados no corpo de arquivos abrem o gerenciador de arquivos por enquanto (a visualização por linha dentro do DSH é o próximo passo); mensagens do assistente são localizadas por frase porque as linhas do DOM não carregam o messageId.
+- O destaque dentro da conversa usa a API CSS Custom Highlight; navegadores antigos sem ela caem para um contorno na linha.
 
 ## Memória
 

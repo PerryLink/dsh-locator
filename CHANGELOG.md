@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 — 2026-11-12
+
+Search and locate: all three stores in one panel, and a Word/Notepad++-style highlight in the conversation.
+
+* **One combined search**: the new `POST /dsh-locator/combined` route queries content (bodies and sessions), files and folders in one request, keeps the old `/search` and `/content` routes for tools and compatibility, and returns grouped results in content → files → folders order with per-group counts. Paths found by both content and name are merged into the content row and counted.
+* **All scopes on by default**: the panel now has three independent checkboxes (Content, Files, Folders), all checked; unchecking one narrows the search. Empty queries and one-character queries never start the lazy content build, so opening the panel stays cheap.
+* **Conversation highlight**: double-clicking (or pressing Enter on) a session hit opens the conversation and paints the matched words with a translucent amber highlight (CSS Custom Highlight API, follows scrolling, centered on arrival). The scroll lock releases as soon as the reader scrolls or presses a key; `Esc` clears the highlight. Long sessions load older pages until the message is present, and `hidden="until-found"` rows are expanded with `beforematch`.
+* **Panel rebuild**: grouped listbox with sticky group headers, per-group counts and truncation hints, relevance ordering for content and the sort menu for names, scope preference persistence, content-index progress with a retry, and light/dark theme tokens instead of `prefers-color-scheme`.
+* **Keyboard and accessibility**: Enter activates the selected hit, `Ctrl+Shift+C` copies the path (Everything-style), `Ctrl+Shift+O` reveals it, `Alt+1–3` toggle scopes, Home/End/PageUp/PageDown move the selection, and a minimal dialog focus trap restores focus on close. Rows expose `role=option` / `aria-selected`; the panel is a combobox + listbox with a polite live region.
+* Fixed: duplicate React keys for several session hits, the unstyled snippet line, and the fake content total. Tests: 37 unit tests (combined scope gating, merge/dedupe, lazy-build guards, plus the existing content/plugin suites); `scripts/verify.mjs` now also syntax-checks `client.js` and asserts the new route and highlight markers.
+* No content-index schema change: upgrading does not rebuild the database. File-body hits still reveal the file in the file manager (line-level preview in DSH is the next step); assistant messages are located by phrase because their DOM rows carry no message id.
+
 ## 0.7.7 — 2026-11-11
 
 Documentation release.

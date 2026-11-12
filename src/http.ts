@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
 import type { ContentIndex } from './content.ts'
+import { readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
 import { openWithDefaultApp, revealInFileManager, withinRoots } from './reveal.ts'
 import { statSync } from 'node:fs'
 
@@ -63,12 +64,17 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
     scoped.effect(() => server.register({
       kind: 'exact',
       path: '/dsh-locator/status',
-      handler: handler(scoped, async () => await status(rt)),
+      handler: handler(scoped, async () => await status(rt, content)),
     }))
     scoped.effect(() => server.register({
       kind: 'exact',
       path: '/dsh-locator/reveal',
       handler: handler(scoped, async body => await reveal(rt, body)),
+    }))
+    scoped.effect(() => server.register({
+      kind: 'exact',
+      path: '/dsh-locator/combined',
+      handler: handler(scoped, async body => await combined(rt, content, ensure, body)),
     }))
     if (content !== undefined) {
       scoped.effect(() => server.register({
@@ -154,6 +160,32 @@ async function search(rt: LocatorRuntime, raw: Record<string, unknown>): Promise
   }
 }
 
+/**
+ * One panel search across all enabled scopes. The stores are injected so the
+ * orchestration (scope gating, lazy-build guard, de-duplication) stays testable
+ * without an HTTP request or an engine process.
+ */
+async function combined(
+  rt: LocatorRuntime,
+  content: ContentIndex | undefined,
+  ensure: (() => void) | undefined,
+  raw: Record<string, unknown>,
+): Promise<unknown> {
+  rt.start()
+  const deps: CombinedDeps = {
+    search: async args => await rt.search(args),
+    maxResults: rt.config.maxResults,
+    ...(content === undefined ? {} : {
+      contentSearch: async (query: string, limit: number) => await content.search(query, limit),
+      contentStatus: () => content.status(),
+      ...(ensure === undefined ? {} : { ensure }),
+    }),
+  }
+  const request = readCombinedRequest(raw, rt.config.maxResults)
+  const result = await runCombinedSearch(deps, request)
+  return { query: request.query, ...result }
+}
+
 async function reveal(rt: LocatorRuntime, raw: Record<string, unknown>): Promise<unknown> {
   const path = typeof raw.path === 'string' ? raw.path : ''
   if (path === '' || !withinRoots(path, rt.roots)) {
@@ -192,9 +224,10 @@ async function openPath(rt: LocatorRuntime, raw: Record<string, unknown>): Promi
   }
 }
 
-async function status(rt: LocatorRuntime): Promise<unknown> {
+async function status(rt: LocatorRuntime, content?: ContentIndex): Promise<unknown> {
   rt.start()
   const engine = await rt.engineStatus()
+  const contentState = content === undefined ? { enabled: false } : { enabled: true, ...content.status() }
   return {
     running: rt.status.running,
     entries: engine?.entries ?? 0,
@@ -206,6 +239,7 @@ async function status(rt: LocatorRuntime): Promise<unknown> {
     scanning: engine?.scanning === true || rt.status.scanning !== undefined,
     stateDir: engine?.stateDir ?? rt.stateDir,
     version: engine?.version ?? '',
+    content: contentState,
     ...(rt.status.error === undefined ? {} : { error: rt.status.error }),
     ...(rt.status.warning === undefined ? {} : { warning: rt.status.warning }),
   }
