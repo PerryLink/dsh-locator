@@ -16,7 +16,7 @@
  * @module dsh-locator/content
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
@@ -79,6 +79,11 @@ export interface ContentState {
   messages: number
   truncated: boolean
   error: string
+  /**
+   * Non-fatal problems from the last build/refresh: unreadable session logs,
+   * a quarantined database, and so on. Empty when everything was read.
+   */
+  warnings: string[]
   updatedAt: number
 }
 
@@ -104,6 +109,16 @@ export interface ContentOptions {
    * single-threaded.
    */
   searchWorker?: boolean
+  /**
+   * How long one worker query may run before it is reported as
+   * `content-search-timeout`. The query is never re-run on the host thread.
+   */
+  searchWorkerTimeoutMs?: number
+  /**
+   * Test seam: build the search worker instead of spawning the compiled one.
+   * Production never sets it.
+   */
+  searchWorkerFactory?: (workerPath: string) => Worker
 }
 
 interface DocRow {
@@ -120,7 +135,7 @@ interface DocRow {
 
 export class ContentIndex {
   private db: DatabaseSync | null = null
-  private readonly state: ContentState = { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', updatedAt: 0 }
+  private readonly state: ContentState = { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', warnings: [], updatedAt: 0 }
   private generation = 0
   private totalBytes = 0
   private sliceDeadline = 0
@@ -132,13 +147,13 @@ export class ContentIndex {
   private dbIdentity: { dev: number; ino: number } | null = null
   /** Session id → indexed session log path, for session-scoped content search. */
   private readonly sessionPaths = new Map<string, string>()
-  private readonly pending = new Map<number, { resolve: (result: ContentSearchResult) => void; reject: (error: Error) => void }>()
+  private readonly pending = new Map<number, (result: ContentSearchResult) => void>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
 
   status(): ContentState {
     if (this.db !== null && !this.state.building && !this.databaseIsCurrent()) this.recoverExternal()
-    return { ...this.state, building: this.state.building || this.pendingStart }
+    return { ...this.state, warnings: [...this.state.warnings], building: this.state.building || this.pendingStart }
   }
 
   /**
@@ -256,6 +271,7 @@ export class ContentIndex {
     this.state.building = true
     this.state.error = ''
     this.state.truncated = false
+    this.state.warnings = []
     const run = mode === 'full' ? this.full(generation) : this.incremental(generation)
     void run.catch(error => {
       if (generation !== this.generation) return
@@ -308,8 +324,20 @@ export class ContentIndex {
     }
     const dbPath = join(this.options.stateDir, 'content.db')
     const existed = existsSync(dbPath)
-    if (existed && !this.ownedDatabase(dbPath)) {
-      throw new Error(`content.db is not a dsh-locator database, refusing to touch it: ${dbPath}`)
+    if (existed) {
+      const verdict = this.classifyDatabase(dbPath)
+      if (verdict === 'foreign') {
+        throw new Error(`content.db is not a dsh-locator database, refusing to touch it: ${dbPath}`)
+      }
+      if (verdict !== 'ok') {
+        // A corrupt, empty or older-schema database must not disable content
+        // search for the rest of the session. Keep the bad file for diagnosis
+        // (rename, never delete bytes we did not create) and rebuild fresh.
+        // During an incremental open this throws so the caller falls back to a
+        // full rebuild; a full open simply continues with a clean file.
+        this.quarantineDatabase(dbPath, verdict)
+        if (!fresh) throw new Error('content database is incompatible; rebuilding')
+      }
     }
     let oldFileRemained = false
     if (fresh) {
@@ -356,51 +384,129 @@ export class ContentIndex {
     this.reopenWorker()
   }
 
+  /**
+   * Decide what an existing `content.db` is before touching it:
+   * - `foreign`: no dsh-locator table at all — refuse to modify it.
+   * - `corrupt`: zero bytes, unreadable, or not a SQLite database.
+   * - `incompatible`: has our tables but a different schema version/shape.
+   * - `ok`: safe to reuse.
+   */
+  private classifyDatabase(path: string): 'ok' | 'foreign' | 'corrupt' | 'incompatible' {
+    let size = 0
+    try { size = statSync(path).size } catch { return 'corrupt' }
+    if (size === 0) return 'corrupt'
+    let probe: DatabaseSync | undefined
+    try {
+      probe = new DatabaseSync(path, { readOnly: true })
+      const names = new Set(
+        (probe.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name?: string }>)
+          .map(row => row.name)
+          .filter((name): name is string => typeof name === 'string'),
+      )
+      const owned = ['docs', 'docs_meta', 'sources', 'content_meta']
+      if (!owned.some(name => names.has(name))) return 'foreign'
+      if (!names.has('docs') || !names.has('docs_meta') || !names.has('sources') || !names.has('content_meta')) return 'incompatible'
+      const version = (probe.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version ?? 0
+      if (Number(version) !== SCHEMA_VERSION) return 'incompatible'
+      return 'ok'
+    } catch {
+      return 'corrupt'
+    } finally {
+      try { probe?.close() } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Move a broken/outdated database aside instead of destroying it. The
+   * timestamped name keeps the bytes around for inspection; if the rename
+   * fails (another process still holds it on Windows) a fresh file is still
+   * created so content search recovers.
+   */
+  private quarantineDatabase(dbPath: string, verdict: 'corrupt' | 'incompatible'): void {
+    this.stopWorker()
+    try { this.db?.close() } catch { /* ignore */ }
+    this.db = null
+    const target = `${dbPath}.corrupt-${Date.now()}`
+    try {
+      renameSync(dbPath, target)
+      this.addWarning(verdict === 'corrupt' ? 'content-db-corrupt' : 'content-db-incompatible')
+    } catch {
+      try { rmSync(dbPath, { force: true }) } catch { /* ignore */ }
+      this.addWarning(verdict === 'corrupt' ? 'content-db-corrupt' : 'content-db-incompatible')
+    }
+    for (const suffix of ['-wal', '-shm']) {
+      try { rmSync(dbPath + suffix, { force: true }) } catch { /* ignore */ }
+    }
+  }
+
+  /** Record one non-fatal build warning (deduplicated, bounded). */
+  private addWarning(warning: string): void {
+    if (this.state.warnings.includes(warning)) return
+    if (this.state.warnings.length >= 20) return
+    this.state.warnings.push(warning)
+  }
+
   private reopenWorker(): void {
     if (this.worker === null) return
-    this.worker.postMessage({ id: ++this.workerSeq, open: join(this.options.stateDir, 'content.db') })
+    try {
+      this.worker.postMessage({ id: ++this.workerSeq, open: join(this.options.stateDir, 'content.db') })
+    } catch { /* a dying worker is replaced on the next query */ }
   }
 
   private stopWorker(): void {
     const worker = this.worker
     this.worker = null
-    for (const entry of this.pending.values()) entry.resolve(emptySearchResult())
+    for (const resolve of this.pending.values()) resolve(workerFailureResult('content-search-worker-failed'))
     this.pending.clear()
     if (worker !== null) void worker.terminate()
   }
 
-  private ensureWorker(): void {
-    if (this.options.searchWorker !== true || this.worker !== null) return
+  /**
+   * Whether a usable search worker exists, creating one when needed.
+   * @returns false when the worker cannot be created at all; that is the only
+   *          case in which an in-process (sync) query is allowed.
+   */
+  private ensureWorker(): boolean {
+    if (this.options.searchWorker !== true) return false
+    if (this.worker !== null) return true
     // In a TypeScript test run the compiled worker does not exist next to the
-    // source; skip spawning and answer queries in-process instead.
+    // source; answer queries in-process instead (budgeted, see searchSync).
     const workerPath = fileURLToPath(new URL('./content-search-worker.js', import.meta.url))
-    if (!existsSync(workerPath)) return
+    const factory = this.options.searchWorkerFactory
+    if (factory === undefined && !existsSync(workerPath)) return false
     try {
-      const worker = new Worker(workerPath, {
-        workerData: { dbPath: join(this.options.stateDir, 'content.db') },
-      })
-      worker.on('message', (message: { id: number; result?: ContentSearchResult; error?: string }) => {
-        const entry = this.pending.get(message.id)
-        if (entry === undefined) return
-        this.pending.delete(message.id)
-        if (typeof message.error === 'string' && message.error !== '') {
-          entry.reject(new Error(message.error))
-          return
-        }
-        entry.resolve(message.result ?? emptySearchResult())
-      })
+      const worker = factory !== undefined
+        ? factory(workerPath)
+        : new Worker(workerPath, { workerData: { dbPath: join(this.options.stateDir, 'content.db') } })
+      worker.on('message', (message: unknown) => { this.onWorkerMessage(message) })
       const fail = (): void => {
         if (this.worker !== worker) return
         this.worker = null
-        for (const entry of this.pending.values()) entry.reject(new Error('content search worker failed'))
+        for (const resolve of this.pending.values()) resolve(workerFailureResult('content-search-worker-failed'))
         this.pending.clear()
       }
       worker.on('error', fail)
       worker.on('exit', fail)
       this.worker = worker
+      return true
     } catch {
       this.worker = null
+      return false
     }
+  }
+
+  /**
+   * Resolve one worker reply. A malformed reply is reported as a protocol
+   * error; the query is never retried on the host thread.
+   */
+  private onWorkerMessage(message: unknown): void {
+    if (typeof message !== 'object' || message === null) return
+    const record = message as { id?: unknown; result?: unknown }
+    if (typeof record.id !== 'number') return
+    const resolve = this.pending.get(record.id)
+    if (resolve === undefined) return
+    this.pending.delete(record.id)
+    resolve(isContentSearchResult(record.result) ? record.result : workerFailureResult('content-search-worker-protocol-error'))
   }
 
   private identityOf(path: string): { dev: number; ino: number } | null {
@@ -448,20 +554,6 @@ export class ContentIndex {
   private engineRescanning(): boolean {
     const scanning = (this.rt as { status?: { scanning?: unknown } }).status?.scanning
     return scanning !== undefined && scanning !== null
-  }
-
-  /** Whether `path` is a SQLite database this plugin created (has docs_meta). */
-  private ownedDatabase(path: string): boolean {
-    let probe: DatabaseSync | undefined
-    try {
-      probe = new DatabaseSync(path, { readOnly: true })
-      const row = probe.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'docs_meta'").get()
-      return row !== undefined
-    } catch {
-      return false
-    } finally {
-      try { probe?.close() } catch { /* ignore */ }
-    }
   }
 
   private readFlag(key: string): number | undefined {
@@ -541,7 +633,11 @@ export class ContentIndex {
 
   private addDoc(row: DocRow): boolean {
     const cap = this.options.maxTotalBytes ?? 0
-    if (cap > 0 && this.totalBytes + row.body.length > cap) {
+    // Replacing an existing document frees its old body first: an unchanged
+    // file rewritten at refresh time must not be rejected because its stale
+    // copy still occupies the budget.
+    const previous = this.storedBytes(row.key)
+    if (cap > 0 && this.totalBytes - previous + row.body.length > cap) {
       this.state.truncated = true
       return false
     }
@@ -551,6 +647,13 @@ export class ContentIndex {
     this.db!.prepare('INSERT INTO docs (rowid, body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(rowid, row.body, row.kind, row.path, row.title, row.sessionId, row.messageId)
     this.totalBytes += row.body.length
     return true
+  }
+
+  /** Body bytes stored for one document key (0 when it is not indexed). */
+  private storedBytes(key: string): number {
+    const row = this.db!.prepare(`SELECT COALESCE(length(d.body), 0) AS n
+      FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.doc_key = ?`).get(key) as { n?: number } | undefined
+    return Number(row?.n ?? 0)
   }
 
   private deleteDoc(key: string): void {
@@ -578,6 +681,7 @@ export class ContentIndex {
     let after = 0
     let seen = 0
     let scanned = 0
+    let capped = false
     for (;;) {
       if (generation !== this.generation) return
       if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
@@ -587,13 +691,14 @@ export class ContentIndex {
         if (generation !== this.generation) return
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
         if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
-        if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) break
+        if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) { capped = true; break }
         const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
         if (row === null) continue
         seen++
         if (!this.addDoc(row)) return
         await this.breathe()
       }
+      if (capped) break
       after = page.next
       if (page.done || page.entries.length === 0) break
     }
@@ -605,8 +710,13 @@ export class ContentIndex {
     const seen = new Set<string>()
     const deferred: Array<{ path: string; name: string; mtime: number; size: number }> = []
     let after = 0
+    // `maxFiles` counts documents that are actually stored. A file whose read
+    // failed is not stored, so it must not consume a slot: counting it here used
+    // to stop the loop early (and the deletion pass then removed every trailing
+    // document that was never reached). `indexed` only moves on success.
     let indexed = 0
     let scanned = 0
+    let capped = false
     for (;;) {
       if (generation !== this.generation) return
       if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
@@ -616,22 +726,30 @@ export class ContentIndex {
         if (generation !== this.generation) return
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
         if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
-        if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) break
+        if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) { capped = true; break }
         const key = `file:${entry.path}`
         seen.add(key)
-        indexed++
-        if (meta.get(key) === entry.mtime) continue
-        if (this.wouldExceed(entry.size)) {
+        if (meta.get(key) === entry.mtime) {
+          // Unchanged and already stored: it still occupies one of the slots.
+          indexed++
+          continue
+        }
+        if (this.wouldExceed(entry.size, key)) {
           deferred.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
           continue
         }
-        this.deleteDoc(key)
+        // Read first, replace only on success. A transient read failure must
+        // keep the document indexed by the previous refresh, not delete it.
         const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
-        if (row !== null && !this.addDoc(row)) {
+        if (row === null) continue
+        if (!this.addDoc(row)) {
           deferred.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
+          continue
         }
+        indexed++
         await this.breathe()
       }
+      if (capped) break
       after = page.next
       if (page.done || page.entries.length === 0) break
     }
@@ -640,19 +758,20 @@ export class ContentIndex {
     for (const key of meta.keys()) if (!seen.has(key)) this.deleteDoc(key)
     for (const entry of deferred) {
       if (generation !== this.generation) return
-      if (this.wouldExceed(entry.size)) { this.state.truncated = true; continue }
-      this.deleteDoc(`file:${entry.path}`)
+      if (this.wouldExceed(entry.size, `file:${entry.path}`)) { this.state.truncated = true; continue }
       const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
-      if (row === null || !this.addDoc(row)) { this.state.truncated = true; continue }
+      if (row === null) continue
+      if (!this.addDoc(row)) { this.state.truncated = true; continue }
       await this.breathe()
     }
   }
 
   /** Would storing a file of this size overflow the configured body budget? */
-  private wouldExceed(size: number): boolean {
+  private wouldExceed(size: number, docKey?: string): boolean {
     const cap = this.options.maxTotalBytes ?? 0
     if (cap <= 0) return false
-    return this.totalBytes + Math.min(size, this.options.maxFileBytes) > cap
+    const previous = docKey === undefined ? 0 : this.storedBytes(docKey)
+    return this.totalBytes - previous + Math.min(size, this.options.maxFileBytes) > cap
   }
 
   private async readFileDoc(path: string, name: string, mtime: number): Promise<DocRow | null> {
@@ -667,8 +786,15 @@ export class ContentIndex {
     const files = (await this.sessionCandidates()).filter(file => this.settled(file.mtime))
     for (const file of files) {
       if (generation !== this.generation) return
+      const read = await this.readSessionText(file)
+      if (!read.ok) {
+        // A log that cannot be read or decompressed does not contribute rows;
+        // the build continues with the remaining sessions.
+        this.addWarning('content-session-log-unreadable')
+        continue
+      }
       this.deletePath(file.path)
-      if (!(await this.indexSessionFile(file, generation))) return
+      if (!(await this.indexSessionText(file, read.text, generation))) return
       this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
       await this.breathe()
     }
@@ -686,8 +812,16 @@ export class ContentIndex {
       // its existing rows instead of re-reading the whole growing log.
       if (!this.settled(file.mtime)) continue
       if (known.get(file.path) === file.mtime) continue
+      // Decode the whole log before touching the old rows. On failure keep the
+      // previous messages and the previous sources.mtime, so the next refresh
+      // retries the same file instead of treating it as empty.
+      const read = await this.readSessionText(file)
+      if (!read.ok) {
+        this.addWarning('content-session-log-unreadable')
+        continue
+      }
       this.deletePath(file.path)
-      if (!(await this.indexSessionFile(file, generation))) return
+      if (!(await this.indexSessionText(file, read.text, generation))) return
       this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
       await this.breathe()
     }
@@ -698,9 +832,21 @@ export class ContentIndex {
     }
   }
 
-  private async indexSessionFile(file: { path: string; mtime: number }, generation: number): Promise<boolean> {
+  /** Read and decompress one session log completely; no side effects on rows. */
+  private async readSessionText(file: { path: string; mtime: number }): Promise<
+    { ok: true; text: string } | { ok: false; error: string }
+  > {
     let text: string
-    try { text = (await zstdDecompressAsync(await readFile(file.path))).toString('utf8') } catch { return true }
+    try {
+      text = (await zstdDecompressAsync(await readFile(file.path))).toString('utf8')
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+    return { ok: true, text }
+  }
+
+  /** Index one already-decoded session log; the caller owns row replacement. */
+  private async indexSessionText(file: { path: string; mtime: number }, text: string, generation: number): Promise<boolean> {
     if (generation !== this.generation) return false
     const sessionId = basename(dirname(file.path))
     this.sessionPaths.set(sessionId, file.path)
@@ -745,12 +891,17 @@ export class ContentIndex {
 
   /**
    * Search file bodies and session messages. With `searchWorker` enabled the
-   * query itself runs off the host thread; a failed or wedged worker falls back
-   * to the in-process query so a result is still produced.
+   * query itself runs off the host thread.
    *
-   * The two-argument form returns the hit array (tools and the legacy
-   * `/content` route). The three-argument form returns hits plus count,
-   * warnings and an error code, and understands the advanced match options.
+   * A worker timeout, crash or malformed reply is a hard error result: the
+   * same query is never re-run on the host thread, where a heavy query (for
+   * example a whole-word scan) would stall the DSH event loop. Only when the
+   * worker cannot be created at all does the query run in-process, and that
+   * fallback is budgeted (bounded counts).
+   *
+   * The two-argument form returns the hit array (legacy callers). The
+   * three-argument form returns hits plus count, warnings and an error code,
+   * and understands the advanced match options.
    * @param query - words or a phrase to find.
    * @param limit - maximum hits.
    * @param options - match mode, case/whole-word flags, session scope, count mode.
@@ -771,21 +922,45 @@ export class ContentIndex {
       this.recoverExternal()
       return emptySearchResult()
     }
-    if (this.options.searchWorker !== true) return this.searchSync(query, limit, resolved)
-    this.ensureWorker()
-    if (this.worker === null) return this.searchSync(query, limit, resolved)
-    const id = ++this.workerSeq
+    // Direct embedders run in-process by design (searchWorker is off).
+    if (this.options.searchWorker !== true) return this.searchSync(query, limit, resolved, false)
+    if (!this.ensureWorker()) {
+      // The worker could not be created at all: the one allowed sync path.
+      return this.searchSync(query, limit, resolved, true)
+    }
+    return await this.searchInWorker(query, limit, resolved)
+  }
+
+  /** Run one query on the worker; timeout/protocol errors are final results. */
+  private async searchInWorker(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult> {
     const worker = this.worker
-    const response = new Promise<ContentSearchResult>((resolve, reject) => { this.pending.set(id, { resolve, reject }) })
-    worker.postMessage({ id, query, limit, options: resolved })
+    if (worker === null) return workerFailureResult('content-search-worker-failed')
+    const id = ++this.workerSeq
+    const response = new Promise<ContentSearchResult>(resolve => { this.pending.set(id, resolve) })
+    const timeoutMs = Math.max(1, this.options.searchWorkerTimeoutMs ?? WORKER_TIMEOUT_MS)
     let timer: NodeJS.Timeout | undefined
-    const timeout = new Promise<ContentSearchResult>((_resolve, reject) => {
-      timer = setTimeout(() => { this.pending.delete(id); reject(new Error('content search worker timed out')) }, 5_000)
+    const timeout = new Promise<ContentSearchResult>(resolve => {
+      timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return
+        // A wedged worker is thrown away; the next query gets a fresh one. The
+        // current query is reported as timed out, never re-run here.
+        if (this.worker === worker) {
+          this.worker = null
+          void worker.terminate()
+        }
+        resolve(workerFailureResult('content-search-timeout'))
+      }, timeoutMs)
     })
     try {
-      return await Promise.race([response, timeout])
+      worker.postMessage({ id, query, limit, options })
     } catch {
-      return this.searchSync(query, limit, resolved)
+      if (this.pending.delete(id)) {
+        if (timer !== undefined) clearTimeout(timer)
+        return workerFailureResult('content-search-worker-failed')
+      }
+    }
+    try {
+      return await Promise.race([response, timeout])
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
@@ -800,15 +975,53 @@ export class ContentIndex {
     return { ...options, sessionPath: path }
   }
 
-  private searchSync(query: string, limit: number, options: ContentSearchOptions): ContentSearchResult {
+  /**
+   * In-process query path. When `degraded` is set (worker creation failed) the
+   * options are tightened so this rare path cannot spend an unbounded amount of
+   * host-thread time counting matches.
+   */
+  private searchSync(query: string, limit: number, options: ContentSearchOptions, degraded: boolean): ContentSearchResult {
     if (this.db === null) return emptySearchResult()
+    const effective = degraded ? budgetedSearchOptions(options) : options
     try {
-      return searchContent(this.db, query, limit, options)
+      const result = searchContent(this.db, query, limit, effective)
+      if (!degraded) return result
+      return { ...result, warnings: [...new Set(['content-search-in-process', ...result.warnings])] }
     } catch (error) {
       this.state.error = messageOf(error)
       return emptySearchResult()
     }
   }
+}
+
+/** Default deadline for one worker query. */
+const WORKER_TIMEOUT_MS = 5_000
+/** Counting cap used by the rare in-process fallback. */
+const IN_PROCESS_COUNT_LIMIT = 200
+
+/** Tighten a query for the in-process fallback: bounded counting only. */
+function budgetedSearchOptions(options: ContentSearchOptions): ContentSearchOptions {
+  return {
+    ...options,
+    count: options.count === 'none' ? 'none' : 'bounded',
+    countLimit: Math.min(options.countLimit ?? IN_PROCESS_COUNT_LIMIT, IN_PROCESS_COUNT_LIMIT),
+  }
+}
+
+/** Whether a value looks like a complete worker search result. */
+function isContentSearchResult(value: unknown): value is ContentSearchResult {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.hits) || !Array.isArray(record.warnings)) return false
+  const count = record.count
+  if (typeof count !== 'object' || count === null) return false
+  const kind = (count as { kind?: unknown }).kind
+  return kind === 'exact' || kind === 'bounded' || kind === 'unknown'
+}
+
+/** Result for a failed worker query; carries an explicit error code. */
+function workerFailureResult(error: string): ContentSearchResult {
+  return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [error], error }
 }
 
 /** Result used when a content query could not run at all. */

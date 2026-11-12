@@ -8,9 +8,15 @@
  * few bodies and build the snippet in JS. Putting `snippet()` in the same
  * `ORDER BY rank` statement made a SQLite sorter evaluate it for every match
  * (measured 2.7 s for "the" on a 1 GB corpus; 60 ms with this split).
+ *
+ * Every unbounded-looking path has an explicit budget: queries shorter than a
+ * trigram are rejected instead of degrading into a full-table LIKE/GLOB scan,
+ * and the whole-word post-filter stops after a fixed number of rows, body bytes
+ * or milliseconds and reports a bounded count.
  * @module dsh-locator/content-search
  */
 
+import { sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ContentHit } from './content.ts'
 
@@ -27,6 +33,18 @@ export interface ContentCount {
   limit?: number
 }
 
+/**
+ * Hard budget for the whole-word post-filter, which has to read candidate
+ * bodies in JS. Exceeding any cap stops the scan and keeps the hits found so
+ * far; the count then becomes bounded. Exposed mainly so embedders and tests
+ * can shrink the caps.
+ */
+export interface ContentScanBudget {
+  maxRows?: number
+  maxBytes?: number
+  maxMs?: number
+}
+
 /** Options accepted by {@link searchContent} and the content search worker. */
 export interface ContentSearchOptions {
   matchMode?: ContentMatchMode
@@ -38,6 +56,14 @@ export interface ContentSearchOptions {
   sessionPath?: string | null
   count?: ContentCountMode
   countLimit?: number
+  /**
+   * Keep only file/session documents whose stored path lives under this
+   * directory prefix (the locator_find `scope: workspace` filter). Session
+   * documents are unaffected: they are scoped by `sessionPath`/`sessionId`.
+   */
+  pathPrefix?: string | null
+  /** Override for the whole-word scan caps; production uses the defaults. */
+  scanBudget?: ContentScanBudget
 }
 
 /** Result of one content query. */
@@ -50,6 +76,9 @@ export interface ContentSearchResult {
 
 /** Shortest text a trigram tokenizer can index. */
 const TRIGRAM_MIN = 3
+/** Query entry limits: no unbounded parsing, no unbounded SQL. */
+const MAX_QUERY_CODEPOINTS = 256
+const MAX_QUERY_TERMS = 32
 const MAX_LIMIT = 100
 const DEFAULT_COUNT_LIMIT = 1000
 const MAX_COUNT_LIMIT = 5000
@@ -57,9 +86,21 @@ const SNIPPET_BEFORE = 60
 const SNIPPET_AFTER = 120
 const SNIPPET_MAX = 400
 
+/** Whole-word post-filter defaults (rows, body bytes, wall clock). */
+const SCAN_MAX_ROWS = 5_000
+const SCAN_MAX_BYTES = 64 * 1024 * 1024
+const SCAN_MAX_MS = 800
+
 /** Bytes that count as "inside a word", matching the name engine. */
 const WORD_BYTE = /[A-Za-z0-9_]/
+/** Control bytes: file names cannot contain them, so name patterns drop them. */
 const CONTROL_CHARS = /[\u0000-\u001f]/
+/**
+ * Control bytes rejected in a content query. Tab/LF/CR stay allowed: they are
+ * ordinary term separators in normal mode and explicit escapes in extended
+ * mode. NUL and the other C0 bytes must never reach SQLite.
+ */
+const QUERY_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/
 
 /** Text escaped for an FTS5 quoted phrase (`"` doubled). */
 export function quoteFts(text: string): string {
@@ -159,6 +200,90 @@ export function decodeExtendedForNames(input: string): DecodedExtended {
   return { ...decoded, text: kept }
 }
 
+/** Length in Unicode code points, so emoji count as one character. */
+function codePointCount(text: string): number {
+  return Array.from(text).length
+}
+
+/** Whether text still contains a byte the content query must reject. */
+function hasControlChars(text: string): boolean {
+  return QUERY_CONTROL_CHARS.test(text)
+}
+
+/** Split a normal-mode query on whitespace, dropping empty terms. */
+function splitTerms(text: string): string[] {
+  return text.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).filter(part => part !== '')
+}
+
+/** Split decoded extended text into words for the entry checks. */
+function splitWords(text: string): string[] {
+  return text.split(/\s+/).filter(part => part !== '')
+}
+
+/** Result of the query-entry checks shared by searchContent and the panel. */
+export interface ContentQueryCheck {
+  ok: boolean
+  /** Literal terms for normal mode; one phrase for extended mode. */
+  terms: string[]
+  phrase: boolean
+  warnings: string[]
+  error?: string
+}
+
+/**
+ * Validate a content query before it reaches SQL.
+ *
+ * Content search only supports substrings the FTS5 trigram tokenizer can
+ * serve. A 1–2 character term used to fall back to a whole-corpus `LIKE` scan,
+ * which is both slow and unbounded; it is now a hard, visible error instead.
+ * The same limits apply after extended-mode escapes are decoded, and lengths
+ * are measured in Unicode code points so emoji are not mistaken for long text.
+ * @param query - raw query text.
+ * @param matchMode - `normal` (whitespace-separated terms) or `extended`.
+ * @returns normalized terms, or the first entry error.
+ */
+export function checkContentQuery(query: string, matchMode: ContentMatchMode): ContentQueryCheck {
+  const warnings: string[] = []
+  const text = query.trim()
+  if (text === '') return { ok: true, terms: [], phrase: false, warnings }
+  if (codePointCount(text) > MAX_QUERY_CODEPOINTS) {
+    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-long' }
+  }
+  if (hasControlChars(text)) {
+    // A NUL (or other C0 byte) in the query must never be passed to SQLite:
+    // some string paths would stop at it and turn the query into "match
+    // everything". Reject it explicitly instead.
+    return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char' }
+  }
+  if (matchMode === 'extended') {
+    const decoded = decodeExtended(text)
+    warnings.push(...decoded.warnings)
+    if (!decoded.ok) {
+      return { ok: false, terms: [], phrase: false, warnings, error: decoded.error ?? 'invalid-escape' }
+    }
+    if (hasControlChars(decoded.text)) {
+      return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char' }
+    }
+    const words = splitWords(decoded.text)
+    if (words.length === 0) return { ok: true, terms: [], phrase: true, warnings }
+    if (words.length > MAX_QUERY_TERMS) {
+      return { ok: false, terms: [], phrase: true, warnings, error: 'content-query-too-many-terms' }
+    }
+    if (words.some(word => codePointCount(word) < TRIGRAM_MIN)) {
+      return { ok: false, terms: [], phrase: true, warnings, error: 'content-query-too-short' }
+    }
+    return { ok: true, terms: [decoded.text], phrase: true, warnings }
+  }
+  const terms = splitTerms(text)
+  if (terms.length > MAX_QUERY_TERMS) {
+    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-many-terms' }
+  }
+  if (terms.some(term => codePointCount(term) < TRIGRAM_MIN)) {
+    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-short' }
+  }
+  return { ok: true, terms, phrase: false, warnings }
+}
+
 /** Whether `index` starts a whole-word occurrence of `length` bytes. */
 export function isWholeWord(hay: string, index: number, length: number): boolean {
   const left = index === 0 || !WORD_BYTE.test(hay[index - 1] ?? '')
@@ -248,9 +373,27 @@ function clampCountLimit(limit: number | undefined): number {
   return Math.max(1, Math.min(MAX_COUNT_LIMIT, Math.trunc(limit)))
 }
 
-/** Split a normal-mode query on whitespace, dropping empty terms. */
-function splitTerms(text: string): string[] {
-  return text.split(/\s+/).map(part => part.replace(/^"|"$/g, '')).filter(part => part !== '')
+/** A positive integer override, or the default when unset/invalid. */
+function budgetValue(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return fallback
+  return Math.trunc(value)
+}
+
+function resolveScanBudget(budget: ContentScanBudget | undefined): { maxRows: number; maxBytes: number; maxMs: number } {
+  return {
+    maxRows: budgetValue(budget?.maxRows, SCAN_MAX_ROWS),
+    maxBytes: budgetValue(budget?.maxBytes, SCAN_MAX_BYTES),
+    maxMs: budgetValue(budget?.maxMs, SCAN_MAX_MS),
+  }
+}
+
+/** Normalize the optional path-prefix filter; keep the platform separator. */
+function normalizePathPrefix(prefix: string | null | undefined): string | null {
+  if (typeof prefix !== 'string') return null
+  const trimmed = prefix.trim()
+  if (trimmed === '') return null
+  if (trimmed.endsWith('/') || trimmed.endsWith('\\')) return trimmed
+  return trimmed + sep
 }
 
 /** One query plan: the SQL WHERE fragment plus how to page/count it. */
@@ -265,7 +408,7 @@ interface QueryPlan {
   phrase: boolean
   rankOrder: boolean
   exactCount: boolean
-  /** GLOB counts are exact only below countLimit; above it they are bounded. */
+  /** GLOB counting is exact only below countLimit; above it is bounded. */
   boundedCount: boolean
 }
 
@@ -274,19 +417,30 @@ function buildPlan(terms: readonly string[], options: {
   wholeWord: boolean
   phrase: boolean
   sessionPath: string | null
+  pathPrefix: string | null
 }): QueryPlan | null {
-  const { caseSensitive, wholeWord, phrase, sessionPath } = options
+  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix } = options
   if (terms.length === 0) return null
-  const sessionClause = sessionPath === null ? '' : ' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)'
-  const sessionParams: Array<string | number> = sessionPath === null ? [] : [sessionPath]
-  const tooShort = terms.some(term => term.length < TRIGRAM_MIN)
+  // Only files live inside the workspace prefix. Session rows belong to the
+  // session scope and are filtered by sessionPath/sessionId instead.
+  const suffix: string[] = []
+  const suffixParams: Array<string | number> = []
+  if (sessionPath !== null) {
+    suffix.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
+    suffixParams.push(sessionPath)
+  }
+  if (pathPrefix !== null) {
+    suffix.push(" AND (kind = 'session' OR rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\'))")
+    suffixParams.push(escapeLike(pathPrefix) + '%')
+  }
+  const sessionClause = suffix.join('')
 
   if (phrase) {
     const literal = terms[0]!
     if (caseSensitive) {
       return {
         where: 'body GLOB ?' + sessionClause,
-        params: ['*' + escapeGlob(literal) + '*', ...sessionParams],
+        params: ['*' + escapeGlob(literal) + '*', ...suffixParams],
         terms: [literal],
         caseSensitive,
         wholeWord,
@@ -296,22 +450,9 @@ function buildPlan(terms: readonly string[], options: {
         boundedCount: true,
       }
     }
-    if (literal.length < TRIGRAM_MIN) {
-      return {
-        where: "body LIKE ? ESCAPE '\\'" + sessionClause,
-        params: ['%' + escapeLike(literal) + '%', ...sessionParams],
-        terms: [literal],
-        caseSensitive,
-        wholeWord,
-        phrase,
-        rankOrder: false,
-        exactCount: false,
-        boundedCount: true,
-      }
-    }
     return {
       where: 'docs MATCH ?' + sessionClause,
-      params: [quoteFts(literal), ...sessionParams],
+      params: [quoteFts(literal), ...suffixParams],
       terms: [literal],
       caseSensitive,
       wholeWord,
@@ -325,7 +466,7 @@ function buildPlan(terms: readonly string[], options: {
   if (caseSensitive) {
     return {
       where: terms.map(() => 'body GLOB ?').join(' AND ') + sessionClause,
-      params: [...terms.map(term => '*' + escapeGlob(term) + '*'), ...sessionParams],
+      params: [...terms.map(term => '*' + escapeGlob(term) + '*'), ...suffixParams],
       terms: [...terms],
       caseSensitive,
       wholeWord,
@@ -335,22 +476,9 @@ function buildPlan(terms: readonly string[], options: {
       boundedCount: true,
     }
   }
-  if (tooShort) {
-    return {
-      where: terms.map(() => "body LIKE ? ESCAPE '\\'").join(' AND ') + sessionClause,
-      params: [...terms.map(term => '%' + escapeLike(term) + '%'), ...sessionParams],
-      terms: [...terms],
-      caseSensitive,
-      wholeWord,
-      phrase,
-      rankOrder: false,
-      exactCount: false,
-      boundedCount: true,
-    }
-  }
   return {
     where: 'docs MATCH ?' + sessionClause,
-    params: [terms.map(quoteFts).join(' AND '), ...sessionParams],
+    params: [terms.map(quoteFts).join(' AND '), ...suffixParams],
     terms: [...terms],
     caseSensitive,
     wholeWord,
@@ -444,6 +572,16 @@ interface WholeWordScan {
   warnings: string[]
 }
 
+/**
+ * Scan candidates for whole-word matches under a hard budget.
+ *
+ * Reading every candidate body in JS is the only correct way to apply the
+ * ASCII word-boundary rule, but a common word in a multi-GB corpus would keep
+ * the worker (and the query) busy for minutes. Rows, body bytes and wall clock
+ * are all capped: on any cap the scan stops, keeps the rowids found so far and
+ * reports a bounded count plus a `scan-capped` warning. Session-scoped scans go
+ * through the same budget, so a huge session cannot run unbounded either.
+ */
 function scanWholeWord(
   db: DatabaseSync,
   plan: QueryPlan,
@@ -451,43 +589,62 @@ function scanWholeWord(
   countMode: ContentCountMode,
   countLimit: number,
   sessionScoped: boolean,
+  budget: { maxRows: number; maxBytes: number; maxMs: number },
 ): WholeWordScan {
-  const warnings: string[] = []
+  const warnings = new Set<string>()
   const rowids: number[] = []
   const sql = plan.rankOrder
     ? `SELECT rowid AS rowid FROM docs WHERE ${plan.where} ORDER BY rank`
     : `SELECT rowid AS rowid FROM docs WHERE ${plan.where}`
   const iterator = db.prepare(sql).iterate(...plan.params)
   const bodyStatement = db.prepare('SELECT body FROM docs WHERE rowid = ?')
+  const deadline = performance.now() + budget.maxMs
   let count = 0
+  let scannedRows = 0
+  let scannedBytes = 0
+  let capped = false
   let exhausted = true
   for (const raw of iterator) {
+    scannedRows++
+    if (scannedRows > budget.maxRows || scannedBytes >= budget.maxBytes || performance.now() > deadline) {
+      capped = true
+      exhausted = false
+      break
+    }
     const rowid = (raw as { rowid?: number }).rowid
     if (typeof rowid !== 'number') continue
     const row = bodyStatement.get(rowid) as { body?: string } | undefined
     if (row === undefined || typeof row.body !== 'string') continue
+    scannedBytes += row.body.length
     if (!matchesWholeWord(row.body, plan.terms, plan.caseSensitive)) continue
     count++
     if (rowids.length < limit) rowids.push(rowid)
     if (countMode === 'none') {
-      if (rowids.length >= limit) break
+      if (rowids.length >= limit) {
+        // The page is full; no count was requested, so stopping is safe.
+        exhausted = false
+        break
+      }
     } else if (!sessionScoped && count > countLimit) {
       exhausted = false
       break
     }
   }
+  if (capped) warnings.add('scan-capped')
   let result: ContentCount
   if (countMode === 'none') {
     result = { value: 0, kind: 'unknown' }
-  } else if (!exhausted || count > countLimit) {
+  } else if (count > countLimit) {
     // Above the cap: report the known floor, never an exact count we did not
     // finish. Global whole-word counts are deliberately bounded.
+    warnings.add('bounded-count')
     result = { value: countLimit, kind: 'bounded', limit: countLimit }
-    warnings.push('bounded-count')
+  } else if (capped || !exhausted) {
+    result = { value: count, kind: 'bounded', limit: countLimit }
   } else {
     result = { value: count, kind: 'exact' }
   }
-  return { rowids, count: result, warnings: [...new Set(warnings)] }
+  return { rowids, count: result, warnings: [...warnings] }
 }
 
 /**
@@ -503,14 +660,11 @@ export function searchContent(
   limit: number,
   options: ContentSearchOptions = {},
 ): ContentSearchResult {
-  const text = query.trim()
   const capped = clampLimit(limit)
   const matchMode = options.matchMode ?? 'normal'
   const countMode = options.count ?? 'exact'
   const countLimit = clampCountLimit(options.countLimit)
-  const warnings: string[] = []
 
-  if (text === '') return { hits: [], count: emptyCount(countMode), warnings }
   if (matchMode === 'regex') {
     return {
       hits: [],
@@ -520,33 +674,30 @@ export function searchContent(
     }
   }
 
-  let terms: string[]
-  let phrase = false
-  if (matchMode === 'extended') {
-    const decoded = decodeExtended(text)
-    warnings.push(...decoded.warnings)
-    if (!decoded.ok) {
-      return { hits: [], count: { value: 0, kind: 'unknown' }, warnings, error: decoded.error ?? 'invalid-escape' }
+  const check = checkContentQuery(query, matchMode)
+  const warnings = [...check.warnings]
+  if (!check.ok) {
+    return {
+      hits: [],
+      count: { value: 0, kind: 'unknown' },
+      warnings,
+      error: check.error ?? 'content-query-invalid',
     }
-    phrase = true
-    terms = decoded.text === '' ? [] : [decoded.text]
-  } else {
-    terms = splitTerms(text)
   }
-  if (terms.length === 0) return { hits: [], count: emptyCount(countMode), warnings }
+  if (check.terms.length === 0) return { hits: [], count: emptyCount(countMode), warnings }
 
-  const sessionPath = options.sessionPath ?? null
-  const plan = buildPlan(terms, {
+  const plan = buildPlan(check.terms, {
     caseSensitive: options.caseSensitive === true,
     wholeWord: options.wholeWord === true,
-    phrase,
-    sessionPath,
+    phrase: check.phrase,
+    sessionPath: options.sessionPath ?? null,
+    pathPrefix: normalizePathPrefix(options.pathPrefix),
   })
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 
   if (plan.wholeWord) {
-    const scanned = scanWholeWord(db, plan, capped, countMode, countLimit, sessionPath !== null)
-    warnings.push(...scanned.warnings)
+    const scanned = scanWholeWord(db, plan, capped, countMode, countLimit, options.sessionPath != null, resolveScanBudget(options.scanBudget))
+    for (const warning of scanned.warnings) warnings.push(warning)
     const hits = buildHits(db, plan, scanned.rowids, new Map())
     return { hits, count: scanned.count, warnings: [...new Set(warnings)] }
   }
@@ -560,8 +711,8 @@ export function searchContent(
   } else if (plan.exactCount && !plan.boundedCount) {
     count = { value: exactCount(db, plan), kind: 'exact' }
   } else {
-    // LIKE plans and very common GLOB patterns cannot count cheaply: cap the
-    // work and report the known floor plus a warning.
+    // GLOB patterns cannot count cheaply: cap the work and report the known
+    // floor plus a warning.
     count = boundedCount(db, plan, countLimit)
     if (count.kind === 'bounded') warnings.push('bounded-count')
   }

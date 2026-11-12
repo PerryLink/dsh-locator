@@ -50,7 +50,7 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 		if err != nil {
 			return false, Stats{}, err
 		}
-	journal, err := volume.Journal()
+		journal, err := volume.Journal()
 		if err != nil {
 			_ = volume.Close()
 			return false, Stats{}, err

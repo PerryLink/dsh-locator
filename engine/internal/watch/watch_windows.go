@@ -32,15 +32,15 @@ const (
 	notifyChangeLastWrite  = 0x00000010
 	notifyChangeCreation   = 0x00000040
 
-	actionAdded        = 1
-	actionRemoved      = 2
-	actionModified     = 3
-	actionRenamedOld   = 4
-	actionRenamedNew   = 5
+	actionAdded      = 1
+	actionRemoved    = 2
+	actionModified   = 3
+	actionRenamedOld = 4
+	actionRenamedNew = 5
 
 	// Win32 error codes; syscall does not export every one of them.
-	errorInvalidHandle     = syscall.Errno(6)
-	errorOperationAborted  = syscall.Errno(995)
+	errorInvalidHandle    = syscall.Errno(6)
+	errorOperationAborted = syscall.Errno(995)
 )
 
 type fileNotifyInformation struct {
@@ -51,9 +51,9 @@ type fileNotifyInformation struct {
 }
 
 var (
-	kernel32                     = syscall.NewLazyDLL("kernel32.dll")
-	procReadDirectoryChangesW    = kernel32.NewProc("ReadDirectoryChangesW")
-	procCancelIoEx               = kernel32.NewProc("CancelIoEx")
+	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	procReadDirectoryChangesW = kernel32.NewProc("ReadDirectoryChangesW")
+	procCancelIoEx            = kernel32.NewProc("CancelIoEx")
 )
 
 type watcher struct {
@@ -62,29 +62,55 @@ type watcher struct {
 	excludes []string
 	onError  func(error)
 
-	mu      sync.Mutex
-	handles []syscall.Handle
-	closed  bool
-	done    chan struct{}
+	onDegraded func(Health)
+
+	mu         sync.Mutex
+	watched    []watchedRoot // root and handle always travel together
+	closed     bool
+	degraded   bool
+	reasons    []string
+	dirsFailed int
+	done       chan struct{}
+}
+
+// watchedRoot keeps one root path and its directory handle paired, so a root
+// that failed to open never shifts the index of another root's handle.
+type watchedRoot struct {
+	root   string
+	handle syscall.Handle
 }
 
 func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 	w := &watcher{
-		ix:       ix,
-		roots:    opt.Roots,
-		excludes: opt.Excludes,
-		onError:  opt.OnError,
-		done:     make(chan struct{}),
+		ix:         ix,
+		roots:      opt.Roots,
+		excludes:   opt.Excludes,
+		onError:    opt.OnError,
+		onDegraded: opt.OnDegraded,
+		done:       make(chan struct{}),
 	}
+	var firstErr error
 	for _, root := range opt.Roots {
 		h, err := openRoot(root)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			w.report(fmt.Errorf("watch %s: %w", root, err))
+			w.markDegraded(fmt.Sprintf("root %s could not be opened: %v", root, err))
 			continue
 		}
 		w.mu.Lock()
-		w.handles = append(w.handles, h)
+		w.watched = append(w.watched, watchedRoot{root: root, handle: h})
 		w.mu.Unlock()
+	}
+	w.mu.Lock()
+	opened := len(w.watched)
+	w.mu.Unlock()
+	if opened == 0 {
+		// Nothing can be watched: let the server switch to the refresh fallback
+		// instead of pretending the index is live.
+		return nil, fmt.Errorf("ReadDirectoryChangesW: no root could be watched: %w", firstErr)
 	}
 	return w, nil
 }
@@ -111,6 +137,75 @@ func (w *watcher) report(err error) {
 	}
 }
 
+// Health reports how many roots still have a live ReadDirectoryChangesW loop.
+func (w *watcher) Health() Health {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return Health{
+		Roots:    len(w.roots),
+		Watching: len(w.watched),
+		Degraded: w.degraded || len(w.watched) < len(w.roots),
+		Reason:   strings.Join(w.reasons, "; "),
+	}
+}
+
+// markDegraded records incomplete coverage and notifies the daemon once, so it
+// can start the periodic rebuild for the roots that are not watched.
+func (w *watcher) markDegraded(reason string) {
+	if reason == "" {
+		return
+	}
+	w.mu.Lock()
+	first := !w.degraded && !w.closed
+	w.degraded = true
+	dup := false
+	for _, existing := range w.reasons {
+		if existing == reason {
+			dup = true
+			break
+		}
+	}
+	if !dup && len(w.reasons) < 4 {
+		w.reasons = append(w.reasons, reason)
+	}
+	h := Health{
+		Roots:    len(w.roots),
+		Watching: len(w.watched),
+		Degraded: true,
+		Reason:   strings.Join(w.reasons, "; "),
+	}
+	w.mu.Unlock()
+	if first && w.onDegraded != nil {
+		w.onDegraded(h)
+	}
+}
+
+// noteRootStopped drops a handle whose read loop ended and records why.
+func (w *watcher) noteRootStopped(root string, err error) {
+	w.mu.Lock()
+	closed := w.closed
+	for i, wr := range w.watched {
+		if wr.root != root {
+			continue
+		}
+		w.watched = append(w.watched[:i], w.watched[i+1:]...)
+		break
+	}
+	remaining := len(w.watched)
+	w.mu.Unlock()
+	if closed {
+		return // a deliberate Close, not a failure
+	}
+	reason := fmt.Sprintf("root %s stopped being watched", root)
+	if err != nil {
+		reason += ": " + err.Error()
+	}
+	w.markDegraded(reason)
+	if remaining == 0 {
+		w.markDegraded("no root is watched any more")
+	}
+}
+
 func (w *watcher) Close() error {
 	w.mu.Lock()
 	if w.closed {
@@ -118,8 +213,11 @@ func (w *watcher) Close() error {
 		return nil
 	}
 	w.closed = true
-	handles := w.handles
-	w.handles = nil
+	handles := make([]syscall.Handle, 0, len(w.watched))
+	for _, wr := range w.watched {
+		handles = append(handles, wr.handle)
+	}
+	w.watched = nil
 	w.mu.Unlock()
 	close(w.done)
 	for _, h := range handles {
@@ -133,15 +231,17 @@ func (w *watcher) Close() error {
 
 func (w *watcher) Run(ctx context.Context) error {
 	w.mu.Lock()
-	handles := append([]syscall.Handle(nil), w.handles...)
+	watched := append([]watchedRoot(nil), w.watched...)
 	w.mu.Unlock()
-	var wg sync.WaitGroup
-	for i, h := range handles {
-		wg.Add(1)
+	type loopExit struct {
+		root string
+		err  error
+	}
+	exits := make(chan loopExit, len(watched))
+	for _, wr := range watched {
 		go func(root string, handle syscall.Handle) {
-			defer wg.Done()
-			w.readLoop(ctx, root, handle)
-		}(w.roots[i], h)
+			exits <- loopExit{root: root, err: w.readLoop(ctx, root, handle)}
+		}(wr.root, wr.handle)
 	}
 	go func() {
 		select {
@@ -150,17 +250,37 @@ func (w *watcher) Run(ctx context.Context) error {
 		case <-w.done:
 		}
 	}()
-	wg.Wait()
-	return ctx.Err()
+	var firstErr error
+	for range watched {
+		exit := <-exits
+		if ctx.Err() != nil {
+			continue
+		}
+		if exit.err != nil && firstErr == nil {
+			firstErr = exit.err
+		}
+		if remaining := w.Health().Watching; remaining < len(watched) {
+			// One root of several died: keep the others running, but tell the
+			// daemon so the periodic rebuild covers the gap.
+			w.noteRootStopped(exit.root, exit.err)
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if firstErr == nil {
+		firstErr = errors.New("all watched roots stopped")
+	}
+	return firstErr
 }
 
-func (w *watcher) readLoop(ctx context.Context, root string, h syscall.Handle) {
+func (w *watcher) readLoop(ctx context.Context, root string, h syscall.Handle) error {
 	const filter = notifyChangeFileName | notifyChangeDirName | notifyChangeAttributes |
 		notifyChangeSize | notifyChangeLastWrite | notifyChangeCreation
 	buf := make([]byte, 128*1024)
 	for {
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
 		}
 		var returned uint32
 		ok, _, callErr := procReadDirectoryChangesW.Call(
@@ -175,13 +295,14 @@ func (w *watcher) readLoop(ctx context.Context, root string, h syscall.Handle) {
 		)
 		if ok == 0 {
 			if errors.Is(callErr, errorOperationAborted) || errors.Is(callErr, errorInvalidHandle) {
-				return
+				return nil
 			}
 			if ctx.Err() != nil {
-				return
+				return ctx.Err()
 			}
-			w.report(fmt.Errorf("ReadDirectoryChangesW(%s): %w", root, callErr))
-			return
+			err := fmt.Errorf("ReadDirectoryChangesW(%s): %w", root, callErr)
+			w.report(err)
+			return err
 		}
 		if returned == 0 {
 			// Buffer overflow: the kernel dropped events, so rebuild this root.

@@ -5,6 +5,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LocatorRuntime, SearchHit } from './runtime.ts'
+import { resolveWithinRoots } from './reveal.ts'
 
 const HIT_SCHEMA = {
   type: 'object',
@@ -68,6 +69,77 @@ const REBUILD_OUTPUT = {
     error: { type: 'string' },
   },
 } as const
+
+/** Validated rebuild scope: only narrowing of the configured roots/excludes is allowed. */
+export interface RebuildScope {
+  roots?: string[]
+  excludes?: string[]
+}
+
+/** Validation result for one `locator_rebuild` argument pair. */
+export type RebuildScopeResult =
+  | { ok: true; roots?: string[]; excludes?: string[] }
+  | { ok: false; error: string }
+
+/**
+ * Restrict a `locator_rebuild` request to the configured scope.
+ *
+ * Root replacement is the dangerous knob: letting the model pick an arbitrary
+ * absolute path would turn a search tool into a disk-indexer for directories
+ * the operator never configured. A requested root must therefore canonicalize
+ * (symlinks resolved) to a configured root or a directory below one; requested
+ * excludes must be draw from the configured exclude list. Everything is passed
+ * through the same canonicalization as `/reveal`/`/open`.
+ * @param roots - requested replacement roots, if any.
+ * @param excludes - requested replacement excludes, if any.
+ * @param configuredRoots - the plugin's configured (resolved) roots.
+ * @param configuredExcludes - the plugin's configured excludes.
+ * @returns the canonical narrowed scope, or the first refusal.
+ */
+export function validateRebuildArguments(
+  roots: readonly string[] | undefined,
+  excludes: readonly string[] | undefined,
+  configuredRoots: readonly string[],
+  configuredExcludes: readonly string[],
+): RebuildScopeResult {
+  let narrowedRoots: string[] | undefined
+  if (roots !== undefined) {
+    if (!Array.isArray(roots) || roots.length === 0) {
+      return { ok: false, error: 'roots must be a non-empty array of directory paths' }
+    }
+    narrowedRoots = []
+    for (const root of roots) {
+      if (typeof root !== 'string' || root.trim() === '') {
+        return { ok: false, error: 'roots must contain non-empty directory paths' }
+      }
+      const resolved = resolveWithinRoots(root.trim(), configuredRoots)
+      if (resolved === undefined) {
+        return { ok: false, error: `root is outside the configured roots: ${root}` }
+      }
+      if (!narrowedRoots.includes(resolved.path)) narrowedRoots.push(resolved.path)
+    }
+  }
+  let narrowedExcludes: string[] | undefined
+  if (excludes !== undefined) {
+    if (!Array.isArray(excludes)) return { ok: false, error: 'excludes must be an array of configured globs' }
+    const allowed = new Set(configuredExcludes)
+    narrowedExcludes = []
+    for (const exclude of excludes) {
+      if (typeof exclude !== 'string' || exclude.trim() === '') {
+        return { ok: false, error: 'excludes must contain non-empty globs' }
+      }
+      if (!allowed.has(exclude)) {
+        return { ok: false, error: `exclude is not one of the configured excludes: ${exclude}` }
+      }
+      if (!narrowedExcludes.includes(exclude)) narrowedExcludes.push(exclude)
+    }
+  }
+  return {
+    ok: true,
+    ...(narrowedRoots === undefined ? {} : { roots: narrowedRoots }),
+    ...(narrowedExcludes === undefined ? {} : { excludes: narrowedExcludes }),
+  }
+}
 
 const SEARCH_DESCRIPTION = [
   'Search a persistent local file-name index in milliseconds (dsh-locator).',
@@ -264,11 +336,12 @@ export function makeRebuildTool(rt: LocatorRuntime) {
     name: 'locator_rebuild',
     description: [
       'Rebuild the local file index from scratch (dsh-locator). Runs in the background; locator_search keeps answering from the old index until the new one is ready.',
+      'The rebuild is always confined to the configured scope: replacement `roots` must resolve inside the roots the plugin was configured with, and replacement `excludes` must come from the configured exclude list. To index a different directory, change the plugin configuration instead.',
       'Use it after changing indexed roots, after the index looks stale and the watcher is inactive, or when the user explicitly asks to rescan. It can take minutes for a large home directory and costs disk I/O, so do not call it routinely.',
     ].join('\n'),
     parameters: {
-      roots: { type: 'array', items: { type: 'string' }, description: 'Replacement root directories (defaults to the current roots).' },
-      excludes: { type: 'array', items: { type: 'string' }, description: 'Replacement exclusion globs.' },
+      roots: { type: 'array', items: { type: 'string' }, description: 'Replacement root directories (defaults to the current roots). Each must be a configured root or inside one.' },
+      excludes: { type: 'array', items: { type: 'string' }, description: 'Replacement exclusion globs (defaults to the current excludes). Each must already be configured.' },
     },
     output: {
       schema: REBUILD_OUTPUT,
@@ -279,12 +352,16 @@ export function makeRebuildTool(rt: LocatorRuntime) {
       },
     },
     async execute(args) {
+      const scope = validateRebuildArguments(
+        args.roots,
+        args.excludes,
+        rt.roots,
+        rt.config.excludes,
+      )
+      if (!scope.ok) return { ok: false as const, error: scope.error }
       try {
         rt.start()
-        const result = await rt.rebuild(
-          args.roots === undefined ? undefined : args.roots,
-          args.excludes === undefined ? undefined : args.excludes,
-        )
+        const result = await rt.rebuild(scope.roots, scope.excludes)
         return { ok: true as const, started: result.started }
       } catch (error) {
         return { ok: false as const, error: messageOf(error) }

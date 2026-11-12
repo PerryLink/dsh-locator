@@ -192,7 +192,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         asc: 'Ascending', descOrder: 'Descending',
         groupContent: 'Content', groupFiles: 'Files', groupDirs: 'Folders',
         relevance: 'by relevance', contentBuilding: 'indexing… {files} files / {messages} messages',
-        contentShort: 'Type at least 2 characters to search bodies and sessions',
+        contentShort: 'Type at least 3 characters to search bodies and sessions (Ctrl+F handles shorter queries)',
         contentDisabled: 'Content index is disabled (contentIndex: false)',
         contentCapped: 'first {n}', showing: 'first {n}', deduped: '{n} name hits merged into content', loading: 'Searching…',
         emptyQuery: 'Type to search file names, paths, bodies and sessions',
@@ -216,7 +216,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         findScope: 'In selection', findScopeChip: 'selection {n} chars', findSessionChip: 'this conversation',
         findNoMatch: 'No matches', findEmpty: 'Type to find in this conversation',
         findInvalidRegex: 'Invalid regular expression: {message}', findInvalidEscape: 'Invalid extended escape: {token}',
-        findTimeout: 'Regex timed out; simplify the expression', findWrappedTop: 'Wrapped to top',
+        findTimeout: 'Regex timed out; simplify the expression', findRegexUnavailable: 'Regex search is unavailable here (worker blocked)', findWrappedTop: 'Wrapped to top',
         findWrappedBottom: 'Wrapped to bottom', findNoWrapEnd: 'Reached the last match (wrap is off)',
         findNoWrapStart: 'Reached the first match (wrap is off)', findOlder: 'Load earlier messages and retry',
         findLoadingOlder: 'Loading earlier messages…', findLoadedOnly: 'loaded window only · earlier history not loaded',
@@ -226,6 +226,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelTotal: 'selected {index}/{total}', panelRangeAll: 'All indexed', panelRangeSession: 'This conversation',
         panelSessionHint: 'This scope searches indexed session messages only; press Ctrl+F for live in-conversation find',
         panelRegexPaused: 'Content scope paused in regex mode', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget reached; some files are not indexed', contentTooShort: 'Content needs at least 3 characters (use Ctrl+F for shorter searches)', contentTimeout: 'Content search timed out; narrow the query or scope', contentBadChars: 'Content search does not support NUL/control characters',
         panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
       },
       zh: {
@@ -236,7 +237,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         asc: '升序', descOrder: '降序',
         groupContent: '内容', groupFiles: '文件', groupDirs: '目录',
         relevance: '按相关度', contentBuilding: '索引构建中… {files} 文件 / {messages} 消息',
-        contentShort: '输入至少 2 个字符后搜索正文与会话',
+        contentShort: '输入至少 3 个字符后搜索正文与会话（更短的词请用 Ctrl+F）',
         contentDisabled: '内容索引已关闭（contentIndex: false）',
         contentCapped: '前 {n} 条', showing: '前 {n} 条', deduped: '{n} 条文件命中已并入内容', loading: '搜索中…',
         emptyQuery: '输入关键词：文件名、路径、正文或会话内容',
@@ -260,7 +261,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         findScope: '仅在选区内', findScopeChip: '选区 {n} 字', findSessionChip: '本会话',
         findNoMatch: '没有匹配', findEmpty: '输入关键词后在此会话中查找',
         findInvalidRegex: '正则无效：{message}', findInvalidEscape: '扩展转义无效：{token}',
-        findTimeout: '正则执行超时，请简化表达式', findWrappedTop: '已回到顶部',
+        findTimeout: '正则执行超时，请简化表达式', findRegexUnavailable: '此处无法运行正则（worker 被阻止）', findWrappedTop: '已回到顶部',
         findWrappedBottom: '已到底部，回到开头', findNoWrapEnd: '已到最后一个匹配（循环查找已关闭）',
         findNoWrapStart: '已到第一个匹配（循环查找已关闭）', findOlder: '加载更早消息后重试',
         findLoadingOlder: '正在加载更早消息…', findLoadedOnly: '仅已加载窗口 · 更早历史未加载',
@@ -270,6 +271,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelTotal: '已选 {index}/{total}', panelRangeAll: '全部索引', panelRangeSession: '当前会话',
         panelSessionHint: '此范围只查已索引的会话消息；实时查找请按 Ctrl+F',
         panelRegexPaused: '正则模式下内容范围暂停', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预算上限，部分文件未被收录', contentTooShort: '内容搜索至少需要 3 个字符（更短的词请用 Ctrl+F 在会话内查找）', contentTimeout: '内容搜索超时，请缩小关键词或范围', contentBadChars: '内容搜索不支持 NUL/控制字符',
         panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
       },
       es: {
@@ -280,7 +282,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         asc: 'Ascendente', descOrder: 'Descendente',
         groupContent: 'Contenido', groupFiles: 'Archivos', groupDirs: 'Carpetas',
         relevance: 'por relevancia', contentBuilding: 'indexando… {files} archivos / {messages} mensajes',
-        contentShort: 'Escribe al menos 2 caracteres para buscar contenido y sesiones',
+        contentShort: 'Escribe al menos 3 caracteres para buscar contenido y sesiones (Ctrl+F para consultas cortas)',
         contentDisabled: 'Índice de contenido desactivado (contentIndex: false)',
         contentCapped: 'primeros {n}', showing: 'primeros {n}', deduped: '{n} aciertos de nombre fusionados', loading: 'Buscando…',
         emptyQuery: 'Escribe para buscar nombres, rutas, contenido y sesiones',
@@ -304,7 +306,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         findScope: 'En la selección', findScopeChip: 'selección {n} caracteres', findSessionChip: 'esta conversación',
         findNoMatch: 'Sin coincidencias', findEmpty: 'Escribe para buscar en esta conversación',
         findInvalidRegex: 'Expresión regular no válida: {message}', findInvalidEscape: 'Escape extendido no válido: {token}',
-        findTimeout: 'La regex agotó el tiempo; simplifícala', findWrappedTop: 'Vuelto al inicio',
+        findTimeout: 'La regex agotó el tiempo; simplifícala', findRegexUnavailable: 'La búsqueda regex no está disponible aquí (worker bloqueado)', findWrappedTop: 'Vuelto al inicio',
         findWrappedBottom: 'Vuelto al final', findNoWrapEnd: 'Última coincidencia (continuación desactivada)',
         findNoWrapStart: 'Primera coincidencia (continuación desactivada)', findOlder: 'Cargar mensajes anteriores y reintentar',
         findLoadingOlder: 'Cargando mensajes anteriores…', findLoadedOnly: 'solo ventana cargada · historial anterior sin cargar',
@@ -314,6 +316,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelTotal: 'seleccionado {index}/{total}', panelRangeAll: 'Todo el índice', panelRangeSession: 'Esta conversación',
         panelSessionHint: 'Este ámbito solo busca mensajes indexados; pulsa Ctrl+F para buscar en vivo',
         panelRegexPaused: 'Ámbito de contenido en pausa en modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el presupuesto del índice; algunos archivos no están indexados', contentTooShort: 'El contenido requiere al menos 3 caracteres (usa Ctrl+F para búsquedas más cortas)', contentTimeout: 'La búsqueda de contenido agotó el tiempo; reduce la consulta o el ámbito', contentBadChars: 'La búsqueda de contenido no admite NUL/caracteres de control',
         panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
       },
       pt: {
@@ -324,7 +327,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         asc: 'Ascendente', descOrder: 'Descendente',
         groupContent: 'Conteúdo', groupFiles: 'Arquivos', groupDirs: 'Pastas',
         relevance: 'por relevância', contentBuilding: 'indexando… {files} arquivos / {messages} mensagens',
-        contentShort: 'Digite pelo menos 2 caracteres para buscar conteúdo e sessões',
+        contentShort: 'Digite pelo menos 3 caracteres para buscar conteúdo e sessões (Ctrl+F para consultas curtas)',
         contentDisabled: 'Índice de conteúdo desativado (contentIndex: false)',
         contentCapped: 'primeiros {n}', showing: 'primeiros {n}', deduped: '{n} acertos de nome mesclados', loading: 'Buscando…',
         emptyQuery: 'Digite para buscar nomes, caminhos, conteúdo e sessões',
@@ -348,7 +351,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         findScope: 'Na seleção', findScopeChip: 'seleção {n} caracteres', findSessionChip: 'esta conversa',
         findNoMatch: 'Sem resultados', findEmpty: 'Digite para buscar nesta conversa',
         findInvalidRegex: 'Expressão regular inválida: {message}', findInvalidEscape: 'Escape estendido inválido: {token}',
-        findTimeout: 'A regex excedeu o tempo; simplifique', findWrappedTop: 'Voltou ao início',
+        findTimeout: 'A regex excedeu o tempo; simplifique', findRegexUnavailable: 'A busca regex não está disponível aqui (worker bloqueado)', findWrappedTop: 'Voltou ao início',
         findWrappedBottom: 'Voltou ao fim', findNoWrapEnd: 'Última ocorrência (continuação desativada)',
         findNoWrapStart: 'Primeira ocorrência (continuação desativada)', findOlder: 'Carregar mensagens anteriores e tentar novamente',
         findLoadingOlder: 'Carregando mensagens anteriores…', findLoadedOnly: 'apenas janela carregada · histórico anterior não carregado',
@@ -358,6 +361,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelTotal: 'selecionado {index}/{total}', panelRangeAll: 'Todo o índice', panelRangeSession: 'Esta conversa',
         panelSessionHint: 'Este escopo busca apenas mensagens indexadas; use Ctrl+F para buscar ao vivo',
         panelRegexPaused: 'Escopo de conteúdo pausado no modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índice foi atingido; alguns arquivos não estão indexados', contentTooShort: 'O conteúdo exige pelo menos 3 caracteres (use Ctrl+F para buscas menores)', contentTimeout: 'A busca de conteúdo excedeu o tempo; reduza a consulta ou o escopo', contentBadChars: 'A busca de conteúdo não suporta NUL/caracteres de controle',
         panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
       },
       hi: {
@@ -368,7 +372,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         asc: 'आरोही', descOrder: 'अवरोही',
         groupContent: 'सामग्री', groupFiles: 'फ़ाइलें', groupDirs: 'फ़ोल्डर',
         relevance: 'प्रासंगिकता से', contentBuilding: 'इंडेक्स बन रहा है… {files} फ़ाइलें / {messages} संदेश',
-        contentShort: 'सामग्री और सत्र खोजने के लिए कम से कम 2 अक्षर लिखें',
+        contentShort: 'सामग्री और सत्र खोजने के लिए कम से कम 3 अक्षर लिखें (छोटी खोज के लिए Ctrl+F)',
         contentDisabled: 'सामग्री इंडेक्स बंद है (contentIndex: false)',
         contentCapped: 'पहले {n}', showing: 'पहले {n}', deduped: '{n} नाम-परिणाम सामग्री में मिलाए', loading: 'खोज रहे हैं…',
         emptyQuery: 'नाम, पथ, सामग्री और सत्र खोजने के लिए लिखें',
@@ -392,7 +396,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         findScope: 'चयन में', findScopeChip: 'चयन {n} अक्षर', findSessionChip: 'यह बातचीत',
         findNoMatch: 'कोई मेल नहीं', findEmpty: 'इस बातचीत में खोजने के लिए लिखें',
         findInvalidRegex: 'अमान्य रेगुलर एक्सप्रेशन: {message}', findInvalidEscape: 'अमान्य विस्तृत एस्केप: {token}',
-        findTimeout: 'रेगेक्स का समय समाप्त; सरल बनाएँ', findWrappedTop: 'शीर्ष पर लौटा',
+        findTimeout: 'रेगेक्स का समय समाप्त; सरल बनाएँ', findRegexUnavailable: 'यहाँ रेगेक्स उपलब्ध नहीं है (वर्कर अवरुद्ध)', findWrappedTop: 'शीर्ष पर लौटा',
         findWrappedBottom: 'अंत पर लौटा', findNoWrapEnd: 'अंतिम मेल (चक्र बंद)',
         findNoWrapStart: 'पहला मेल (चक्र बंद)', findOlder: 'पुराने संदेश लोड कर पुन: प्रयास',
         findLoadingOlder: 'पुराने संदेश लोड हो रहे हैं…', findLoadedOnly: 'केवल लोडेड विंडो · पुराना इतिहास लोड नहीं',
@@ -402,6 +406,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelTotal: 'चयनित {index}/{total}', panelRangeAll: 'पूरा इंडेक्स', panelRangeSession: 'यह बातचीत',
         panelSessionHint: 'यह क्षेत्र केवल इंडेक्स किए संदेश खोजता है; लाइव खोज के लिए Ctrl+F दबाएँ',
         panelRegexPaused: 'रेगेक्स मोड में सामग्री क्षेत्र रुका है', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+contentWarning: 'इंडेक्स चेतावनी: {list}', contentBudget: 'सामग्री इंडेक्स बजट पूरा; कुछ फ़ाइलें इंडेक्स नहीं हैं', contentTooShort: 'सामग्री के लिए कम से कम 3 अक्षर चाहिए (छोटी खोज के लिए Ctrl+F)', contentTimeout: 'सामग्री खोज का समय समाप्त; क्वेरी या क्षेत्र घटाएँ', contentBadChars: 'सामग्री खोज NUL/नियंत्रण अक्षर नहीं लेती',
         panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
       },
     }
@@ -540,7 +545,8 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
     const HL_BASE = 'dsh-locator-find'
     const HL_ACTIVE = 'dsh-locator-find-active'
     const GESTURES = ['wheel', 'touchstart', 'pointerdown', 'keydown']
-    const EXCLUDED = '[hidden],[data-chat-history],[data-text-interaction-surface],[data-composer-seat],script,style'
+    const EXCLUDED = '[hidden],[data-chat-history],[data-text-interaction-surface],[data-composer-seat],script,style,'
+      + '.sr-only,[class*="visuallyHidden"],[role="status"],[aria-live]'
     const BLOCK_SELECTOR = 'p,li,pre,td,th,h1,h2,h3,h4,h5,h6,blockquote,dd,dt'
     const legacyTargets = new Set()
 
@@ -611,21 +617,28 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       return scope === null ? null : scope.querySelector('[data-chat-flow]')
     }
 
-    function findMessageRow(flow, messageId, nodeKey) {
-      if (flow === null) return null
+    function findMessageRows(flow, messageId, nodeKey) {
+      if (flow === null) return []
       const rows = flow.querySelectorAll('[data-chat-node-key]')
+      const exact = []
       if (nodeKey) {
         for (const row of rows) {
-          if (row.getAttribute('data-chat-node-key') === String(nodeKey)) return row
+          if (row.getAttribute('data-chat-node-key') === String(nodeKey)) exact.push(row)
         }
       }
-      if (!messageId) return null
-      const id = String(messageId)
-      for (const row of rows) {
-        const key = row.getAttribute('data-chat-node-key') || ''
-        if (key === id || key.endsWith(id)) return row
+      if (exact.length === 0 && messageId) {
+        const id = String(messageId)
+        for (const row of rows) {
+          const key = row.getAttribute('data-chat-node-key') || ''
+          if (key === id || key.endsWith(id)) exact.push(row)
+        }
       }
-      return null
+      // A single assistant step can be rendered as a reasoning row and a
+      // response row under the same node key; prefer the response row.
+      return exact.sort((left, right) => {
+        const score = row => row.getAttribute('data-chat-group-part') === 'response' ? 0 : 1
+        return score(left) - score(right)
+      })
     }
 
     function needlesFromQuery(query) {
@@ -635,57 +648,173 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       return [...new Set(words)].sort((a, b) => b.length - a.length).slice(0, 8)
     }
 
-    function inlineGroups(root) {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    function projectGroups(root, excluded) {
+      if (root === null) return []
       const groups = new Map()
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+        acceptNode(node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.matches(excluded)) return NodeFilter.FILTER_REJECT
+            if (node.tagName === 'BR') return NodeFilter.FILTER_ACCEPT
+            return NodeFilter.FILTER_SKIP
+          }
+          return NodeFilter.FILTER_ACCEPT
+        },
+      })
+      const groupFor = block => {
+        let group = groups.get(block)
+        if (group === undefined) {
+          group = {
+            block, raw: '', rawLength: 0, text: '', runs: [], nodes: [], breaks: [],
+            collapse: !(block instanceof Element && block.tagName === 'PRE'),
+          }
+          groups.set(block, group)
+        }
+        return group
+      }
+      const appendText = (group, node) => {
+        const value = node.nodeValue || ''
+        if (value === '') return
+        group.nodes.push({ node, start: group.raw.length, end: group.raw.length + value.length })
+        group.raw += value
+      }
+      const appendBreak = group => {
+        group.breaks.push(group.raw.length)
+        group.raw += '\u0000'
+      }
       let node = walker.nextNode()
       while (node !== null) {
         const parent = node.parentElement
-        if (parent !== null && parent.closest(EXCLUDED) === null) {
-          const value = node.nodeValue || ''
-          if (value !== '') {
-            const block = parent.closest(BLOCK_SELECTOR) || root
-            let group = groups.get(block)
-            if (group === undefined) { group = { nodes: [], text: '' }; groups.set(block, group) }
-            group.nodes.push(node)
-            group.text += value
+        if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
+          if (parent !== null && parent.closest(excluded) === null) {
+            const block = parent.closest(BLOCK_SELECTOR)
+              || parent.closest('[data-text-interaction-source]')
+              || parent.closest('[data-chat-node-key]')
+              || root
+            appendBreak(groupFor(block))
           }
+        } else if (parent !== null && parent.closest(excluded) === null) {
+          const block = parent.closest(BLOCK_SELECTOR)
+            || parent.closest('[data-text-interaction-source]')
+            || parent.closest('[data-chat-node-key]')
+            || root
+          appendText(groupFor(block), node)
         }
         node = walker.nextNode()
+      }
+      // Project the concatenated raw text once per block. Soft newlines and
+      // repeated whitespace become one space outside <pre>; <br> becomes a
+      // separator. rums maps projected offsets back to raw offsets without
+      // allocating one object per character (a multi-MB transcript would
+      // otherwise create millions of position objects).
+      for (const group of groups.values()) {
+        const raw = group.raw
+        group.rawLength = raw.length
+        if (!group.collapse) {
+          group.text = raw.replace(/\u0000/g, '\n')
+          group.runs = []
+          continue
+        }
+        let text = ''
+        const runs = []
+        let index = 0
+        while (index < raw.length) {
+          const char = raw[index]
+          if (char === '\u0000' || /\s/u.test(char)) {
+            const start = index
+            while (index < raw.length && (raw[index] === '\u0000' || /\s/u.test(raw[index]))) index++
+            runs.push({ rawStart: start, rawLength: index - start, projectedStart: text.length })
+            text += ' '
+          } else {
+            text += char
+            index++
+          }
+        }
+        group.text = text
+        group.runs = runs
       }
       return [...groups.values()]
     }
 
-    function offsetInGroup(group, index) {
-      let consumed = 0
-      for (const node of group.nodes) {
-        const length = (node.nodeValue || '').length
-        if (index <= consumed + length) return [node, index - consumed]
-        consumed += length
+    function inlineGroups(root) {
+      return projectGroups(root, EXCLUDED)
+    }
+
+    function projectedToRaw(group, index, isEnd) {
+      if (!group.collapse) return Math.max(0, Math.min(group.rawLength, index))
+      let extra = 0
+      for (const run of group.runs) {
+        if (run.projectedStart < index || (isEnd && run.projectedStart === index)) extra += run.rawLength - 1
+        else break
+      }
+      return Math.max(0, Math.min(group.rawLength, index + extra))
+    }
+
+    function rawToProjected(group, raw) {
+      if (!group.collapse) return Math.max(0, Math.min(group.rawLength, raw))
+      let extra = 0
+      for (const run of group.runs) {
+        const end = run.rawStart + run.rawLength
+        if (raw >= end) extra += run.rawLength - 1
+        else if (raw > run.rawStart) return run.projectedStart
+        else break
+      }
+      return Math.max(0, Math.min(group.rawLength, raw - extra))
+    }
+
+    function pointForRaw(group, raw, isEnd) {
+      for (const entry of group.nodes) {
+        if (raw < entry.start) continue
+        if (raw <= entry.end) return { node: entry.node, offset: Math.min(raw - entry.start, entry.end - entry.start) }
+      }
+      for (const br of group.breaks) {
+        if (raw !== br) continue
+        if (isEnd) {
+          for (let i = group.nodes.length - 1; i >= 0; i--) {
+            const entry = group.nodes[i]
+            if (entry.end <= br) return { node: entry.node, offset: entry.end - entry.start }
+          }
+        } else {
+          for (const entry of group.nodes) {
+            if (entry.start > br) return { node: entry.node, offset: 0 }
+          }
+        }
       }
       const last = group.nodes[group.nodes.length - 1]
-      return [last, (last.nodeValue || '').length]
+      return last === undefined ? null : { node: last.node, offset: last.end - last.start }
+    }
+
+    function positionAt(group, index, isEnd) {
+      const raw = projectedToRaw(group, index, isEnd)
+      return pointForRaw(group, raw, isEnd)
+    }
+
+    function rangeAt(group, start, end) {
+      const from = positionAt(group, start, false)
+      const to = positionAt(group, end, true)
+      if (from === null || to === null) return null
+      const range = document.createRange()
+      try {
+        range.setStart(from.node, from.offset)
+        range.setEnd(to.node, to.offset)
+        return range
+      } catch {
+        return null
+      }
     }
 
     function rangesForNeedles(root, needles) {
       const ranges = []
       if (root === null || needles.length === 0) return ranges
+      const patterns = needles.map(escapeRegExp)
+      const expression = new RegExp(patterns.join('|'), 'giu')
       for (const group of inlineGroups(root)) {
-        const lower = group.text.toLowerCase()
-        for (const needle of needles) {
-          const target = needle.toLowerCase()
-          let from = 0
-          while (ranges.length < 200) {
-            const index = lower.indexOf(target, from)
-            if (index < 0) break
-            const start = offsetInGroup(group, index)
-            const end = offsetInGroup(group, index + target.length)
-            const range = document.createRange()
-            range.setStart(start[0], start[1])
-            range.setEnd(end[0], end[1])
-            ranges.push(range)
-            from = index + target.length
-          }
+        expression.lastIndex = 0
+        let match
+        while (ranges.length < 200 && (match = expression.exec(group.text)) !== null) {
+          if (match[0].length === 0) { expression.lastIndex++; continue }
+          const range = rangeAt(group, match.index, match.index + match[0].length)
+          if (range !== null) ranges.push(range)
         }
       }
       return ranges
@@ -718,16 +847,12 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
     function phraseRange(root, snippet) {
       if (root === null) return null
       for (const phrase of phraseCandidates(snippet)) {
-        const needle = phrase.toLowerCase()
+        const expression = new RegExp(escapeRegExp(phrase), 'iu')
         for (const group of inlineGroups(root)) {
-          const index = group.text.toLowerCase().indexOf(needle)
-          if (index < 0) continue
-          const start = offsetInGroup(group, index)
-          const end = offsetInGroup(group, index + needle.length)
-          const range = document.createRange()
-          range.setStart(start[0], start[1])
-          range.setEnd(end[0], end[1])
-          return range
+          const match = expression.exec(group.text)
+          if (match === null) continue
+          const range = rangeAt(group, match.index, match.index + match[0].length)
+          if (range !== null) return range
         }
       }
       return null
@@ -851,15 +976,26 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       if (flow === null) { showNotice(t('jumpFailed')); return false }
       const needles = needlesFromQuery(query)
       const finder = () => {
-        const row = findMessageRow(flow, hit.messageId, hit.nodeKey)
-        if (row !== null) {
-          expandHidden(row)
-          const ranges = rangesForNeedles(row, needles)
-          if (ranges.length > 0) return { row, ranges }
-          const phrase = phraseRange(row, hit.snippet)
-          if (phrase !== null) return { row, ranges: [phrase] }
+        const rows = findMessageRows(flow, hit.messageId, hit.nodeKey)
+        if (rows.length > 0) {
+          for (const row of rows) {
+            expandHidden(row)
+            const ranges = rangesForNeedles(row, needles)
+            if (ranges.length > 0) return { row, ranges }
+            const phrase = phraseRange(row, hit.snippet)
+            if (phrase !== null) {
+              // Keep the phrase range inside the anchored row instead of
+              // falling through to a wrong copy elsewhere in the transcript.
+              const inside = row.contains(phrase.commonAncestorContainer)
+              if (inside) return { row, ranges: [phrase] }
+            }
+          }
           return null
         }
+        // With an exact node key there is nothing safe to fall back to in the
+        // already loaded window; wait for older pages instead of landing on a
+        // similar phrase in a different message.
+        if (hit.nodeKey || hit.messageId) return null
         const phrase = phraseRange(flow, hit.snippet)
         if (phrase === null) return null
         expandHidden(phrase.startContainer)
@@ -872,7 +1008,6 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       let target = await waitFor(flow, finder, 6_000, 120)
       for (let attempt = 0; target === null && attempt < 10; attempt++) {
         if (stale()) return false
-        for (const hidden of flow.querySelectorAll('[hidden="until-found"]')) hidden.dispatchEvent(new Event('beforematch'))
         if (!revealOlder(scope)) break
         target = await waitFor(flow, finder, 1_500, 150)
       }
@@ -961,7 +1096,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
     const FIND_BLOCK_SELECTOR = 'p,li,pre,td,th,h1,h2,h3,h4,h5,h6,blockquote,dd,dt'
     const FIND_EXCLUDED = '[hidden]:not([hidden="until-found"]),[data-chat-history],[data-text-interaction-surface],'
       + '[data-composer-seat],[data-text-interaction-exclude],script,style,button,input,textarea,select,'
-      + '.sr-only,.katex-mathml,[aria-hidden="true"]:not(.katex-html)'
+      + '.sr-only,[class*="visuallyHidden"],[role="status"],[aria-live],.katex-mathml,[aria-hidden="true"]:not(.katex-html)'
 
     function createFindStore() {
       const listeners = new Set()
@@ -1120,13 +1255,17 @@ self.onmessage = event => {
       }
       if (mode !== 'regex') source = escapeRegExp(source)
       const flags = 'g' + (caseSensitive ? '' : 'i')
+      // Prefer the Unicode flag so \p{...}, astral literals and modern syntax
+      // behave as users expect. Fall back once for legacy patterns that the
+      // unicode grammar rejects (for example some lone escapes).
       try {
-        return { source, flags: /[\u{10000}-\u{10FFFF}]/u.test(source) ? flags + 'u' : flags, re: new RegExp(source, flags) }
+        return { source, flags: flags + 'u', re: new RegExp(source, flags + 'u') }
       } catch (error) {
-        if (mode === 'regex') {
-          try { return { source, flags: flags + 'u', re: new RegExp(source, flags + 'u') } } catch { /* fall through */ }
+        try {
+          return { source, flags, re: new RegExp(source, flags) }
+        } catch (fallbackError) {
+          return { error: t('findInvalidRegex', { message: String(fallbackError && fallbackError.message || fallbackError).slice(0, 140) }) }
         }
-        return { error: t('findInvalidRegex', { message: String(error && error.message || error).slice(0, 140) }) }
       }
     }
 
@@ -1139,67 +1278,38 @@ self.onmessage = event => {
     }
 
     function collectFindGroups(root) {
-      if (root === null) return []
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-      const groups = new Map()
-      let node = walker.nextNode()
-      while (node !== null) {
-        const parent = node.parentElement
-        if (parent !== null && parent.closest(FIND_EXCLUDED) === null) {
-          const value = node.nodeValue || ''
-          if (value !== '') {
-            const block = parent.closest(FIND_BLOCK_SELECTOR)
-              || parent.closest('[data-text-interaction-source]')
-              || parent.closest('[data-chat-node-key]')
-              || root
-            let group = groups.get(block)
-            if (group === undefined) { group = { block, nodes: [], text: '', starts: [] }; groups.set(block, group) }
-            group.starts.push(group.text.length)
-            group.nodes.push(node)
-            group.text += value
-          }
-        }
-        node = walker.nextNode()
-      }
-      return [...groups.values()]
+      return projectGroups(root, FIND_EXCLUDED)
     }
 
     function clipForGroup(group, range) {
       if (range === null) return null
-      let start = null
-      let end = null
-      let position = 0
-      for (const node of group.nodes) {
-        const length = (node.nodeValue || '').length
+      let rawStart = null
+      let rawEnd = null
+      for (const entry of group.nodes) {
+        const node = entry.node
+        const length = entry.end - entry.start
+        try {
+          if (!range.intersectsNode(node)) continue
+        } catch { continue }
         let nodeStart = 0
         let nodeEnd = length
-        try {
-          if (!range.intersectsNode(node)) { position += length; continue }
-        } catch { position += length; continue }
         if (node === range.startContainer) nodeStart = range.startOffset
         if (node === range.endContainer) nodeEnd = range.endOffset
         if (nodeStart < nodeEnd) {
-          if (start === null) start = position + nodeStart
-          end = position + nodeEnd
+          if (rawStart === null) rawStart = entry.start + nodeStart
+          rawEnd = entry.start + nodeEnd
         }
-        position += length
       }
-      if (start === null || end === null || start >= end) return null
+      if (rawStart === null || rawEnd === null) return null
+      const start = rawToProjected(group, rawStart)
+      const end = rawToProjected(group, rawEnd)
+      if (start >= end) return null
       return [start, end]
     }
 
     function rangeForGroupOffsets(group, start, end) {
       if (group.nodes.length === 0) return null
-      const startOffset = offsetInGroup(group, start)
-      const endOffset = offsetInGroup(group, end)
-      const range = document.createRange()
-      try {
-        range.setStart(startOffset[0], startOffset[1])
-        range.setEnd(endOffset[0], endOffset[1])
-        return range
-      } catch {
-        return null
-      }
+      return rangeAt(group, start, end)
     }
 
     function findHistoryButton(scope) {
@@ -1227,6 +1337,8 @@ self.onmessage = event => {
       const debounceRef = useRef(0)
       const observerRef = useRef(null)
       const revealTimersRef = useRef([])
+      const revealFrameRef = useRef(0)
+      const loadOlderTimerRef = useRef(0)
       const returnFocusRef = useRef(null)
       const [anchor, setAnchor] = useState(null)
       const composingRef = useRef(false)
@@ -1248,7 +1360,9 @@ self.onmessage = event => {
           if (!match.range.startContainer.isConnected) return
           centerRange(match.range)
         }
-        requestAnimationFrame(run)
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(revealFrameRef.current)
+        revealFrameRef.current = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(run) : 0
+        if (revealFrameRef.current === 0) run()
         for (const delay of [80, 240]) {
           const timer = setTimeout(run, delay)
           revealTimersRef.current.push(timer)
@@ -1302,7 +1416,11 @@ self.onmessage = event => {
         let selectionRange = null
         if (state.scope === 'selection' && state.selection) {
           selectionRange = state.selection.range
-          if (!selectionRange.startContainer.isConnected) {
+          let selectionDead = !selectionRange.startContainer.isConnected || selectionRange.collapsed
+          if (!selectionDead) {
+            try { selectionDead = selectionRange.toString().trim() === '' } catch { selectionDead = true }
+          }
+          if (selectionDead) {
             findStore.set({ scope: 'session', selection: null, hint: t('findSelectionLost') })
             return
           }
@@ -1322,12 +1440,20 @@ self.onmessage = event => {
           texts.push(text)
           clips.push(clip === null ? [0, group.text.length] : clip)
         }
+        if (selectionRange !== null && clips.every(clip => clip === null)) {
+          findStore.set({ scope: 'session', selection: null, hint: t('findSelectionLost') })
+          return
+        }
         let rawMatches = null
         let capped = false
         if (state.mode === 'regex') {
           try {
             const result = await scanRegexInWorker(texts.filter(text => text !== null), compiled.source, compiled.flags)
             if (token !== sequenceRef.current) return
+            if (result === null) {
+              findStore.set({ count: 0, index: -1, capped: false, status: 'error', error: t('findRegexUnavailable') })
+              return
+            }
             if (result !== null) {
               if (result.timeout === true) {
                 matchesRef.current = []
@@ -1438,10 +1564,11 @@ self.onmessage = event => {
           debounceRef.current = setTimeout(() => { if (findStore.get().open) void runScanRef.current(true) }, 400)
         }
         const scope = scopeRef.current
-        if (scope !== null) {
+        const observed = scope === null ? null : (chatFlow(scope) || scope)
+        if (observed !== null) {
           try {
             observer = new MutationObserver(schedule)
-            observer.observe(scope, { childList: true, subtree: true, characterData: true })
+            observer.observe(observed, { childList: true, subtree: true, characterData: true })
           } catch { /* observer unavailable */ }
         }
         return () => {
@@ -1451,6 +1578,8 @@ self.onmessage = event => {
           if (observer !== null) observer.disconnect()
           for (const id of revealTimersRef.current) clearTimeout(id)
           revealTimersRef.current = []
+          if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(revealFrameRef.current)
+          clearTimeout(loadOlderTimerRef.current)
           sequenceRef.current++
           clearFindHighlight('find')
           setFindScope(null)
@@ -1495,7 +1624,10 @@ self.onmessage = event => {
           if (text !== '') { event.preventDefault(); copyText(text).then(() => findStore.set({ hint: t('findCopied') })).catch(() => {}) }
         }
       }
-      const pickMode = event => { findStore.set({ mode: event.target.value }) }
+      const pickMode = event => {
+        findStore.set({ mode: event.target.value })
+        if (inputRef.current !== null) inputRef.current.focus()
+      }
       const toggle = key => { findStore.set({ [key]: !findStore.get()[key] }) }
       const toggleScope = () => {
         if (state.scope === 'selection') findStore.set({ scope: 'session', selection: null, hint: '' })
@@ -1513,7 +1645,8 @@ self.onmessage = event => {
       const loadOlder = () => {
         if (scopeRef.current === null || !revealOlder(scopeRef.current)) return
         findStore.set({ hint: t('findLoadingOlder') })
-        setTimeout(() => { if (findStore.get().open) void runScanRef.current(true) }, 700)
+        clearTimeout(loadOlderTimerRef.current)
+        loadOlderTimerRef.current = setTimeout(() => { if (findStore.get().open) void runScanRef.current(true) }, 700)
       }
       return h('div', {
         ref: barRef,
@@ -1551,7 +1684,10 @@ self.onmessage = event => {
           h('button', { className: 'dsh-locator-findbar-btn', title: t('findClose'), 'aria-label': t('findClose'),
             onClick: () => closeFind() }, '×'),
         ),
-        h('div', { className: 'dsh-locator-findbar-opts' },
+        h('div', { className: 'dsh-locator-findbar-opts', onMouseDown: event => {
+          if (event.target instanceof HTMLSelectElement) return
+          event.preventDefault()
+        } },
           h('label', { className: 'dsh-locator-findbar-label' }, t('findMode'),
             h('select', { value: state.mode, onChange: pickMode, 'aria-label': t('findMode') },
               h('option', { value: 'normal' }, t('modeNormal')),
@@ -1613,6 +1749,8 @@ self.onmessage = event => {
       const panelRef = useRef(null)
       const abortRef = useRef(null)
       const listRef = useRef(null)
+      const toastTimerRef = useRef(0)
+      const insertTimerRef = useRef(0)
 
       const close = useCallback(() => store.set(false), [])
       const activeScope = conversationScope('')
@@ -1628,7 +1766,9 @@ self.onmessage = event => {
 
       useEffect(() => {
         if (!open) return undefined
+        if (sessionOnly && activeSessionId === '') setSessionOnly(false)
         closeFind()
+        setGroups(null)
         const previous = document.activeElement
         setError('')
         const timer = setTimeout(() => {
@@ -1639,9 +1779,24 @@ self.onmessage = event => {
         }, 30)
         return () => {
           clearTimeout(timer)
+          if (abortRef.current !== null) { abortRef.current.abort(); abortRef.current = null }
+          setGroups(null)
           if (previous instanceof HTMLElement && previous.isConnected) previous.focus()
         }
-      }, [open])
+      }, [open, sessionOnly, activeSessionId])
+
+      useEffect(() => {
+        if (!open) return undefined
+        const onDocumentKey = event => {
+          if (event.key !== 'Escape' || event.defaultPrevented) return
+          const target = event.target
+          if (target instanceof Element && target.closest('.dsh-locator-panel') !== null) return
+          event.preventDefault()
+          close()
+        }
+        document.addEventListener('keydown', onDocumentKey, true)
+        return () => document.removeEventListener('keydown', onDocumentKey, true)
+      }, [open, close])
 
       useEffect(() => {
         if (!open) return undefined
@@ -1742,7 +1897,12 @@ self.onmessage = event => {
 
       const notify = useCallback(message => {
         setToast(message)
-        setTimeout(() => setToast(''), 1600)
+        clearTimeout(toastTimerRef.current)
+        toastTimerRef.current = setTimeout(() => setToast(''), 1600)
+      }, [])
+      useEffect(() => () => {
+        clearTimeout(toastTimerRef.current)
+        clearTimeout(insertTimerRef.current)
       }, [])
 
       const copy = useCallback(hit => {
@@ -1774,7 +1934,8 @@ self.onmessage = event => {
         if (!hit || hit.kind === 'session' || loading) return
         const mention = '@"' + hit.path.replace(/"/g, '') + '" '
         close()
-        setTimeout(() => {
+        clearTimeout(insertTimerRef.current)
+        insertTimerRef.current = setTimeout(() => {
           if (insertIntoComposer(mention)) notify(t('inserted'))
           else copyText(mention).then(() => notify(t('insertFailed'))).catch(() => {})
         }, 80)
@@ -1806,7 +1967,8 @@ self.onmessage = event => {
           && (event.target.tagName === 'BUTTON' || event.target.tagName === 'SELECT'
             || (event.target.tagName === 'INPUT' && event.target.type !== 'text'))
         if (interactive) return
-        const scopeDigit = event.altKey
+        const altGraph = typeof event.getModifierState === 'function' && event.getModifierState('AltGraph')
+        const scopeDigit = event.altKey && !event.ctrlKey && !event.metaKey && !altGraph
           ? (event.code === 'Digit1' ? '1' : event.code === 'Digit2' ? '2' : event.code === 'Digit3' ? '3' : ['1', '2', '3'].includes(event.key) ? event.key : '')
           : ''
         if (scopeDigit !== '') {
@@ -1908,6 +2070,7 @@ self.onmessage = event => {
       const groupHead = (key, label, count, note) => h('div', {
         className: 'dsh-locator-grouphead',
         id: 'dsh-locator-group-' + key,
+        onMouseDown: event => event.preventDefault(),
       },
         h('span', null, label),
         h('span', { className: 'dsh-locator-count' }, String(count)),
@@ -1934,6 +2097,7 @@ self.onmessage = event => {
           className: 'dsh-locator-row' + (isContent ? ' dsh-locator-rowcontent' : '') + (index === selected ? ' sel' : ''),
           title: hit.path,
           onClick: () => setSelected(index),
+          onMouseDown: event => event.preventDefault(),
           onDoubleClick: () => activate(hit),
         },
           h('div', { className: 'dsh-locator-title' },
@@ -1948,32 +2112,46 @@ self.onmessage = event => {
         )
       }
 
+      const contentErrorText = code => {
+        if (code === 'content-regex-not-supported') return t('panelRegexPaused')
+        if (code === 'content-query-too-short') return t('contentTooShort')
+        if (code === 'content-search-timeout') return t('contentTimeout')
+        if (code === 'invalid-control-char') return t('contentBadChars')
+        return code
+      }
       let index = -1
       const renderGroup = (key, label, group, extra) => {
         if (!scopes[key] || group === undefined) return null
         const hits = Array.isArray(group.hits) ? group.hits : []
         const count = typeof group.returned === 'number' ? group.returned : hits.length
+        const warnings = Array.isArray(group.warnings) && group.warnings.length > 0
+          ? t('contentWarning', { list: group.warnings.join(', ') })
+          : null
+        const budget = key === 'content' && group.truncated === true ? t('contentBudget') : null
         const note = key === 'content'
           ? (matchMode === 'regex' ? t('panelRegexPaused')
             : contentBuilding ? t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
               : (content?.capped ? t('contentCapped', { n: count }) : (query.trim() !== '' ? t('relevance') : null)))
           : (group.deduped > 0 ? t('deduped', { n: group.deduped }) : (group.truncated ? t('showing', { n: hits.length }) : null))
+        const combinedNote = [note, warnings, budget].filter(value => value !== null && value !== '').join(' · ')
         if (typeof group.error === 'string' && group.error !== '') {
-          const message = group.error === 'content-regex-not-supported' ? t('panelRegexPaused') : group.error
+          const informational = ['content-regex-not-supported', 'content-query-too-short', 'invalid-control-char'].includes(group.error)
+          const message = contentErrorText(group.error)
           return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
-            groupHead(key, label, count, null),
-            h('div', { className: 'dsh-locator-groupempty', role: 'alert' }, t('errorPrefix') + message,
-              h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry'))),
+            groupHead(key, label, countLabel(group, count), combinedNote === '' ? null : combinedNote),
+            h('div', { className: 'dsh-locator-groupempty', role: informational ? 'status' : 'alert' },
+              informational ? message : t('errorPrefix') + message,
+              informational ? null : h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry'))),
           )
         }
         return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
-          groupHead(key, label, countLabel(group, count), note),
+          groupHead(key, label, countLabel(group, count), combinedNote === '' ? null : combinedNote),
           extra === undefined ? null : extra,
           hits.length === 0
             ? h('div', { className: 'dsh-locator-groupempty' },
                 key === 'content' && scopes.content
-                  ? (sessionOnly && query.trim().length >= 2 ? t('panelSessionHint')
-                    : query.trim().length < 2 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
+                  ? (sessionOnly && query.trim().length >= 3 ? t('panelSessionHint')
+                    : query.trim().length < 3 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
                   : (query.trim() === '' ? t('emptyQuery') : t('emptyResults')))
             : hits.map(hit => { index++; return rowFor(key, hit, index) }),
         )
@@ -2077,7 +2255,12 @@ self.onmessage = event => {
                 ],
         ),
         h('div', { className: 'dsh-locator-foot' },
-          h('span', null, (loading ? t('loading') + ' · ' : '') + t('results', { content: contentCount, files: filesCount, dirs: dirsCount, ms: took.toFixed(1) })
+          h('span', null, (loading ? t('loading') + ' · ' : '') + t('results', {
+            content: contentCountText || '0',
+            files: filesCountText || '0',
+            dirs: dirsCountText || '0',
+            ms: took.toFixed(1),
+          })
             + (status && status.scanning ? ' · ' + t('indexing') : '')
             + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
@@ -2113,12 +2296,16 @@ self.onmessage = event => {
         }, 'dsh-locator: styles')
         ctx.effect(() => {
           const onKey = event => {
-            if ((event.metaKey || event.ctrlKey) && event.shiftKey && String(event.key).toLowerCase() === 'f') {
-              event.preventDefault()
-              event.stopPropagation()
-              closeFind()
-              store.toggle()
-            }
+            if (event.defaultPrevented || event.isComposing || event.repeat) return
+            if (!((event.metaKey || event.ctrlKey) && event.shiftKey && String(event.key).toLowerCase() === 'f')) return
+            const target = event.target
+            if (target instanceof Element && target.closest('.xterm,.monaco-editor,[data-code-editor]') !== null) return
+            const foreignModal = document.querySelector('[role="dialog"][aria-modal="true"]:not(.dsh-locator-panel)')
+            if (foreignModal !== null) return
+            event.preventDefault()
+            event.stopPropagation()
+            closeFind()
+            store.toggle()
           }
           document.addEventListener('keydown', onKey, true)
           return () => document.removeEventListener('keydown', onKey, true)
@@ -2162,7 +2349,11 @@ self.onmessage = event => {
           document.addEventListener('keydown', onFindKey, true)
           return () => document.removeEventListener('keydown', onFindKey, true)
         }, 'dsh-locator: find hotkeys')
-        ctx.effect(() => () => { closeFind(); cancelJump() }, 'dsh-locator: find cleanup')
+        ctx.effect(() => () => {
+          closeFind()
+          cancelJump()
+          store.set(false)
+        }, 'dsh-locator: find cleanup')
         try {
           ctx.slots.inject('shell.overlay', () => {
             const disposers = [

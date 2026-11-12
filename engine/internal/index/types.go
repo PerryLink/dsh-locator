@@ -58,14 +58,14 @@ func (r *Record) ModTime() time.Time { return time.Unix(0, r.Mtime) }
 
 // Stats summarizes an index.
 type Stats struct {
-	Entries   int   `json:"entries"`
-	Files     int   `json:"files"`
-	Dirs      int   `json:"dirs"`
-	Roots     int   `json:"roots"`
-	NameBytes int   `json:"nameBytes"`
-	Records   int   `json:"records"`
-	Deleted   int   `json:"deleted"`
-	BuiltAt   int64 `json:"builtAt"`
+	Entries    int    `json:"entries"`
+	Files      int    `json:"files"`
+	Dirs       int    `json:"dirs"`
+	Roots      int    `json:"roots"`
+	NameBytes  int    `json:"nameBytes"`
+	Records    int    `json:"records"`
+	Deleted    int    `json:"deleted"`
+	BuiltAt    int64  `json:"builtAt"`
 	Generation uint64 `json:"generation"`
 }
 

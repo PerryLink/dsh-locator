@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import type { Config } from '../src/config.ts'
 import { LocatorRuntime } from '../src/runtime.ts'
 
-const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, 'indexd')
+const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, process.platform === 'win32' ? 'indexd.exe' : 'indexd')
 
 function config(overrides: Partial<Config> = {}): Config {
   return {

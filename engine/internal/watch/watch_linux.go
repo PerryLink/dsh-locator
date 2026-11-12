@@ -25,6 +25,13 @@ type watcher struct {
 	excludes []string
 	onError  func(error)
 
+	onDegraded  func(Health)
+	rootsWatch  int // roots with at least one watch
+	dirsWatched int
+	dirsFailed  int
+	degraded    bool
+	reasons     []string
+
 	fd      int
 	mu      sync.Mutex
 	wdDir   map[int32]string
@@ -47,20 +54,32 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		return nil, fmt.Errorf("inotify nonblock: %w", err)
 	}
 	w := &watcher{
-		ix:       ix,
-		roots:    opt.Roots,
-		excludes: opt.Excludes,
-		onError:  opt.OnError,
-		fd:       fd,
-		wdDir:    make(map[int32]string),
-		dirWD:    make(map[string]int32),
-		started:  time.Now(),
-		stopCh:   make(chan struct{}),
+		ix:         ix,
+		roots:      opt.Roots,
+		excludes:   opt.Excludes,
+		onError:    opt.OnError,
+		onDegraded: opt.OnDegraded,
+		fd:         fd,
+		wdDir:      make(map[int32]string),
+		dirWD:      make(map[string]int32),
+		started:    time.Now(),
+		stopCh:     make(chan struct{}),
 	}
 	for _, root := range opt.Roots {
+		if reason := unreliableNotifyFS(root); reason != "" {
+			w.markDegraded(reason)
+		}
+		before := w.watchedDirCount()
 		if err := w.addTree(root); err != nil {
 			w.report(err)
 		}
+		if w.watchedDirCount() > before {
+			w.rootsWatch++
+		}
+	}
+	if w.watchedDirCount() == 0 {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("inotify: no directory could be watched (check fs.inotify.max_user_watches)")
 	}
 	return w, nil
 }
@@ -71,10 +90,68 @@ func (w *watcher) report(err error) {
 	}
 }
 
+func (w *watcher) watchedDirCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dirsWatched
+}
+
+func (w *watcher) healthLocked() Health {
+	reasons := w.reasons
+	degraded := w.degraded || w.rootsWatch < len(w.roots) || w.dirsFailed > 0
+	if w.rootsWatch < len(w.roots) && len(reasons) == 0 {
+		reasons = []string{fmt.Sprintf("%d of %d root(s) could not be watched", len(w.roots)-w.rootsWatch, len(w.roots))}
+	}
+	return Health{
+		Roots:    len(w.roots),
+		Watching: w.rootsWatch,
+		Dirs:     w.dirsWatched,
+		Degraded: degraded,
+		Reason:   strings.Join(reasons, "; "),
+	}
+}
+
+// Health reports the inotify coverage counted while adding watches.
+func (w *watcher) Health() Health {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.healthLocked()
+}
+
+// markDegraded records incomplete coverage and notifies the daemon on the
+// transition into the degraded state.
+func (w *watcher) markDegraded(reason string) {
+	if reason == "" {
+		return
+	}
+	w.mu.Lock()
+	first := !w.degraded
+	w.degraded = true
+	dup := false
+	for _, existing := range w.reasons {
+		if existing == reason {
+			dup = true
+			break
+		}
+	}
+	if !dup && len(w.reasons) < 4 {
+		w.reasons = append(w.reasons, reason)
+	}
+	h := w.healthLocked()
+	w.mu.Unlock()
+	if first && w.onDegraded != nil {
+		w.onDegraded(h)
+	}
+}
+
+// addTree walks root and adds one inotify watch per directory. Failures are
+// reported and counted; as long as the root itself was added the tree is still
+// partially covered and the daemon's refresh fallback covers the rest.
 func (w *watcher) addTree(root string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			w.report(err)
+			w.noteWatchFailure(fmt.Errorf("walk %s: %w", path, err))
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -89,26 +166,50 @@ func (w *watcher) addTree(root string) error {
 		_, werr := w.add(path)
 		if werr != nil {
 			w.report(werr)
+			w.noteWatchFailure(werr)
 			return fs.SkipDir
 		}
 		return nil
 	})
 }
 
+// add registers one directory watch.
 func (w *watcher) add(dir string) (int32, error) {
 	mask := uint32(syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_FROM |
 		syscall.IN_MOVED_TO | syscall.IN_CLOSE_WRITE | syscall.IN_ATTRIB |
 		syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF | syscall.IN_ONLYDIR)
 	wd, err := syscall.InotifyAddWatch(w.fd, dir, mask)
 	if err != nil {
-		return -1, fmt.Errorf("inotify_add_watch %s: %w", dir, err)
+		return -1, fmt.Errorf("inotify_add_watch %s: %w%s", dir, err, inotifyLimitHint(err))
 	}
 	id := int32(wd)
 	w.mu.Lock()
+	_, existed := w.wdDir[id]
 	w.wdDir[id] = dir
 	w.dirWD[dir] = id
+	if !existed {
+		w.dirsWatched++
+	}
 	w.mu.Unlock()
 	return id, nil
+}
+
+// noteWatchFailure counts a directory that could not be watched. The periodic
+// refresh fallback makes up for the missing notifications.
+func (w *watcher) noteWatchFailure(err error) {
+	if err == nil {
+		return
+	}
+	w.mu.Lock()
+	w.dirsFailed++
+	w.mu.Unlock()
+	w.markDegraded(fmt.Sprintf("inotify coverage is incomplete (%d directorie(s) unwatched): %v", w.failedDirs(), err))
+}
+
+func (w *watcher) failedDirs() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dirsFailed
 }
 
 func (w *watcher) removeWatch(dir string) {
@@ -117,6 +218,7 @@ func (w *watcher) removeWatch(dir string) {
 	if ok {
 		delete(w.dirWD, dir)
 		delete(w.wdDir, id)
+		w.dirsWatched--
 	}
 	w.mu.Unlock()
 	if ok {
@@ -316,4 +418,80 @@ func excluded(path, name string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// Filesystem magic numbers for mounts where inotify notifications cannot be
+// trusted. The watcher still installs its watches (local subtrees may work) but
+// reports degraded so the daemon also runs the periodic rebuild.
+const (
+	nfsSuperMagic  = 0x6969
+	smbSuperMagic  = 0x517B
+	cifsMagic      = 0xFF534D42
+	smb2Magic      = 0xFE534D42
+	v9fsMagic      = 0x01021997 // WSL 9p/DrvFs (Windows drives under /mnt)
+	fuseSuperMagic = 0x65735546
+	cephSuperMagic = 0x00C36400
+	afsSuperMagic  = 0x5346414F
+	overlayMagic   = 0x794C7630
+	ecryptfsMagic  = 0xF15F
+	aufsSuperMagic = 0x61756673
+)
+
+// unreliableNotifyFS names the filesystem type when inotify cannot report
+// changes for root. Network and FUSE mounts either never deliver events or drop
+// them silently; WSL DrvFs mounts (Windows drives under /mnt) are the common
+// case on this platform.
+func unreliableNotifyFS(root string) string {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(root, &st); err != nil {
+		return ""
+	}
+	switch magic := uint64(uint32(st.Type)); magic {
+	case nfsSuperMagic:
+		return "NFS does not deliver inotify events; changes are picked up by the periodic rebuild"
+	case smbSuperMagic, cifsMagic, smb2Magic:
+		return "SMB/CIFS does not deliver inotify events; changes are picked up by the periodic rebuild"
+	case v9fsMagic:
+		return "9p/DrvFs (WSL Windows drive) does not deliver inotify events; changes are picked up by the periodic rebuild"
+	case fuseSuperMagic:
+		return "FUSE may not deliver inotify events; changes are picked up by the periodic rebuild"
+	case cephSuperMagic:
+		return "Ceph may not deliver inotify events; changes are picked up by the periodic rebuild"
+	case afsSuperMagic:
+		return "AFS does not deliver inotify events; changes are picked up by the periodic rebuild"
+	case overlayMagic, ecryptfsMagic, aufsSuperMagic:
+		// Local, but some container/stacked filesystems drop events.
+		return ""
+	}
+	if isWSL() && strings.HasPrefix(filepath.ToSlash(root), "/mnt/") {
+		return "WSL DrvFs mount does not deliver inotify events; changes are picked up by the periodic rebuild"
+	}
+	return ""
+}
+
+// inotifyLimitHint appends the configured watch limit to an ENOSPC failure,
+// which is the usual reason inotify_add_watch fails on a large tree.
+func inotifyLimitHint(err error) string {
+	if !errors.Is(err, syscall.ENOSPC) {
+		return ""
+	}
+	if b, readErr := os.ReadFile("/proc/sys/fs/inotify/max_user_watches"); readErr == nil {
+		if limit := strings.TrimSpace(string(b)); limit != "" {
+			return " (fs.inotify.max_user_watches=" + limit + ")"
+		}
+	}
+	return " (the inotify watch limit may be exhausted)"
+}
+
+var (
+	wslOnce sync.Once
+	wslHost bool
+)
+
+func isWSL() bool {
+	wslOnce.Do(func() {
+		b, err := os.ReadFile("/proc/version")
+		wslHost = err == nil && strings.Contains(strings.ToLower(string(b)), "microsoft")
+	})
+	return wslHost
 }

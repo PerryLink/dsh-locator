@@ -33,7 +33,7 @@ func isRootFRN(frn uint64) bool { return frn&0x0000FFFFFFFFFFFF == RootFileRefer
 
 // File attribute bits used by the index.
 const (
-	AttributeDirectory   = 0x00000010
+	AttributeDirectory    = 0x00000010
 	AttributeReparsePoint = 0x00000400
 )
 

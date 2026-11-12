@@ -42,7 +42,7 @@ function contentResult(
 }
 
 function state(extra: Partial<ContentState> = {}): ContentState {
-  return { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', updatedAt: 0, ...extra }
+  return { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', warnings: [], updatedAt: 0, ...extra }
 }
 
 function deps(overrides: Partial<CombinedDeps> = {}): CombinedDeps {
@@ -102,6 +102,60 @@ describe('combined search', () => {
     expect(ensured).toBe(0)
     expect(searched).toBe(0)
     expect(short.content?.returned).toBe(0)
+  })
+
+  it('surfaces an invalid content query without starting a build', async () => {
+    let ensured = 0
+    let searched = 0
+    const run = (query: string) => runCombinedSearch(deps({
+      ensure: () => { ensured++ },
+      contentSearch: async () => { searched++; return contentResult([]) },
+    }), readCombinedRequest({ query }, 100))
+    const two = await run('ab')
+    expect(two.content).toMatchObject({
+      hits: [],
+      returned: 0,
+      error: 'content-query-too-short',
+      count: { value: 0, kind: 'unknown' },
+    })
+    const mixed = await run('sql ab')
+    expect(mixed.content?.error).toBe('content-query-too-short')
+    const nul = await run('alpha\u0000beta')
+    expect(nul.content?.error).toBe('invalid-control-char')
+    // None of these may start the lazy content build or query the store.
+    expect(ensured).toBe(0)
+    expect(searched).toBe(0)
+  })
+
+  it('passes content timeout, scan-capped and bounded-count results through', async () => {
+    const timeout = await runCombinedSearch(deps({
+      contentSearch: async () => ({
+        hits: [],
+        count: { value: 0, kind: 'unknown' },
+        warnings: ['content-search-timeout'],
+        error: 'content-search-timeout',
+      }),
+    }), readCombinedRequest({ query: 'note' }, 100))
+    expect(timeout.content).toMatchObject({
+      error: 'content-search-timeout',
+      warnings: ['content-search-timeout'],
+      count: { value: 0, kind: 'unknown' },
+      capped: false,
+    })
+
+    const capped = await runCombinedSearch(deps({
+      contentSearch: async () => ({
+        hits: [contentHit('file', '/tmp/a.md')],
+        count: { value: 1, kind: 'bounded', limit: 1000 },
+        warnings: ['scan-capped', 'bounded-count'],
+      }),
+    }), readCombinedRequest({ query: 'note' }, 100))
+    expect(capped.content).toMatchObject({
+      returned: 1,
+      count: { value: 1, kind: 'bounded', limit: 1000 },
+      warnings: ['scan-capped', 'bounded-count'],
+    })
+    expect(capped.content?.error).toBeUndefined()
   })
 
   it('does not touch content when the scope or the store is disabled', async () => {

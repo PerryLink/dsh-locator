@@ -402,6 +402,15 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Notas de atualização 0.10.0
+
+- A busca de conteúdo exige pelo menos **3 caracteres**; use `Ctrl+F` para 1–2. Consultas com mais de 256 caracteres ou 32 termos são rejeitadas.
+- `locator_find` usa **escopo workspace** por padrão (sessão do chamador e seu cwd); para cruzar workspaces passe `scope: "all"`. Novos parâmetros: `matchMode`, `caseSensitive`, `wholeWord`, `sessionId`, `count`, `countLimit`, `pathPrefix`.
+- As rotas HTTP do painel exigem o serviço `connection` do DSH (fail-closed) e POST + JSON + mesma origem; o perfil web padrão não muda.
+- `locator_export` grava por padrão no stateDir do plugin e valida a propriedade antes de sobrescrever; `locator_rebuild` aceita apenas subconjuntos dos roots/excludes configurados.
+- Os binários do engine são 0.10.0: snapshot com debounce, memória de `sort=path` limitada, watcher com estado degradado/fallback; no macOS o release precisa ser compilado com cgo/FSEvents (o fallback kqueue de depuração não é publicável).
+- Cliente: clique nos resultados mantém teclado/Esc; busca com quebras suaves/`<br>`/CJK corrigida; linhas gêmeas do assistente preferem a resposta; regex usa `u` e não cai na thread principal; avisos/limites/truncamento visíveis.
+
 ## Segurança e privacidade
 
 - O índice é local: sem chamadas de rede, sem telemetria, sem uploads. O plugin nunca modifica, move ou apaga arquivos indexados.

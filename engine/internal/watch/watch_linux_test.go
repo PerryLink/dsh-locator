@@ -125,3 +125,47 @@ func TestLinuxWatcherDirectoryLifecycle(t *testing.T) {
 		return res.Total == 0
 	})
 }
+
+// TestLinuxWatcherReportsDegradedCoverage: a root that cannot be watched (here a
+// missing path, the same code path as an exhausted inotify watch limit) must be
+// reported as degraded coverage instead of being silently ignored, so the daemon
+// enables the periodic rebuild.
+func TestLinuxWatcherReportsDegradedCoverage(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	ix := index.New()
+	ix.AddRoot(root)
+
+	var degradedCalls int
+	w, err := New(ix, Options{
+		Roots: []string{root, missing},
+		OnDegraded: func(h Health) {
+			degradedCalls++
+			if !h.Degraded {
+				t.Errorf("degraded callback health = %+v", h)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("partial watcher creation failed: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	health := w.(*watcher).Health()
+	if health.Roots != 2 || health.Watching != 1 || !health.Degraded {
+		t.Fatalf("health = %+v, want 1 of 2 roots degraded", health)
+	}
+	if health.Dirs == 0 {
+		t.Fatal("healthy root has no inotify watches")
+	}
+	if health.Reason == "" {
+		t.Fatal("degraded health has no reason")
+	}
+	if degradedCalls == 0 {
+		t.Fatal("OnDegraded was not called")
+	}
+
+	if _, err := New(ix, Options{Roots: []string{missing}}); err == nil {
+		t.Fatal("watcher was created without any watchable root")
+	}
+}

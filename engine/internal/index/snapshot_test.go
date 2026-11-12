@@ -9,10 +9,10 @@ import (
 func TestLoadRejectsCorruptSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string][]byte{
-		"empty":       {},
-		"bad-magic":   []byte("NOTLOC01"),
-		"short":       []byte("DSHLOC01"),
-		"bad-table":   append(make([]byte, 48), 0, 0, 0, 0),
+		"empty":     {},
+		"bad-magic": []byte("NOTLOC01"),
+		"short":     []byte("DSHLOC01"),
+		"bad-table": append(make([]byte, 48), 0, 0, 0, 0),
 	}
 	for name, data := range cases {
 		path := filepath.Join(dir, name+".snap")

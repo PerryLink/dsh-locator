@@ -7,7 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { apply } from '../src/index.ts'
 import type { Config } from '../src/config.ts'
 
-const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, 'indexd')
+const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, process.platform === 'win32' ? 'indexd.exe' : 'indexd')
 
 interface RegisteredTool {
   name: string
@@ -81,7 +81,9 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
 
     const exporter = tools.find(tool => tool.name === 'locator_export')
     expect(exporter).toBeDefined()
-    const result = (await exporter?.execute({ path: dbPath, overwrite: true }, { signal: new AbortController().signal })) as {
+    // The export path is deliberately outside the state directory here; the
+    // tool now requires an explicit opt-in for that (see test/tools.spec.ts).
+    const result = (await exporter?.execute({ path: dbPath, overwrite: true, allowOutsideStateDir: true }, { signal: new AbortController().signal })) as {
       ok: boolean
       rows: number
       error?: string

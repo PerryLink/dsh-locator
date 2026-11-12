@@ -13,17 +13,17 @@ import (
 )
 
 const (
-	fileReadData        = 0x80000000
-	fileShareRead       = 0x00000001
-	fileShareWrite      = 0x00000002
-	fileShareDelete     = 0x00000004
-	openExisting        = 3
+	fileReadData         = 0x80000000
+	fileShareRead        = 0x00000001
+	fileShareWrite       = 0x00000002
+	fileShareDelete      = 0x00000004
+	openExisting         = 3
 	fsctlQueryUSNJournal = 0x000900F4
-	fsctlEnumUSNData    = 0x000900B3
-	fsctlReadUSNJournal = 0x000900BB
-	errorHandleEOF      = syscall.Errno(38)
-	errorInvalidParam   = syscall.Errno(87)
-	errorMoreData       = syscall.Errno(234)
+	fsctlEnumUSNData     = 0x000900B3
+	fsctlReadUSNJournal  = 0x000900BB
+	errorHandleEOF       = syscall.Errno(38)
+	errorInvalidParam    = syscall.Errno(87)
+	errorMoreData        = syscall.Errno(234)
 
 	maxProbeRecords = 4_000_000
 )

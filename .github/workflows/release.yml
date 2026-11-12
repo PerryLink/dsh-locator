@@ -1,17 +1,210 @@
 name: release
 
+# Manual npm publish, gated on the complete CI matrix being green for the exact
+# commit being released. There is deliberately no `push: tags` trigger: a tag
+# whose CI is red must not publish, and a release normally needs one manual
+# dispatch anyway.
+#
+# Manual flow (see RELEASE.md):
+#   1. bump version + CHANGELOG, rebuild bin/, push to main;
+#   2. wait for the `ci` workflow to finish green on that commit;
+#   3. git tag vX.Y.Z && git push origin vX.Y.Z;
+#   4. gh workflow run release.yml --ref vX.Y.Z -f publish=true
+#      (use -f publish=false for a build+verify dry run).
+#
+# The workflow then (a) proves tag == HEAD == package version and that the
+# newest `ci` runs for the SHA are green, (b) rebuilds all six engines from the
+# tagged commit (linux/windows static on Ubuntu, darwin cgo on macOS), (c) puts
+# those artifacts into bin/ and verifies every binary's version/GOOS/GOARCH/cgo
+# flavour, and only then (d) publishes with provenance.
+
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (for example v0.9.1). Defaults to v<package.json version>.'
+        required: false
+        type: string
+      publish:
+        description: 'Publish to npm after all gates pass. Leave unchecked for a dry run.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.22'
 
 jobs:
-  publish:
+  preflight:
+    name: preflight (tag, version and green ci)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      sha: ${{ steps.gate.outputs.sha }}
+      version: ${{ steps.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Resolve tag and require green ci on that exact SHA
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          version="$(node -p "require('./package.json').version")"
+          tag="${INPUT_TAG}"
+          if [ -z "${tag}" ]; then tag="v${version}"; fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null \
+            || fail "tag ${tag} does not exist in this checkout; push it first: git tag ${tag} && git push origin ${tag}"
+          sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          [ "${sha}" = "${head_sha}" ] \
+            || fail "tag ${tag} points at ${sha} but the workflow checked out ${head_sha}; dispatch on the tag (gh workflow run release.yml --ref ${tag}) or on main at the tag commit"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          [ "${tag}" = "v${version}" ] \
+            || fail "tag ${tag} does not match package.json version ${version} (expected v${version})"
+          grep -Eq "^## ${version}([^0-9]|$)" CHANGELOG.md \
+            || fail "CHANGELOG.md has no '## ${version}' heading; write the release notes before publishing"
+          git rev-parse -q --verify refs/remotes/origin/main >/dev/null \
+            || fail "origin/main is not available in this checkout"
+          git merge-base --is-ancestor "${sha}" refs/remotes/origin/main \
+            || fail "tag ${tag} (${sha}) is not on main; only merged main commits may be released"
+
+          # Release gate: the newest ci run for this exact SHA must be green,
+          # and the newest push-to-main ci run must be green as well (a later
+          # green PR run cannot excuse a red main build of the same commit).
+          runs="$(gh api -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100")"
+          count="$(jq '.workflow_runs | length' <<<"${runs}")"
+          echo "ci runs for ${sha}: ${count}"
+          jq -r '.workflow_runs[] | "  \(.id) event=\(.event) branch=\(.head_branch // "-") \(.status)/\(.conclusion // "-") \(.created_at)"' <<<"${runs}"
+          [ "${count}" -gt 0 ] \
+            || fail "no ci run exists for ${sha}; push the release commit to main and wait for the complete CI matrix"
+
+          latest="$(jq -r '[.workflow_runs[]] | sort_by(.created_at) | last | "\(.status)/\(.conclusion // "-")"' <<<"${runs}")"
+          [ "${latest}" = "completed/success" ] \
+            || fail "the newest ci run for ${sha} is ${latest}, not completed/success; releases may only be cut from a SHA with a complete green CI"
+
+          push="$(jq -r '[.workflow_runs[] | select(.event == "push" and .head_branch == "main")] | sort_by(.created_at) | last | if . == null then "none" else "\(.status)/\(.conclusion // "-")" end' <<<"${runs}")"
+          [ "${push}" = "completed/success" ] \
+            || fail "the newest push-to-main ci run for ${sha} is '${push}', not completed/success"
+
+          echo "release gate passed: ${tag} -> ${sha} (ci green, on main, version ${version})"
+
+  engine:
+    name: engine (${{ matrix.name }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-win
+          - os: macos-latest
+            name: darwin-cgo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build engine binaries from the tagged commit
+        shell: bash
+        env:
+          GROUP: ${{ matrix.name }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "building engines for ${VERSION}"
+          rm -rf dist
+          mkdir -p dist
+          build() {
+            local goos="$1" goarch="$2" tag="$3" ext="$4" cgo="$5" cc="${6:-}"
+            mkdir -p "dist/${tag}"
+            (
+              cd engine
+              # macOS runners still default to bash 3.2: keep this array-free.
+              unset CC
+              if [ -n "${cc}" ]; then CC="${cc}"; export CC; fi
+              CGO_ENABLED="${cgo}" GOOS="${goos}" GOARCH="${goarch}" \
+                go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "../dist/${tag}/indexd${ext}" ./cmd/indexd
+            )
+            echo "built dist/${tag}/indexd${ext} (GOOS=${goos} GOARCH=${goarch} CGO_ENABLED=${cgo})"
+          }
+          case "${GROUP}" in
+            linux-win)
+              # Static cross-builds: one binary per OS/arch, no libc dependency.
+              build linux amd64 linux-x64 '' 0
+              build linux arm64 linux-arm64 '' 0
+              build windows amd64 win32-x64 .exe 0
+              build windows arm64 win32-arm64 .exe 0
+              expected=4
+              ;;
+            darwin-cgo)
+              # cgo links CoreServices/FSEvents; the kqueue fallback is not shipped.
+              build darwin arm64 darwin-arm64 '' 1
+              build darwin amd64 darwin-x64 '' 1 'clang -arch x86_64'
+              expected=2
+              ;;
+            *)
+              echo "::error::unknown engine group ${GROUP}"
+              exit 1
+              ;;
+          esac
+          find dist -type f | sort
+          count="$(find dist -type f | wc -l | tr -d ' ')"
+          if [ "${count}" -ne "${expected}" ]; then
+            echo "::error::expected ${expected} engine binaries, built ${count}"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engines-${{ matrix.name }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: [preflight, engine]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 12.16.1
@@ -20,17 +213,125 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: pnpm
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
+      - name: Prove the checkout is the released tag
+        shell: bash
+        env:
+          SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          if [ "${head_sha}" != "${SHA}" ]; then
+            echo "::error::publish checkout is ${head_sha}, expected ${SHA}"
+            exit 1
+          fi
+          echo "publishing from ${SHA}"
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
-      - run: pnpm test
-      - run: node scripts/verify.mjs
+      - name: Download the engines rebuilt from the tagged commit
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engines-*
+          path: dist
+          merge-multiple: true
+      - name: Install the six rebuilt engines into bin/
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(find dist -type f | wc -l | tr -d ' ')"
+          if [ "${count}" -ne 6 ]; then
+            echo "::error::expected 6 engine binaries from the engine jobs, got ${count}"
+            find dist -type f | sort
+            exit 1
+          fi
+          # Everything that is published must be freshly built from this SHA,
+          # never a stale bin/ committed months ago.
+          cp -a dist/. bin/
+          # upload-artifact/download-artifact drops the executable bit.
+          if [ "$(node -p process.platform)" != "win32" ]; then
+            chmod +x bin/*/indexd
+          fi
+          find bin -type f | sort
+          host="$(node -p "process.platform + '-' + (process.arch === 'x64' ? 'x64' : process.arch)")"
+          ext="$(node -p "process.platform === 'win32' ? '.exe' : ''")"
+          "bin/${host}/indexd${ext}" version
+      # Replaces the plain `git diff --exit-code bin/` check: the published
+      # payload is exactly the six binaries rebuilt above and verify.mjs proves
+      # each one embeds this package version, the right GOOS/GOARCH and cgo
+      # darwin.
+      - name: Verify the publishable bin/ payload
+        env:
+          # Release never ships the kqueue darwin fallback: the payload must be
+          # the six engines rebuilt above, with darwin built on macOS with cgo.
+          DSH_LOCATOR_REQUIRE_DARWIN_CGO: '1'
+        run: node scripts/verify.mjs
+      - name: Run the full test suite against the rebuilt engines
+        run: pnpm test
+      - name: Build the npm tarball and assert its engine payload
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack --pack-destination dist --ignore-scripts --silent | tail -n 1)"
+          echo "tarball: dist/${tarball}"
+          tar -tzf "dist/${tarball}" > tarball-list.txt
+          for target in linux-x64 linux-arm64 win32-x64 win32-arm64 darwin-x64 darwin-arm64; do
+            case "${target}" in
+              win32-*) file="indexd.exe" ;;
+              *) file="indexd" ;;
+            esac
+            if ! grep -qx "package/bin/${target}/${file}" tarball-list.txt; then
+              echo "::error::tarball is missing bin/${target}/${file}"
+              exit 1
+            fi
+          done
+          packed_version="$(tar -xOzf "dist/${tarball}" package/package.json | node -e 'let body = ""; process.stdin.on("data", chunk => { body += chunk }); process.stdin.on("end", () => { console.log(JSON.parse(body).version) })')"
+          if [ "${packed_version}" != "${VERSION}" ]; then
+            echo "::error::tarball package version ${packed_version} != ${VERSION}"
+            exit 1
+          fi
+          echo "tarball contains all six engines at version ${VERSION}"
+      - name: Refuse to publish an already published version
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "dsh-locator@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::dsh-locator@${VERSION} already exists on npm; bump package.json version first"
+            exit 1
+          fi
+          echo "dsh-locator@${VERSION} is not published yet"
       - name: Publish with provenance
-        # Requires a trusted publisher or the NPM_TOKEN repository secret.
-        # Trigger manually after configuring it; tags do not auto-publish.
+        if: ${{ inputs.publish }}
+        # Requires npm trusted publishing or the NPM_TOKEN repository secret.
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Assert the published tarball points back at this SHA
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          published=""
+          for attempt in 1 2 3 4 5 6; do
+            published="$(npm view "dsh-locator@${VERSION}" gitHead 2>/dev/null || true)"
+            if [ "${published}" = "${SHA}" ]; then
+              echo "npm gitHead ${published} matches the release SHA"
+              exit 0
+            fi
+            echo "attempt ${attempt}: registry gitHead is '${published:-<not visible yet>}', retrying"
+            sleep 10
+          done
+          echo "::error::npm gitHead for dsh-locator@${VERSION} is '${published:-<missing>}' but the release SHA is ${SHA}"
+          exit 1
+      - name: Dry run complete (npm publish skipped)
+        if: ${{ !inputs.publish }}
+        run: |
+          echo "Dry run passed: tag, CI gate, six rebuilt engines, verify, tests and tarball are green."
+          echo "Re-dispatch with publish=true to publish."

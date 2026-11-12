@@ -15,6 +15,7 @@
  * alone unless `includeArchived` is set.
  * @module dsh-locator/content
  */
+import { Worker } from 'node:worker_threads';
 import { type ContentSearchOptions, type ContentSearchResult } from './content-search.ts';
 import type { LocatorRuntime } from './runtime.ts';
 export interface ContentHit {
@@ -37,6 +38,11 @@ export interface ContentState {
     messages: number;
     truncated: boolean;
     error: string;
+    /**
+     * Non-fatal problems from the last build/refresh: unreadable session logs,
+     * a quarantined database, and so on. Empty when everything was read.
+     */
+    warnings: string[];
     updatedAt: number;
 }
 export interface ContentOptions {
@@ -61,6 +67,16 @@ export interface ContentOptions {
      * single-threaded.
      */
     searchWorker?: boolean;
+    /**
+     * How long one worker query may run before it is reported as
+     * `content-search-timeout`. The query is never re-run on the host thread.
+     */
+    searchWorkerTimeoutMs?: number;
+    /**
+     * Test seam: build the search worker instead of spawning the compiled one.
+     * Production never sets it.
+     */
+    searchWorkerFactory?: (workerPath: string) => Worker;
 }
 export declare class ContentIndex {
     private readonly rt;
@@ -116,9 +132,36 @@ export declare class ContentIndex {
     private full;
     private incremental;
     private open;
+    /**
+     * Decide what an existing `content.db` is before touching it:
+     * - `foreign`: no dsh-locator table at all — refuse to modify it.
+     * - `corrupt`: zero bytes, unreadable, or not a SQLite database.
+     * - `incompatible`: has our tables but a different schema version/shape.
+     * - `ok`: safe to reuse.
+     */
+    private classifyDatabase;
+    /**
+     * Move a broken/outdated database aside instead of destroying it. The
+     * timestamped name keeps the bytes around for inspection; if the rename
+     * fails (another process still holds it on Windows) a fresh file is still
+     * created so content search recovers.
+     */
+    private quarantineDatabase;
+    /** Record one non-fatal build warning (deduplicated, bounded). */
+    private addWarning;
     private reopenWorker;
     private stopWorker;
+    /**
+     * Whether a usable search worker exists, creating one when needed.
+     * @returns false when the worker cannot be created at all; that is the only
+     *          case in which an in-process (sync) query is allowed.
+     */
     private ensureWorker;
+    /**
+     * Resolve one worker reply. A malformed reply is reported as a protocol
+     * error; the query is never retried on the host thread.
+     */
+    private onWorkerMessage;
     private identityOf;
     /**
      * Whether the open handle still points at the file on disk. Another DSH
@@ -132,8 +175,6 @@ export declare class ContentIndex {
     private recoverExternal;
     /** Whether the engine is re-scanning, which can move its dump cursor. */
     private engineRescanning;
-    /** Whether `path` is a SQLite database this plugin created (has docs_meta). */
-    private ownedDatabase;
     private readFlag;
     private writeFlag;
     /**
@@ -155,6 +196,8 @@ export declare class ContentIndex {
      */
     private refreshSessionPaths;
     private addDoc;
+    /** Body bytes stored for one document key (0 when it is not indexed). */
+    private storedBytes;
     private deleteDoc;
     private deletePath;
     private indexFiles;
@@ -164,18 +207,26 @@ export declare class ContentIndex {
     private readFileDoc;
     private indexSessions;
     private refreshSessions;
-    private indexSessionFile;
+    /** Read and decompress one session log completely; no side effects on rows. */
+    private readSessionText;
+    /** Index one already-decoded session log; the caller owns row replacement. */
+    private indexSessionText;
     /** Session logs to consider, newest first, minus archived ones by default. */
     private sessionCandidates;
     sessionRoots(): string[];
     /**
      * Search file bodies and session messages. With `searchWorker` enabled the
-     * query itself runs off the host thread; a failed or wedged worker falls back
-     * to the in-process query so a result is still produced.
+     * query itself runs off the host thread.
      *
-     * The two-argument form returns the hit array (tools and the legacy
-     * `/content` route). The three-argument form returns hits plus count,
-     * warnings and an error code, and understands the advanced match options.
+     * A worker timeout, crash or malformed reply is a hard error result: the
+     * same query is never re-run on the host thread, where a heavy query (for
+     * example a whole-word scan) would stall the DSH event loop. Only when the
+     * worker cannot be created at all does the query run in-process, and that
+     * fallback is budgeted (bounded counts).
+     *
+     * The two-argument form returns the hit array (legacy callers). The
+     * three-argument form returns hits plus count, warnings and an error code,
+     * and understands the advanced match options.
      * @param query - words or a phrase to find.
      * @param limit - maximum hits.
      * @param options - match mode, case/whole-word flags, session scope, count mode.
@@ -184,8 +235,15 @@ export declare class ContentIndex {
     search(query: string, limit: number): Promise<ContentHit[]>;
     search(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult>;
     private searchDetailed;
+    /** Run one query on the worker; timeout/protocol errors are final results. */
+    private searchInWorker;
     /** Map a request's sessionId onto the indexed session log path. */
     private resolveSession;
+    /**
+     * In-process query path. When `degraded` is set (worker creation failed) the
+     * options are tightened so this rare path cannot spend an unbounded amount of
+     * host-thread time counting matches.
+     */
     private searchSync;
 }
 //# sourceMappingURL=content.d.ts.map

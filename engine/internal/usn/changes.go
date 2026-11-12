@@ -9,14 +9,14 @@ import (
 
 // Journal reason bits used by the applier.
 const (
-	ReasonDataOverwrite = 0x00000001
-	ReasonDataExtend    = 0x00000002
+	ReasonDataOverwrite  = 0x00000001
+	ReasonDataExtend     = 0x00000002
 	ReasonDataTruncation = 0x00000004
-	ReasonCreate        = 0x00000100
-	ReasonDelete        = 0x00000200
-	ReasonRenameOld     = 0x00001000
-	ReasonRenameNew     = 0x00002000
-	ReasonBasicInfo     = 0x00008000
+	ReasonCreate         = 0x00000100
+	ReasonDelete         = 0x00000200
+	ReasonRenameOld      = 0x00001000
+	ReasonRenameNew      = 0x00002000
+	ReasonBasicInfo      = 0x00008000
 )
 
 // ChangePaths maps a file reference number to its current absolute path. The

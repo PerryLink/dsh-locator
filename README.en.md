@@ -170,7 +170,7 @@ Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier at the side
 - **Counts**: group headers show the match count; exact when cheap, `≥ N` when capped. The header shows the selected position (`3/37`) and the footer summarises all groups. The content page path now runs rank-rowids → body-by-rowid → JS snippet/line, so common words dropped from about 2.7 s to under 300 ms.
 - **Find options**: the toolbar offers mode (Normal / Extended / Regex), `Aa` match case, whole word and a current-conversation scope. Mode/case/whole-word apply to file and folder names; content supports Normal/Extended/case/whole-word, while **regex pauses the content group** (names still allow regex) so a panel keystroke never scans the whole corpus.
 - **Current conversation scope**: only indexed messages of that session are searched (an active session is indexed after roughly two minutes), and file/folder scopes are disabled but keep their ticks. For live per-match navigation use the `Ctrl+F` find bar below.
-- Content queries need at least two characters; empty and one-character queries never start the content build. While it builds the content group shows progress and name results return immediately; scopes and find options are remembered.
+- Content queries need at least three characters; empty, one- and two-character queries never start the content build (use Ctrl+F for short searches). While it builds the content group shows progress and name results return immediately; scopes and find options are remembered.
 - Keyboard: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` move, `F3`/`Shift+F3` cycle result rows, `Enter` activates, `Esc` closes; the dialog traps focus and restores it on close. Panel text follows `navigator.language` (zh/en/es/pt/hi).
 
 ## Find in the conversation (Ctrl+F)
@@ -401,6 +401,15 @@ DeepSeek Harness
 ## Memory
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
+
+## 0.10.0 upgrade notes
+
+- Content search requires at least **3 characters**; use `Ctrl+F` for 1–2 character searches. Queries over 256 characters/32 terms are rejected.
+- `locator_find` defaults to **workspace scope** (session hits: the caller session; file hits: the caller cwd). Pass `scope: "all"` for explicit cross-workspace access. New parameters: `matchMode`, `caseSensitive`, `wholeWord`, `sessionId`, `count`, `countLimit`, `pathPrefix`.
+- Panel HTTP routes now require the DSH `connection` service (fail-closed) and enforce POST + JSON + same-origin Fetch metadata; the stock web profile is unaffected.
+- `locator_export` writes under the plugin state directory by default and validates ownership before overwrite; `locator_rebuild` accepts only configured roots/exclude subsets.
+- Engine binaries are 0.10.0. Snapshot saves are dirty-debounced, `sort=path` memory is bounded, watcher state reports degraded/refresh fallback; macOS release binaries must be built on macOS with cgo/FSEvents (the debug kqueue fallback is not releasable).
+- Client: result-row clicks keep keyboard/Esc working; soft newlines/`<br>`/CJK find fixed; assistant twin rows prefer the response row; regex prefers Unicode `u` and never falls back to the main thread; content warnings/caps/truncation are visible.
 
 ## Security and privacy
 

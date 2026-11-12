@@ -1,5 +1,13 @@
 name: mirror
 
+# Mirror main and release tags to Gitee and GitCode. Both mirrors are separate
+# jobs: one broken mirror must not stop the other, but it must still fail the
+# run loudly instead of printing a warning and pretending it synced.
+#
+# Each job retries the push a bounded number of times, then verifies the remote
+# ref with ls-remote. A missing token is an error (the mirror is part of the
+# release; silently skipping it hides a broken secret for months).
+
 on:
   push:
     branches:
@@ -15,36 +23,131 @@ concurrency:
   group: mirror
   cancel-in-progress: false
 
+env:
+  GIT_TERMINAL_PROMPT: '0'
+
 jobs:
-  mirror:
+  gitee:
+    name: mirror (gitee)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Push to Gitee
+          fetch-tags: true
+      - name: Push and verify Gitee mirror
+        shell: bash
         env:
           TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
           if [ -z "${TOKEN:-}" ]; then
-            echo "::warning::GITEE_TOKEN is not configured; skipping the Gitee mirror"
-            exit 0
+            fail "GITEE_TOKEN is not configured; configure the repository secret (or the mirror is broken)"
           fi
+          echo "::add-mask::${TOKEN}"
+          remote="https://perrylink:${TOKEN}@gitee.com/PerryLink/dsh-locator.git"
+          # Gitee's HTTP/2 push path is flaky for repositories this size.
+          git config --global http.version HTTP/1.1
+
+          push_with_retry() {
+            local attempt
+            for attempt in 1 2 3 4; do
+              if git push --force "${remote}" "$@"; then
+                return 0
+              fi
+              echo "::warning::gitee push attempt ${attempt} failed"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            git push --force "https://perrylink:${TOKEN}@gitee.com/PerryLink/dsh-locator.git" "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+            tag="${GITHUB_REF_NAME}"
+            push_with_retry "refs/tags/${tag}:refs/tags/${tag}" \
+              || fail "gitee tag mirror failed after 4 attempts for ${tag}"
           else
-            git push --force "https://perrylink:${TOKEN}@gitee.com/PerryLink/dsh-locator.git" "HEAD:refs/heads/main" --tags
+            push_with_retry "HEAD:refs/heads/main" --tags \
+              || fail "gitee main mirror failed after 4 attempts"
           fi
-      - name: Push to GitCode
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            verify_ref="refs/tags/${GITHUB_REF_NAME}"
+          else
+            verify_ref="refs/heads/main"
+          fi
+          expected="$(git rev-parse "${verify_ref}")"
+          actual=""
+          for attempt in 1 2 3; do
+            actual="$(git ls-remote "${remote}" "${verify_ref}" 2>/dev/null | cut -f1 | head -n 1 || true)"
+            if [ "${actual}" = "${expected}" ]; then
+              echo "gitee ${verify_ref} = ${expected} (verified)"
+              exit 0
+            fi
+            echo "::warning::gitee ls-remote attempt ${attempt} for ${verify_ref} returned '${actual:-<missing>}' (expected ${expected})"
+            sleep $((attempt * 5))
+          done
+          fail "gitee mirror verification failed: ${verify_ref} is '${actual:-<missing>}' but HEAD/tag is ${expected}"
+
+  gitcode:
+    name: mirror (gitcode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Push and verify GitCode mirror
+        shell: bash
         env:
           TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
           if [ -z "${TOKEN:-}" ]; then
-            echo "::warning::GITCODE_TOKEN is not configured; skipping the GitCode mirror"
-            exit 0
+            fail "GITCODE_TOKEN is not configured; configure the repository secret (or the mirror is broken)"
           fi
+          echo "::add-mask::${TOKEN}"
+          remote="https://oauth2:${TOKEN}@gitcode.com/PerryLink/dsh-locator.git"
+          git config --global http.version HTTP/1.1
+
+          push_with_retry() {
+            local attempt
+            for attempt in 1 2 3 4; do
+              if git push --force "${remote}" "$@"; then
+                return 0
+              fi
+              echo "::warning::gitcode push attempt ${attempt} failed"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            git push --force "https://oauth2:${TOKEN}@gitcode.com/PerryLink/dsh-locator.git" "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+            tag="${GITHUB_REF_NAME}"
+            push_with_retry "refs/tags/${tag}:refs/tags/${tag}" \
+              || fail "gitcode tag mirror failed after 4 attempts for ${tag}"
           else
-            git push --force "https://oauth2:${TOKEN}@gitcode.com/PerryLink/dsh-locator.git" "HEAD:refs/heads/main" --tags
+            push_with_retry "HEAD:refs/heads/main" --tags \
+              || fail "gitcode main mirror failed after 4 attempts"
           fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            verify_ref="refs/tags/${GITHUB_REF_NAME}"
+          else
+            verify_ref="refs/heads/main"
+          fi
+          expected="$(git rev-parse "${verify_ref}")"
+          actual=""
+          for attempt in 1 2 3; do
+            actual="$(git ls-remote "${remote}" "${verify_ref}" 2>/dev/null | cut -f1 | head -n 1 || true)"
+            if [ "${actual}" = "${expected}" ]; then
+              echo "gitcode ${verify_ref} = ${expected} (verified)"
+              exit 0
+            fi
+            echo "::warning::gitcode ls-remote attempt ${attempt} for ${verify_ref} returned '${actual:-<missing>}' (expected ${expected})"
+            sleep $((attempt * 5))
+          done
+          fail "gitcode mirror verification failed: ${verify_ref} is '${actual:-<missing>}' but HEAD/tag is ${expected}"
