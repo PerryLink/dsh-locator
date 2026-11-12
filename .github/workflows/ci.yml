@@ -34,7 +34,7 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-win
-          - os: macos-13
+          - os: macos-latest
             name: darwin-cgo
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +109,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node: [22, 24]
         # macOS Node 24 is covered indirectly: macOS runs Node 22, while Node 24
         # runs on Linux and Windows. The extra macOS/24 combination was repeatedly
@@ -117,7 +117,7 @@ jobs:
         # release gates) while all other jobs and macOS/22 completed; keeping it
         # made green CI a scheduling lottery, which would block the release gate.
         exclude:
-          - os: macos-13
+          - os: macos-latest
             node: 24
     steps:
       - uses: actions/checkout@v4
@@ -210,7 +210,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
