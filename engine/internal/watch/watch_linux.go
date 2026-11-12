@@ -150,6 +150,16 @@ func (w *watcher) markDegraded(reason string) {
 func (w *watcher) addTree(root string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Temporary build/test directories (pnpm _tmp, editor swaps) can
+			// disappear between readdir and lstat. That is normal churn, not
+			// missing watcher coverage: treat it as a vanished entry instead of
+			// disabling the native watcher and falling back to a 30-minute rescan.
+			if transientWatchError(err) {
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			w.report(err)
 			w.noteWatchFailure(fmt.Errorf("walk %s: %w", path, err))
 			if d != nil && d.IsDir() {
@@ -165,6 +175,9 @@ func (w *watcher) addTree(root string) error {
 		}
 		_, werr := w.add(path)
 		if werr != nil {
+			if transientWatchError(werr) {
+				return fs.SkipDir
+			}
 			w.report(werr)
 			w.noteWatchFailure(werr)
 			return fs.SkipDir
@@ -192,6 +205,12 @@ func (w *watcher) add(dir string) (int32, error) {
 	}
 	w.mu.Unlock()
 	return id, nil
+}
+
+// transientWatchError reports path races that do not mean incomplete coverage:
+// a directory disappeared between the walk's readdir and lstat/add-watch.
+func transientWatchError(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // noteWatchFailure counts a directory that could not be watched. The periodic

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1 — 2026-11-12
+
+Watcher hotfix for 0.10.0.
+
+* Transient `ENOENT`/`ENOTDIR` during the native watcher's directory walk (pnpm `_tmp`, editor swap files, build outputs disappearing between readdir and lstat) no longer marks the watcher degraded and starts a 30-minute refresh fallback. Those entries are treated as normal churn; only persistent permission/limit failures degrade coverage.
+* The engine status route and `locator_status` now expose `watchDegraded`, `watchReason`, `watchRoots` and `refreshFallback`, and the panel shows `watcher degraded; periodic refresh active` instead of silently claiming native watching.
+* Six engine binaries rebuilt as 0.10.1 (darwin remains the local kqueue dev fallback; release/CI builds the cgo/FSEvents artifact).
+
 ## 0.10.0 — 2026-11-12
 
 Full-plugin hardening pass from a 20-agent audit. This release focuses on stability, release integrity, security boundaries, client correctness and performance rather than new search features.

@@ -62,6 +62,13 @@ export interface EngineStatus {
     nameBytes: number;
     deleted: number;
     watching: boolean;
+    /** The native watcher covers only part of the configured roots. */
+    watchDegraded?: boolean;
+    watchReason?: string;
+    /** Number of roots actually watched. */
+    watchRoots?: number;
+    /** Periodic rebuild fallback is active because the watcher is incomplete. */
+    refreshFallback?: boolean;
     scanning: boolean;
     usn: boolean;
     uptimeSec: number;
