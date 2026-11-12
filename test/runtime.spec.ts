@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { realpathSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -54,7 +54,7 @@ afterAll(() => {
 
 describe.skipIf(!existsSync(binary))('locator engine integration', () => {
   it('indexes, searches, and follows filesystem changes', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'locator-test-'))
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'locator-test-')))
     const state = mkdtempSync(join(tmpdir(), 'locator-state-'))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
     mkdirSync(join(root, 'docs'))

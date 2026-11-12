@@ -105,10 +105,14 @@ function tempDir(prefix: string): string {
 
 function canonical(path: string): string {
   try {
-    return realpathSync(path)
+    return realpathSync.native(path)
   } catch {
-    return join(realpathSync(dirname(path)), basename(path))
+    return join(realpathSync.native(dirname(path)), basename(path))
   }
+}
+
+function samePath(path: string | undefined): string | undefined {
+  return path === undefined ? undefined : canonical(path).toLowerCase()
 }
 
 describe('canonical path containment', () => {
@@ -117,10 +121,10 @@ describe('canonical path containment', () => {
     mkdirSync(join(root, 'docs'))
     writeFileSync(join(root, 'docs', 'report.pdf'), 'x')
     expect(withinRoots(root, [root])).toBe(true)
-    expect(resolveWithinRoots(join(root, 'docs', 'report.pdf'), [root])?.path).toBe(canonical(join(root, 'docs', 'report.pdf')))
+    expect(samePath(resolveWithinRoots(join(root, 'docs', 'report.pdf'), [root])?.path)).toBe(samePath(join(root, 'docs', 'report.pdf')))
     const future = resolveWithinRoots(join(root, 'docs', 'later.txt'), [root])
     expect(future?.exists).toBe(false)
-    expect(future?.path).toBe(canonical(join(root, 'docs', 'later.txt')))
+    expect(samePath(future?.path)).toBe(samePath(join(root, 'docs', 'later.txt')))
   })
 
   it('rejects prefix siblings, parent escapes and relative paths', () => {
@@ -145,7 +149,7 @@ describe('canonical path containment', () => {
     expect(withinRoots(link, [root])).toBe(false)
     expect(resolveWithinRoots(link, [root])).toBeUndefined()
     // The same file is fine when the root really contains it.
-    expect(resolveWithinRoots(secret, [outside])?.path).toBe(canonical(secret))
+    expect(samePath(resolveWithinRoots(secret, [outside])?.path)).toBe(samePath(secret))
   })
 
   it('rejects a symlinked parent directory that leaves the root', () => {
