@@ -319,7 +319,7 @@ jobs:
         run: |
           set -euo pipefail
           published=""
-          for attempt in 1 2 3 4 5 6; do
+          for attempt in $(seq 1 30); do
             published="$(npm view "dsh-locator@${VERSION}" gitHead 2>/dev/null || true)"
             if [ "${published}" = "${SHA}" ]; then
               echo "npm gitHead ${published} matches the release SHA"
