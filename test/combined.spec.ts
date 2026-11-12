@@ -133,6 +133,22 @@ describe('combined search', () => {
     expect(Object.keys(response).filter(key => key === 'content' || key === 'files' || key === 'dirs')).toEqual(['content', 'files', 'dirs'])
   })
 
+  it('keeps the response alive when the content status throws', async () => {
+    const broken = deps({ contentStatus: () => { throw new Error('db gone') } })
+    const empty = await runCombinedSearch(broken, readCombinedRequest({ query: '  ' }, 100))
+    expect(empty.content).toMatchObject({ hits: [], returned: 0, building: false })
+    expect(empty.files?.hits).toEqual([])
+    expect(empty.dirs?.hits).toEqual([])
+
+    const nonEmpty = await runCombinedSearch(deps({
+      contentStatus: () => { throw new Error('db gone') },
+      contentSearch: async () => [contentHit('file', '/tmp/a.md')],
+    }), readCombinedRequest({ query: 'note' }, 100))
+    expect(nonEmpty.content?.error).toBe('db gone')
+    expect(nonEmpty.files).toBeDefined()
+    expect(nonEmpty.dirs).toBeDefined()
+  })
+
   it('contains a failing store to its own group', async () => {
     const response = await runCombinedSearch(deps({
       search: async args => {

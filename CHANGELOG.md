@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.2 — 2026-11-12
+
+Robustness pass over the 0.8.1 review fixes.
+
+* A cancelled jump now also drops its scroll lock: the correction timers and scroll/pointer listeners used to survive an `Esc`, a new jump or a session switch while the highlight was cleared.
+* A detached Range self-heals: when the host re-renders the target row, the session watcher re-resolves the row and re-applies the highlight instead of silently clearing it.
+* `conversationScope` prefers a visible conversation pane, so a hidden main pane or a sidebar copy cannot capture the highlight.
+* The content group no longer calls `contentStatus()` outside the guard; a throwing status cannot fail the whole combined response (covered by a new test) and only the content group reports the error.
+* Panel callbacks (reveal/open/activate/insert) no longer act on stale rows while a newer query is loading.
+* The panel and its transient notice share one slot injection, so both are disposed together.
+* Tests: 38.
+
 ## 0.8.1 — 2026-11-12
 
 Pre-delivery review fixes for 0.8.0, plus an exact DOM anchor for assistant messages.

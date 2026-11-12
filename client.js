@@ -446,15 +446,22 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       CSS.highlights.set(HL_ACTIVE, new Highlight(ranges[0]))
     }
 
+    function isVisible(element) {
+      if (element.getClientRects().length === 0) return false
+      return getComputedStyle(element).visibility !== 'hidden'
+    }
+
     function conversationScope(sessionId) {
       const id = sessionId === undefined || sessionId === null ? '' : String(sessionId)
-      let embedded = null
+      let visibleMain = null
+      let visibleEmbedded = null
       for (const element of document.querySelectorAll('[data-conversation-content][data-conversation-session]')) {
         if (id !== '' && element.getAttribute('data-conversation-session') !== id) continue
-        if (element.closest('[data-sidebar-chat]') === null) return element
-        embedded = element
+        if (!isVisible(element)) continue
+        if (element.closest('[data-sidebar-chat]') === null) visibleMain = element
+        else visibleEmbedded = element
       }
-      return embedded
+      return visibleMain ?? visibleEmbedded
     }
 
     function chatFlow(scope) {
@@ -748,7 +755,10 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         }
         clearFindHighlight()
       }
-      activeHighlight = clearHighlight
+      // Cancelling must drop the scroll lock too, not only the paint: the lock
+      // owns timers and scroll/pointer listeners that would otherwise outlive
+      // the highlight.
+      activeHighlight = () => { unlock(); clearHighlight() }
       if (scroller !== null) {
         let writing = false
         let expected = scroller.scrollTop
@@ -784,8 +794,13 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       document.addEventListener('keydown', onKey, true)
       highlightCleanup.push(() => document.removeEventListener('keydown', onKey, true))
       const sessionWatch = setInterval(() => {
-        const connected = target.ranges[0].startContainer.isConnected
-        if (!connected || conversationScope(hit.sessionId) === null) cancelJump()
+        if (conversationScope(hit.sessionId) === null) { cancelJump(); return }
+        if (target.ranges[0].startContainer.isConnected) return
+        const next = finder()
+        if (next === null) { cancelJump(); return }
+        target = next
+        setFindHighlight(target.ranges)
+        centerRange(target.ranges[0])
       }, 1_000)
       highlightCleanup.push(() => clearInterval(sessionWatch))
       showNotice(t('jumped'))
@@ -940,12 +955,12 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       const reveal = useCallback(hit => {
         if (!hit || loading) return
         post('/dsh-locator/reveal', { path: hit.path }).then(() => notify(t('revealed'))).catch(() => copy(hit))
-      }, [copy, notify])
+      }, [copy, loading, notify])
 
       const openFile = useCallback(hit => {
         if (!hit || hit.dir || loading) return
         post('/dsh-locator/open', { path: hit.path }).then(() => notify(t('opened'))).catch(() => copy(hit))
-      }, [copy, notify])
+      }, [copy, loading, notify])
 
       const activate = useCallback(hit => {
         if (!hit || loading) return
@@ -955,17 +970,17 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           return
         }
         reveal(hit)
-      }, [close, notify, query, reveal])
+      }, [close, loading, notify, query, reveal])
 
       const insert = useCallback(hit => {
-        if (!hit || hit.kind === 'session') return
+        if (!hit || hit.kind === 'session' || loading) return
         const mention = '@"' + hit.path.replace(/"/g, '') + '" '
         close()
         setTimeout(() => {
           if (insertIntoComposer(mention)) notify(t('inserted'))
           else copyText(mention).then(() => notify(t('insertFailed'))).catch(() => {})
         }, 80)
-      }, [close, notify])
+      }, [close, loading, notify])
 
       const toggleScope = useCallback(key => {
         if (key === 'content' && !availableContent) return
@@ -1266,8 +1281,17 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         }, 'dsh-locator: search hotkey')
         ctx.effect(() => () => { cancelJump() }, 'dsh-locator: find highlight')
         try {
-          ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-panel', order: 60 }, Panel))
-          ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-notice', order: 61 }, Notice))
+          ctx.slots.inject('shell.overlay', () => {
+            const disposers = [
+              ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-panel', order: 60 }, Panel),
+              ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-notice', order: 61 }, Notice),
+            ]
+            return () => {
+              for (const dispose of disposers.reverse()) {
+                if (typeof dispose === 'function') dispose()
+              }
+            }
+          })
         } catch (error) {
           console.error('dsh-locator: overlay slot unavailable', error)
         }
