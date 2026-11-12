@@ -1048,4 +1048,31 @@ describe('content database self-healing', () => {
     expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
     expect((await content.search('EMPTYDBMARK', 5)).length).toBeGreaterThan(0)
   })
+
+
+  it('pages content hits with an offset without changing the total count', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-content-page-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-content-page-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries: Array<{ path: string; name: string; size: number; mtime: number; ext: string; dir: boolean }> = []
+    for (let i = 0; i < 12; i++) {
+      const path = join(root, `note-${String(i).padStart(2, '0')}.txt`)
+      writeFileSync(path, `offset needle body ${i}\n`)
+      entries.push({ path, name: `note-${String(i).padStart(2, '0')}.txt`, size: 30, mtime: Date.now(), ext: 'txt', dir: false })
+    }
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 20, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.boot()
+    await settle(content)
+    const first = await content.search('needle', 5, { count: 'exact' })
+    const second = await content.search('needle', 5, { count: 'exact', offset: 5 })
+    expect(first.count).toMatchObject({ value: 12, kind: 'exact' })
+    expect(second.count).toMatchObject({ value: 12, kind: 'exact' })
+    expect(first.hits).toHaveLength(5)
+    expect(second.hits).toHaveLength(5)
+    expect(new Set([...first.hits, ...second.hits].map(hit => hit.path)).size).toBe(10)
+  })
+
+
 })

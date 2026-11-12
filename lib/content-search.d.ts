@@ -49,6 +49,8 @@ export interface ContentSearchOptions {
     sessionPath?: string | null;
     count?: ContentCountMode;
     countLimit?: number;
+    /** Skip this many ranked matches before the page (panel load-more). */
+    offset?: number;
     /**
      * Keep only file/session documents whose stored path lives under this
      * directory prefix (the locator_find `scope: workspace` filter). Session

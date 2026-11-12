@@ -83,6 +83,13 @@ window.__ModuleLoader__.load({
 .dsh-locator-bar .grow{flex:1}
 .dsh-locator-sort{border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:11.5px;padding:2px 4px}
 .dsh-locator-dirbtn{border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:11.5px;padding:2px 6px;cursor:pointer}
+.dsh-locator-history{display:flex;align-items:center;gap:6px;padding:5px 14px;border-bottom:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.1));overflow:auto;white-space:nowrap}
+.dsh-locator-history-label{font-size:10.5px;opacity:.6;flex:none}
+.dsh-locator-chip{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.25));border-radius:999px;padding:1px 2px 1px 8px;flex:none}
+.dsh-locator-chip-go,.dsh-locator-chip-x{border:0;background:transparent;color:inherit;font:inherit;font-size:10.5px;cursor:pointer;padding:1px 3px}
+.dsh-locator-chip-x{opacity:.55}
+.dsh-locator-filterbar{display:flex;align-items:center;gap:8px;padding:5px 14px;border-bottom:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.1))}
+.dsh-locator-filter{flex:1;min-width:0;border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.2));border-radius:5px;background:transparent;color:inherit;font:inherit;font-size:11.5px;padding:2px 7px}
 .dsh-locator-status{margin-left:auto;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:50%}
 .dsh-locator-scroll{overflow:auto;flex:1;min-height:160px}
 .dsh-locator-group{display:block;border-bottom:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.12))}
@@ -229,6 +236,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
 contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget reached; some files are not indexed', contentTooShort: 'Content needs at least 3 characters (use Ctrl+F for shorter searches)', contentTimeout: 'Content search timed out; narrow the query or scope', contentBadChars: 'Content search does not support NUL/control characters',
         panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
         watchDegraded: 'watcher degraded; periodic refresh active',
+        panelFilter: 'Filter loaded results…', filterEmpty: 'No loaded result matches this filter', panelLoadMore: 'Load more', panelHistory: 'Recent searches', panelHistoryClear: 'Clear',
       },
       zh: {
         scopeContent: '内容', scopeFiles: '文件', scopeDirs: '目录',
@@ -275,6 +283,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
 contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预算上限，部分文件未被收录', contentTooShort: '内容搜索至少需要 3 个字符（更短的词请用 Ctrl+F 在会话内查找）', contentTimeout: '内容搜索超时，请缩小关键词或范围', contentBadChars: '内容搜索不支持 NUL/控制字符',
         panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
         watchDegraded: '文件监听降级，正在周期刷新',
+        panelFilter: '过滤当前结果…', filterEmpty: '已加载结果中没有符合过滤条件的内容', panelLoadMore: '加载更多', panelHistory: '最近搜索', panelHistoryClear: '清空',
       },
       es: {
         scopeContent: 'Contenido', scopeFiles: 'Archivos', scopeDirs: 'Carpetas',
@@ -321,6 +330,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
 contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el presupuesto del índice; algunos archivos no están indexados', contentTooShort: 'El contenido requiere al menos 3 caracteres (usa Ctrl+F para búsquedas más cortas)', contentTimeout: 'La búsqueda de contenido agotó el tiempo; reduce la consulta o el ámbito', contentBadChars: 'La búsqueda de contenido no admite NUL/caracteres de control',
         panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
         watchDegraded: 'vigilante degradado; refresco periódico activo',
+        panelFilter: 'Filtrar resultados cargados…', filterEmpty: 'Ningún resultado cargado coincide con el filtro', panelLoadMore: 'Cargar más', panelHistory: 'Búsquedas recientes', panelHistoryClear: 'Borrar',
       },
       pt: {
         scopeContent: 'Conteúdo', scopeFiles: 'Arquivos', scopeDirs: 'Pastas',
@@ -367,6 +377,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
 contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índice foi atingido; alguns arquivos não estão indexados', contentTooShort: 'O conteúdo exige pelo menos 3 caracteres (use Ctrl+F para buscas menores)', contentTimeout: 'A busca de conteúdo excedeu o tempo; reduza a consulta ou o escopo', contentBadChars: 'A busca de conteúdo não suporta NUL/caracteres de controle',
         panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
         watchDegraded: 'watcher degradado; atualização periódica ativa',
+        panelFilter: 'Filtrar resultados carregados…', filterEmpty: 'Nenhum resultado carregado corresponde ao filtro', panelLoadMore: 'Carregar mais', panelHistory: 'Buscas recentes', panelHistoryClear: 'Limpar',
       },
       hi: {
         scopeContent: 'सामग्री', scopeFiles: 'फ़ाइलें', scopeDirs: 'फ़ोल्डर',
@@ -413,6 +424,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
 contentWarning: 'इंडेक्स चेतावनी: {list}', contentBudget: 'सामग्री इंडेक्स बजट पूरा; कुछ फ़ाइलें इंडेक्स नहीं हैं', contentTooShort: 'सामग्री के लिए कम से कम 3 अक्षर चाहिए (छोटी खोज के लिए Ctrl+F)', contentTimeout: 'सामग्री खोज का समय समाप्त; क्वेरी या क्षेत्र घटाएँ', contentBadChars: 'सामग्री खोज NUL/नियंत्रण अक्षर नहीं लेती',
         panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
         watchDegraded: 'वॉचर क्षीण; आवधिक रिफ्रेश सक्रिय',
+        panelFilter: 'लोड किए गए परिणाम छाँटें…', filterEmpty: 'लोड किए गए परिणामों में फ़िल्टर से मेल नहीं', panelLoadMore: 'और लोड करें', panelHistory: 'हाल की खोजें', panelHistoryClear: 'साफ़ करें',
       },
     }
     const LANG = (() => {
@@ -1730,6 +1742,17 @@ self.onmessage = event => {
       )
     }
 
+    const PANEL_HISTORY_KEY = 'dsh-locator-panel-history-v1'
+    function readPanelHistory() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(PANEL_HISTORY_KEY) || '[]')
+        return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string').slice(0, 10) : []
+      } catch { return [] }
+    }
+    function writePanelHistory(list) {
+      try { localStorage.setItem(PANEL_HISTORY_KEY, JSON.stringify(list.slice(0, 10))) } catch { /* ignore */ }
+    }
+
     function Panel() {
       const open = useOpen()
       const prefs = useMemo(readPrefs, [])
@@ -1739,6 +1762,10 @@ self.onmessage = event => {
       const [scopes, setScopes] = useState(prefs.scopes)
       const [groups, setGroups] = useState(null)
       const [loading, setLoading] = useState(false)
+      const [loadingMore, setLoadingMore] = useState(false)
+      const [filter, setFilter] = useState('')
+      const [history, setHistory] = useState(readPanelHistory)
+      const [offsets, setOffsets] = useState({ files: 0, dirs: 0, content: 0 })
       const [error, setError] = useState('')
       const [took, setTook] = useState(0)
       const [status, setStatus] = useState(null)
@@ -1768,6 +1795,21 @@ self.onmessage = event => {
       useEffect(() => {
         writePrefs({ scopes, sort, desc, matchMode, caseSensitive, wholeWord })
       }, [scopes, sort, desc, matchMode, caseSensitive, wholeWord])
+
+      useEffect(() => {
+        if (!open) return undefined
+        const text = query.trim()
+        if (text.length < 2) return undefined
+        const timer = setTimeout(() => {
+          setHistory(previous => {
+            if (previous[0] === text) return previous
+            const next = [text, ...previous.filter(value => value !== text)].slice(0, 10)
+            writePanelHistory(next)
+            return next
+          })
+        }, 900)
+        return () => clearTimeout(timer)
+      }, [open, query])
 
       useEffect(() => {
         if (!open) return undefined
@@ -1839,6 +1881,7 @@ self.onmessage = event => {
           abortRef.current = controller
           setLoading(true)
           setError('')
+          setOffsets({ files: 0, dirs: 0, content: 0 })
           post('/dsh-locator/combined', {
             query,
             content: effectiveScopes.content,
@@ -1846,6 +1889,9 @@ self.onmessage = event => {
             dirs: effectiveScopes.dirs,
             limit: PAGE_NAME,
             contentLimit: PAGE_CONTENT,
+            filesOffset: 0,
+            dirsOffset: 0,
+            contentOffset: 0,
             sort,
             desc,
             matchMode,
@@ -1859,6 +1905,11 @@ self.onmessage = event => {
               content: data.content,
               files: data.files,
               dirs: data.dirs,
+            })
+            setOffsets({
+              files: data.files?.returned ?? 0,
+              dirs: data.dirs?.returned ?? 0,
+              content: data.content?.returned ?? 0,
             })
             if (typeof data.contentEnabled === 'boolean') setAvailableContent(data.contentEnabled)
             setTook(typeof data.tookMs === 'number' ? data.tookMs : 0)
@@ -1879,16 +1930,25 @@ self.onmessage = event => {
         return () => clearTimeout(timer)
       }, [open, contentBuilding, refreshTick])
 
+      const panelHitKey = (group, hit) => group + '|' + String(hit.path || '') + '|' + String(hit.messageId || '')
       const rows = useMemo(() => {
         if (groups === null) return []
+        const needle = filter.trim().toLowerCase()
         const out = []
         for (const group of ['content', 'files', 'dirs']) {
           if (!effectiveScopes[group]) continue
           const hits = groups[group] && Array.isArray(groups[group].hits) ? groups[group].hits : []
-          for (const hit of hits) out.push({ group, hit })
+          for (const hit of hits) {
+            if (needle !== '') {
+              const haystack = [hit.path, hit.name, hit.title, hit.snippet].filter(value => typeof value === 'string').join(' ').toLowerCase()
+              if (!haystack.includes(needle)) continue
+            }
+            out.push({ group, hit })
+          }
         }
         return out
-      }, [groups, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs])
+      }, [groups, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs, filter])
+      const rowIndexByKey = useMemo(() => new Map(rows.map((entry, index) => [panelHitKey(entry.group, entry.hit), index])), [rows])
 
       useEffect(() => {
         setSelected(value => Math.min(Math.max(0, value), Math.max(0, rows.length - 1)))
@@ -2036,6 +2096,81 @@ self.onmessage = event => {
         if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' })
       }, [selected])
 
+      const loadMore = useCallback(async () => {
+        if (loading || loadingMore || groups === null) return
+        setLoadingMore(true)
+        setError('')
+        try {
+          const data = await post('/dsh-locator/combined', {
+            query,
+            content: effectiveScopes.content,
+            files: effectiveScopes.files,
+            dirs: effectiveScopes.dirs,
+            limit: PAGE_NAME,
+            contentLimit: PAGE_CONTENT,
+            filesOffset: offsets.files,
+            dirsOffset: offsets.dirs,
+            contentOffset: offsets.content,
+            sort,
+            desc,
+            matchMode,
+            caseSensitive,
+            wholeWord,
+            sessionId: sessionOnly ? activeSessionId : '',
+            count: matchMode === 'regex' ? 'none' : 'exact',
+          })
+          setGroups(previous => {
+            if (previous === null) return previous
+            const merged = { ...previous }
+            for (const key of ['content', 'files', 'dirs']) {
+              const oldGroup = previous[key]
+              const nextGroup = data[key]
+              if (oldGroup === undefined || nextGroup === undefined) continue
+              const oldHits = Array.isArray(oldGroup.hits) ? oldGroup.hits : []
+              const nextHits = Array.isArray(nextGroup.hits) ? nextGroup.hits : []
+              const seen = new Set(oldHits.map(hit => panelHitKey(key, hit)))
+              const added = nextHits.filter(hit => !seen.has(panelHitKey(key, hit)))
+              merged[key] = {
+                ...nextGroup,
+                hits: [...oldHits, ...added],
+                returned: oldHits.length + added.length,
+                total: Math.max(oldGroup.total ?? 0, nextGroup.total ?? 0),
+                count: oldGroup.count?.kind === 'exact' ? oldGroup.count : nextGroup.count,
+              }
+            }
+            // Keep the one-row-per-path invariant across pages too.
+            const contentPaths = new Set((merged.content?.hits ?? []).map(hit => hit.path))
+            if (merged.files !== undefined) {
+              merged.files = { ...merged.files, hits: (merged.files.hits ?? []).filter(hit => !contentPaths.has(hit.path)) }
+              merged.files.returned = merged.files.hits.length
+            }
+            return merged
+          })
+          setOffsets(current => ({
+            files: current.files + (data.files?.returned ?? 0),
+            dirs: current.dirs + (data.dirs?.returned ?? 0),
+            content: current.content + (data.content?.returned ?? 0),
+          }))
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        } finally {
+          setLoadingMore(false)
+        }
+      }, [activeSessionId, caseSensitive, desc, effectiveScopes.content, effectiveScopes.dirs, effectiveScopes.files, groups, loading, loadingMore, matchMode, offsets, query, sessionOnly, sort, wholeWord])
+
+      const canLoadMore = groups !== null && ['content', 'files', 'dirs'].some(key => {
+        if (!effectiveScopes[key]) return false
+        const group = groups[key]
+        if (group === undefined) return false
+        const fetched = offsets[key]
+        if (key === 'content') {
+          const count = group.count
+          if (count !== undefined && count.kind === 'exact') return count.value > fetched
+          return (group.returned ?? 0) >= PAGE_CONTENT && typeof group.error !== 'string'
+        }
+        return (group.total ?? 0) > fetched
+      })
+
       if (!open) return null
 
       const content = groups !== null ? groups.content : undefined
@@ -2124,10 +2259,10 @@ self.onmessage = event => {
         if (code === 'invalid-control-char') return t('contentBadChars')
         return code
       }
-      let index = -1
       const renderGroup = (key, label, group, extra) => {
         if (!scopes[key] || group === undefined) return null
         const hits = Array.isArray(group.hits) ? group.hits : []
+        const visibleHits = hits.filter(hit => rowIndexByKey.has(panelHitKey(key, hit)))
         const count = typeof group.returned === 'number' ? group.returned : hits.length
         const warnings = Array.isArray(group.warnings) && group.warnings.length > 0
           ? t('contentWarning', { list: group.warnings.join(', ') })
@@ -2152,13 +2287,15 @@ self.onmessage = event => {
         return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
           groupHead(key, label, countLabel(group, count), combinedNote === '' ? null : combinedNote),
           extra === undefined ? null : extra,
-          hits.length === 0
+          visibleHits.length === 0
             ? h('div', { className: 'dsh-locator-groupempty' },
-                key === 'content' && scopes.content
-                  ? (sessionOnly && query.trim().length >= 3 ? t('panelSessionHint')
-                    : query.trim().length < 3 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
-                  : (query.trim() === '' ? t('emptyQuery') : t('emptyResults')))
-            : hits.map(hit => { index++; return rowFor(key, hit, index) }),
+                filter.trim() !== '' && hits.length > 0
+                  ? t('filterEmpty')
+                  : (key === 'content' && scopes.content
+                    ? (sessionOnly && query.trim().length >= 3 ? t('panelSessionHint')
+                      : query.trim().length < 3 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
+                    : (query.trim() === '' ? t('emptyQuery') : t('emptyResults'))))
+            : visibleHits.map(hit => rowFor(key, hit, rowIndexByKey.get(panelHitKey(key, hit)))),
         )
       }
 
@@ -2182,7 +2319,8 @@ self.onmessage = event => {
             spellCheck: false,
             autoComplete: 'off',
             placeholder: t('placeholder'),
-            onChange: event => { setQuery(event.target.value); setSelected(0) },
+            onChange: event => { setQuery(event.target.value); setFilter(''); setSelected(0) },
+            onInput: event => { setQuery(event.target.value); setFilter(''); setSelected(0) },
             'aria-label': t('searchLabel'),
             role: 'combobox',
             'aria-expanded': 'true',
@@ -2245,6 +2383,28 @@ self.onmessage = event => {
                   ? ' · ' + t('watchDegraded')
                   : '')),
         ),
+        history.length > 0
+          ? h('div', { className: 'dsh-locator-history' },
+              h('span', { className: 'dsh-locator-history-label' }, t('panelHistory')),
+              history.map(text => h('span', { key: 'hist-' + text, className: 'dsh-locator-chip' },
+                h('button', { className: 'dsh-locator-chip-go', onClick: () => { setQuery(text); setFilter(''); setSelected(0) } }, text),
+                h('button', { className: 'dsh-locator-chip-x', 'aria-label': t('panelHistoryClear'),
+                  onClick: () => setHistory(previous => { const next = previous.filter(value => value !== text); writePanelHistory(next); return next }) }, '×'))),
+              h('button', { className: 'dsh-locator-dirbtn', onClick: () => { setHistory([]); writePanelHistory([]) } }, t('panelHistoryClear')),
+            )
+          : null,
+        h('div', { className: 'dsh-locator-filterbar' },
+          h('input', {
+            className: 'dsh-locator-filter',
+            value: filter,
+            placeholder: t('panelFilter'),
+            spellCheck: false,
+            'aria-label': t('panelFilter'),
+            onChange: event => { setFilter(event.target.value); setSelected(0) },
+            onInput: event => { setFilter(event.target.value); setSelected(0) },
+          }),
+          filter.trim() === '' ? null : h('span', { className: 'dsh-locator-count' }, String(rows.length)),
+        ),
         sessionOnly ? h('div', { className: 'dsh-locator-groupempty' }, t('panelSessionHint')) : null,
         h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },
           error !== ''
@@ -2271,6 +2431,9 @@ self.onmessage = event => {
             + (status && status.scanning ? ' · ' + t('indexing') : '')
             + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
+          canLoadMore
+            ? h('button', { className: 'dsh-locator-dirbtn', disabled: loadingMore, onClick: loadMore }, loadingMore ? t('loading') : t('panelLoadMore'))
+            : null,
           toast === '' ? null : h('span', { className: 'dsh-locator-toast' }, toast),
           h('span', null, t('footer') + ' · Ctrl+F ' + t('findOpen')),
         ),

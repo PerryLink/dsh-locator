@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0 — 2026-11-13
+
+Search coverage, panel productivity and boundary hardening.
+
+* **Full content index mode**: setting `contentMaxTotalBytes: 0` and `contentMaxFiles: 0` indexes every eligible text file (reference machine: ~185k eligible files / 2.0 GB text, ~5.9 GB FTS database; contentExcludes already removes package/toolchain trees). The first build takes a few minutes and exact/first-page queries stay ~0.04–0.7 s for common terms (worker remains the only query path, timeout still bounded). The default caps stay at 1 GB / 200k so ordinary installs do not silently consume tens of GB.
+* **`locator_find` default scope fix**: a caller cwd outside every configured root no longer restricts file hits to that cwd (which necessarily produced zero rows); it searches the indexed roots while session hits stay limited to the caller session. Explicit `scope: "all"` still crosses both. The tool description states the behavior.
+* **Panel pagination/history/filter**: name and content groups support offsets; the panel has a Load more button, recent searches (localStorage, per-item and clear-all), and an in-results filter over loaded rows. Content search accepts an offset and returns the same total count across pages; the worker protocol carries it unchanged.
+* **Boundary hardening**: Linux targets below a nested mount point inside a root are refused (bind-mount escape defence via `/proc/self/mountinfo`); `/open` opens the final component with `O_NOFOLLOW` and compares inode/device against the authorized stat before spawning, narrowing the TOCTOU window. Symlink/realpath checks remain.
+* Tests: 122+ vitest (offset/page tests incl. content paging, mount-escape, outside-root locator_find, panel jsdom harness covering filter/load-more/history).
+
 ## 0.10.1 — 2026-11-12
 
 Watcher hotfix for 0.10.0.

@@ -56,6 +56,8 @@ export interface ContentSearchOptions {
   sessionPath?: string | null
   count?: ContentCountMode
   countLimit?: number
+  /** Skip this many ranked matches before the page (panel load-more). */
+  offset?: number
   /**
    * Keep only file/session documents whose stored path lives under this
    * directory prefix (the locator_find `scope: workspace` filter). Session
@@ -534,12 +536,12 @@ function buildHits(db: DatabaseSync, plan: QueryPlan, rowids: readonly number[],
 }
 
 /** Candidate rowids for one page (no post-filter). */
-function pageRowids(db: DatabaseSync, plan: QueryPlan, limit: number): { rowids: number[]; scores: Map<number, number> } {
+function pageRowids(db: DatabaseSync, plan: QueryPlan, limit: number, offset = 0): { rowids: number[]; scores: Map<number, number> } {
   const scores = new Map<number, number>()
   const sql = plan.rankOrder
-    ? `SELECT rowid AS rowid, rank AS score FROM docs WHERE ${plan.where} ORDER BY rank LIMIT ?`
-    : `SELECT rowid AS rowid FROM docs WHERE ${plan.where} LIMIT ?`
-  const rows = db.prepare(sql).all(...plan.params, limit) as Array<{ rowid?: number; score?: number }>
+    ? `SELECT rowid AS rowid, rank AS score FROM docs WHERE ${plan.where} ORDER BY rank LIMIT ? OFFSET ?`
+    : `SELECT rowid AS rowid FROM docs WHERE ${plan.where} LIMIT ? OFFSET ?`
+  const rows = db.prepare(sql).all(...plan.params, limit, offset) as Array<{ rowid?: number; score?: number }>
   const rowids: number[] = []
   for (const row of rows) {
     if (typeof row.rowid !== 'number') continue
@@ -586,6 +588,7 @@ function scanWholeWord(
   db: DatabaseSync,
   plan: QueryPlan,
   limit: number,
+  offset: number,
   countMode: ContentCountMode,
   countLimit: number,
   sessionScoped: boolean,
@@ -618,7 +621,7 @@ function scanWholeWord(
     scannedBytes += row.body.length
     if (!matchesWholeWord(row.body, plan.terms, plan.caseSensitive)) continue
     count++
-    if (rowids.length < limit) rowids.push(rowid)
+    if (count > offset && rowids.length < limit) rowids.push(rowid)
     if (countMode === 'none') {
       if (rowids.length >= limit) {
         // The page is full; no count was requested, so stopping is safe.
@@ -696,7 +699,7 @@ export function searchContent(
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 
   if (plan.wholeWord) {
-    const scanned = scanWholeWord(db, plan, capped, countMode, countLimit, options.sessionPath != null, resolveScanBudget(options.scanBudget))
+    const scanned = scanWholeWord(db, plan, capped, Math.max(0, Math.trunc(options.offset ?? 0)), countMode, countLimit, options.sessionPath != null, resolveScanBudget(options.scanBudget))
     for (const warning of scanned.warnings) warnings.push(warning)
     const hits = buildHits(db, plan, scanned.rowids, new Map())
     return { hits, count: scanned.count, warnings: [...new Set(warnings)] }
@@ -716,7 +719,7 @@ export function searchContent(
     count = boundedCount(db, plan, countLimit)
     if (count.kind === 'bounded') warnings.push('bounded-count')
   }
-  const page = pageRowids(db, plan, capped)
+  const page = pageRowids(db, plan, capped, Math.max(0, Math.trunc(options.offset ?? 0)))
   const hits = buildHits(db, plan, page.rowids, page.scores)
   return { hits, count, warnings: [...new Set(warnings)] }
 }

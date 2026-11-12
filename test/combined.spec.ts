@@ -320,4 +320,18 @@ describe('combined search', () => {
       expect(args.wholeWord).toBe(true)
     }
   })
+
+  it('passes per-group offsets for load-more', async () => {
+    const names: SearchArgs[] = []
+    const options: ContentSearchOptions[] = []
+    const request = readCombinedRequest({ query: 'note', filesOffset: 50, dirsOffset: 20, contentOffset: 30 }, 100)
+    expect(request).toMatchObject({ filesOffset: 50, dirsOffset: 20, contentOffset: 30 })
+    await runCombinedSearch(deps({
+      search: async args => { names.push(args); return result([]) },
+      contentSearch: async (_query, _limit, next) => { options.push(next); return contentResult([]) },
+    }), request)
+    expect(names.find(args => args.filesOnly)?.offset).toBe(50)
+    expect(names.find(args => args.dirsOnly)?.offset).toBe(20)
+    expect(options[0]?.offset).toBe(30)
+  })
 })

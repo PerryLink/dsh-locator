@@ -13,7 +13,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** A canonical path and whether the target itself (not just an ancestor) exists. */
@@ -76,6 +76,45 @@ function isUnder(root: string, target: string): boolean {
   return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
+/**
+ * Mount points that live *below* an indexed root. A bind mount can put a
+ * directory from outside the root there while its canonical path still looks
+ * inside; Linux exposes those mount points in `/proc/self/mountinfo`. This is a
+ * best-effort defence, not a substitute for the realpath check.
+ */
+function linuxMountPoints(): string[] {
+  if (process.platform !== 'linux') return []
+  let text = ''
+  try { text = readFileSync('/proc/self/mountinfo', 'utf8') } catch { return [] }
+  const points: string[] = []
+  for (const line of text.split('\n')) {
+    if (line === '') continue
+    // mountinfo field 5 (0-based 4) is the mount point, escaped as \040 etc.
+    const fields = line.split(' ')
+    const raw = fields[4]
+    if (raw === undefined) continue
+    const point = raw.replace(/\\([0-7]{3})/g, (_match, octal: string) => String.fromCharCode(parseInt(octal, 8)))
+    if (isAbsolute(point)) points.push(point)
+  }
+  return points
+}
+
+/**
+ * Return the nested mount point that could hide content outside a root, if any.
+ * @param target - canonical target path.
+ * @param roots - canonical roots.
+ * @param mounts - test seam; defaults to the current process mount table.
+ */
+export function mountEscape(target: string, roots: readonly string[], mounts: readonly string[] = linuxMountPoints()): string | undefined {
+  for (const mount of mounts) {
+    for (const root of roots) {
+      if (!isUnder(root, mount) || comparable(mount) === comparable(root)) continue
+      if (isUnder(mount, target)) return mount
+    }
+  }
+  return undefined
+}
+
 /** Canonical (real) forms of the configured roots; unusable roots are dropped, never widened. */
 function realRoots(roots: readonly string[]): string[] {
   const canonical: string[] = []
@@ -102,8 +141,11 @@ function realRoots(roots: readonly string[]): string[] {
 export function resolveWithinRoots(target: string, roots: readonly string[]): ResolvedTarget | undefined {
   const real = realPathOf(target)
   if (real === undefined) return undefined
-  for (const root of realRoots(roots)) {
-    if (isUnder(root, real.path)) return real
+  const canonicalRoots = realRoots(roots)
+  for (const root of canonicalRoots) {
+    if (!isUnder(root, real.path)) continue
+    if (mountEscape(real.path, canonicalRoots) !== undefined) return undefined
+    return real
   }
   return undefined
 }

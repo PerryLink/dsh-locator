@@ -402,6 +402,14 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.11.0 upgrade notes
+
+- **Full content index**: set `contentMaxTotalBytes: 0` and `contentMaxFiles: 0` to index every eligible text file. On the reference machine that is ~**185k files / 2.0 GB** of text, ~**5.9 GB** FTS database; the first build takes a few minutes and queries stay ~**0.04–0.7 s**. The default caps (1 GB / 200k) stay in place so ordinary installs do not silently consume tens of GB; the panel shows `truncated`.
+- `locator_find` stays workspace-scoped (current session + caller cwd), but when the caller cwd is **outside every indexed root** it no longer restricts file hits to that cwd (which could only return nothing); it searches the indexed roots and still limits session hits to the current session. Use `scope: "all"` to cross scopes explicitly.
+- Panel: **load more** (offset paging), **recent searches** (localStorage, clearable), and **filter loaded results**.
+- Security: reject targets below nested mount points inside a root on Linux (bind-mount escape); `/open` opens with `O_NOFOLLOW` and verifies the inode, narrowing the TOCTOU window.
+- Content queries accept offsets; name/content groups page independently.
+
 ## 0.10.0 upgrade notes
 
 - Content search requires at least **3 characters**; use `Ctrl+F` for 1–2 character searches. Queries over 256 characters/32 terms are rejected.

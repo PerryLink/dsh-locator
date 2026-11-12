@@ -123,7 +123,7 @@ describe('locator_find workspace scope', () => {
       },
       status: () => ({ ...state }),
     } as unknown as ContentIndex
-    const tool = makeFindTool(fake)
+    const tool = makeFindTool(fake, undefined, ['/tmp/caller-workspace'])
     await tool.execute({ query: 'note' }, exec())
     expect(calls[0]).toMatchObject({ sessionId: 'caller-session', pathPrefix: '/tmp/caller-workspace' })
   })
@@ -136,11 +136,29 @@ describe('locator_find workspace scope', () => {
       },
       status: () => ({ ...state }),
     } as unknown as ContentIndex
-    const tool = makeFindTool(fake)
+    const tool = makeFindTool(fake, undefined, ['/tmp/caller-workspace'])
     await tool.execute({ query: 'note', scope: 'all' }, exec())
     expect(calls[0]!.sessionId).toBeUndefined()
     expect(calls[0]!.pathPrefix).toBeUndefined()
     await tool.execute({ query: 'note', scope: 'all', sessionId: 'other', pathPrefix: '/tmp/other' }, exec())
     expect(calls[1]!).toMatchObject({ sessionId: 'other', pathPrefix: '/tmp/other' })
   })
+
+  it('does not restrict file hits to a cwd outside every indexed root', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = {
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] }
+      },
+      status: () => ({ ...state }),
+    } as unknown as ContentIndex
+    const tool = makeFindTool(fake, undefined, ['/home/yy'])
+    await tool.execute({ query: 'note' }, {
+      agent: { session: { id: 'caller-session', header: { cwd: '/mnt/d/projects/elsewhere' } } },
+    } as never)
+    expect(calls[0]).toMatchObject({ sessionId: 'caller-session' })
+    expect(calls[0]!.pathPrefix).toBeUndefined()
+  })
+
 })
