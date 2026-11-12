@@ -70,7 +70,7 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 			w.markDegraded(reason)
 		}
 		before := w.watchedDirCount()
-		if err := w.addTree(root); err != nil {
+		if err := w.addTree(root, true); err != nil {
 			w.report(err)
 		}
 		if w.watchedDirCount() > before {
@@ -147,14 +147,14 @@ func (w *watcher) markDegraded(reason string) {
 // addTree walks root and adds one inotify watch per directory. Failures are
 // reported and counted; as long as the root itself was added the tree is still
 // partially covered and the daemon's refresh fallback covers the rest.
-func (w *watcher) addTree(root string) error {
+func (w *watcher) addTree(root string, required bool) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Temporary build/test directories (pnpm _tmp, editor swaps) can
 			// disappear between readdir and lstat. That is normal churn, not
 			// missing watcher coverage: treat it as a vanished entry instead of
 			// disabling the native watcher and falling back to a 30-minute rescan.
-			if path != root && transientWatchError(err) {
+			if (!required || path != root) && transientWatchError(err) {
 				if d != nil && d.IsDir() {
 					return fs.SkipDir
 				}
@@ -175,7 +175,7 @@ func (w *watcher) addTree(root string) error {
 		}
 		_, werr := w.add(path)
 		if werr != nil {
-			if path != root && transientWatchError(werr) {
+			if (!required || path != root) && transientWatchError(werr) {
 				return fs.SkipDir
 			}
 			w.report(werr)
@@ -339,7 +339,7 @@ func (w *watcher) handle(buf []byte) {
 			switch {
 			case mask&(syscall.IN_CREATE|syscall.IN_MOVED_TO) != 0:
 				if !excluded(path, name, w.excludes) {
-					if err := w.addTree(path); err != nil {
+					if err := w.addTree(path, false); err != nil {
 						w.report(err)
 					}
 					w.upsert(path)
