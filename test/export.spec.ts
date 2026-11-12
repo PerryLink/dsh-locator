@@ -15,6 +15,12 @@ interface RegisteredTool {
 }
 
 const cleanups: Array<() => void> = []
+// The index engine process can outlive `dispose()` by a few milliseconds on
+// macOS runners; retry the temporary-directory removal instead of failing the
+// suite with ENOTEMPTY when a state file is still being closed.
+function removeTree(path: string): void {
+  rmSync(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+}
 afterAll(() => {
   for (const cleanup of cleanups.reverse()) cleanup()
 })
@@ -24,7 +30,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
     const root = mkdtempSync(join(tmpdir(), 'locator-export-'))
     const state = mkdtempSync(join(tmpdir(), 'locator-export-state-'))
     const dbPath = join(root, 'index.sqlite')
-    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    cleanups.push(() => removeTree(root), () => removeTree(state))
     mkdirSync(join(root, 'docs'))
     writeFileSync(join(root, 'docs', 'report.pdf'), 'x')
     writeFileSync(join(root, 'main.go'), 'package main')
