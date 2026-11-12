@@ -33,6 +33,12 @@ export interface CombinedRequest {
   query: string
   limit: number
   contentLimit: number
+  /** Name-index offsets for load-more. */
+  offset: number
+  filesOffset: number
+  dirsOffset: number
+  /** Content-index offset for load-more. */
+  contentOffset: number
   sort: string
   desc: boolean
   scopes: CombinedScopes
@@ -130,6 +136,10 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
     query: typeof body.query === 'string' ? body.query : '',
     limit: nameLimit,
     contentLimit,
+    offset: clamp(body.offset, 0, 1_000_000, 0),
+    filesOffset: clamp(body.filesOffset ?? body.offset, 0, 1_000_000, 0),
+    dirsOffset: clamp(body.dirsOffset ?? body.offset, 0, 1_000_000, 0),
+    contentOffset: clamp(body.contentOffset, 0, 1_000_000, 0),
     sort: sortKey(body.sort),
     desc: body.desc === true,
     scopes: readScopes(body),
@@ -247,7 +257,7 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
     const result = await deps.search({
       query: nameQuery,
       limit: request.limit,
-      offset: 0,
+      offset: files ? request.filesOffset : request.dirsOffset,
       sort: request.sort,
       desc: request.desc,
       regex: request.matchMode === 'regex',
@@ -311,6 +321,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     wholeWord: request.wholeWord,
     count: request.count,
     countLimit: request.countLimit,
+    offset: request.contentOffset,
     ...(request.sessionId === null ? {} : { sessionId: request.sessionId }),
   }
   try {

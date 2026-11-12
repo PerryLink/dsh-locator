@@ -31,6 +31,13 @@ export interface ResolvedTarget {
  */
 export declare function realPathOf(target: string): ResolvedTarget | undefined;
 /**
+ * Return the nested mount point that could hide content outside a root, if any.
+ * @param target - canonical target path.
+ * @param roots - canonical roots.
+ * @param mounts - test seam; defaults to the current process mount table.
+ */
+export declare function mountEscape(target: string, roots: readonly string[], mounts?: readonly string[]): string | undefined;
+/**
  * Authorize `target` against the indexed roots on canonical paths.
  *
  * The target and the roots are both resolved with `realpath`; a symlink that

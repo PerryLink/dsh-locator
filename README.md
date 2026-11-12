@@ -364,6 +364,14 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.11.0 升级注意
+
+- **全量内容索引**：把 `contentMaxTotalBytes` 和 `contentMaxFiles` 都设为 `0`，即可索引全部符合文本扩展名/单文件上限的文件。实测本机 eligible 约 **185k 文件 / 2.0GB 文本**，FTS 库约 **5.9GB**；首次构建约几分钟，查询约 **0.04–0.7s**。默认仍保留 1GB/200k 上限，避免普通用户磁盘暴涨；面板会显示 `truncated`。
+- `locator_find` 默认仍 workspace：当前会话 + 调用者 cwd；但如果 cwd **不在任何已索引 root 内**，不再把文件命中限制到 cwd（否则必然为空），而是搜索已索引 root 的文件；会话仍只查当前会话。跨范围仍用 `scope:"all"`。
+- 面板新增：**加载更多**（按 offset 分页）、**最近搜索**（localStorage，可清空）、**过滤已加载结果**。
+- 安全：Linux 下拒绝 root 内嵌套 mount point 的目标（bind mount 防逃逸）；`/open` 用 `O_NOFOLLOW` 打开并核对 inode，缩小 TOCTOU 窗口。
+- 内容查询支持 offset；名称/内容分组各自分页。
+
 ## 0.10.0 升级注意
 
 - 内容搜索最短 **3 个字符**；1–2 字符请用 `Ctrl+F` 会话内查找。查询超过 256 字符/32 个词会直接报错。

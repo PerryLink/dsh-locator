@@ -34,7 +34,7 @@ import {
   resolveWithinRoots,
   revealInFileManager,
 } from './reveal.ts'
-import { statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, statSync } from 'node:fs'
 
 interface WebServerLike {
   register(route: {
@@ -395,11 +395,26 @@ async function openPath(rt: LocatorRuntime, raw: Record<string, unknown>): Promi
   if (!finalInfo.isFile()) return { ok: false, error: 'not a file' }
   const finalRefusal = executableFileRejection(final.path, finalInfo.mode)
   if (finalRefusal !== undefined) return { ok: false, error: finalRefusal }
+  // Last TOCTOU window: open the final component without following a symlink and
+  // compare the inode with the stat we just authorized. Keep the fd open until
+  // the opener has spawned; the path is still resolved by the platform opener,
+  // but a symlink swapped in after this point can no longer be authorized here.
+  let fd: number | undefined
   try {
+    const noFollow = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0
+    fd = openSync(final.path, constants.O_RDONLY | noFollow)
+    const opened = fstatSync(fd)
+    if (!opened.isFile() || opened.ino !== finalInfo.ino || opened.dev !== finalInfo.dev) {
+      return { ok: false, error: 'path changed while opening' }
+    }
+    const openedRefusal = executableFileRejection(final.path, opened.mode)
+    if (openedRefusal !== undefined) return { ok: false, error: openedRefusal }
     await openWithDefaultApp(final.path)
     return { ok: true }
   } catch (error) {
     return { ok: false, error: messageOf(error) }
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }
 

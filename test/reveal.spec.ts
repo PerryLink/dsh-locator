@@ -1,7 +1,7 @@
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { withinRoots } from '../src/reveal.ts'
+import { mountEscape, withinRoots } from '../src/reveal.ts'
 
 describe('withinRoots', () => {
   const root = resolve(tmpdir(), 'locator-reveal-root')
@@ -16,5 +16,13 @@ describe('withinRoots', () => {
   it('rejects relative and empty paths', () => {
     expect(withinRoots('relative/file.txt', [root])).toBe(false)
     expect(withinRoots('', [root])).toBe(false)
+  })
+
+  it('rejects targets below a nested mount point', () => {
+    expect(mountEscape('/home/u/root/bind/secret.txt', ['/home/u/root'], ['/home/u/root/bind'])).toBe('/home/u/root/bind')
+    // An ancestor mount (home on its own filesystem) is not an escape.
+    expect(mountEscape('/home/u/root/a.txt', ['/home/u/root'], ['/home'])).toBeUndefined()
+    // The root itself is allowed even when it is a mount point.
+    expect(mountEscape('/home/u/root/a.txt', ['/home/u/root'], ['/home/u/root'])).toBeUndefined()
   })
 })

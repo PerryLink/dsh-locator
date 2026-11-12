@@ -164,7 +164,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
   if (content !== undefined) {
-    ctx.tools.register(makeFindTool(content, ensureContent))
+    ctx.tools.register(makeFindTool(content, ensureContent, roots))
     ctx.tools.register(makeReindexTool(content, ensureContent))
   }
 

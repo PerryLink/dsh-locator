@@ -4,5 +4,5 @@
  */
 import type { ContentIndex } from './content.ts';
 /** Build the locator_find tool. */
-export declare function makeFindTool(content: ContentIndex, ensure?: () => void): import("@deepseek-ai/dsh-tools").ToolDefinition;
+export declare function makeFindTool(content: ContentIndex, ensure?: () => void, roots?: readonly string[]): import("@deepseek-ai/dsh-tools").ToolDefinition;
 //# sourceMappingURL=find.d.ts.map

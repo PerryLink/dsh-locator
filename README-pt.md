@@ -402,6 +402,13 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Notas de atualização 0.11.0
+
+- **Índice de conteúdo completo**: `contentMaxTotalBytes: 0` e `contentMaxFiles: 0` indexam todos os arquivos de texto elegíveis (~185k arquivos / 2.0 GB, ~5.9 GB de FTS na máquina de referência); a primeira construção leva alguns minutos e as consultas ficam em ~0,04–0,7 s. Os limites padrão continuam ativos para não consumir dezenas de GB sem aviso.
+- `locator_find` continua no workspace; se o cwd estiver fora de todos os roots indexados, ele não restringe mais os arquivos a esse cwd (antes retornava vazio) e busca nos roots; sessões continuam limitadas à atual. Use `scope: "all"` para cruzar escopos.
+- Painel: **carregar mais** (paginação por offset), **buscas recentes** e **filtro dos resultados carregados**.
+- Segurança: rejeita destinos sob mount points aninhados dentro de um root no Linux; `/open` usa `O_NOFOLLOW` e confere o inode.
+
 ## Notas de atualização 0.10.0
 
 - A busca de conteúdo exige pelo menos **3 caracteres**; use `Ctrl+F` para 1–2. Consultas com mais de 256 caracteres ou 32 termos são rejeitadas.

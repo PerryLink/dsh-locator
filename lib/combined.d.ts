@@ -23,6 +23,12 @@ export interface CombinedRequest {
     query: string;
     limit: number;
     contentLimit: number;
+    /** Name-index offsets for load-more. */
+    offset: number;
+    filesOffset: number;
+    dirsOffset: number;
+    /** Content-index offset for load-more. */
+    contentOffset: number;
     sort: string;
     desc: boolean;
     scopes: CombinedScopes;
