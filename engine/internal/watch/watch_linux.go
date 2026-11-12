@@ -154,7 +154,7 @@ func (w *watcher) addTree(root string) error {
 			// disappear between readdir and lstat. That is normal churn, not
 			// missing watcher coverage: treat it as a vanished entry instead of
 			// disabling the native watcher and falling back to a 30-minute rescan.
-			if transientWatchError(err) {
+			if path != root && transientWatchError(err) {
 				if d != nil && d.IsDir() {
 					return fs.SkipDir
 				}
@@ -175,7 +175,7 @@ func (w *watcher) addTree(root string) error {
 		}
 		_, werr := w.add(path)
 		if werr != nil {
-			if transientWatchError(werr) {
+			if path != root && transientWatchError(werr) {
 				return fs.SkipDir
 			}
 			w.report(werr)
