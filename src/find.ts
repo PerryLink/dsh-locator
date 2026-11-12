@@ -17,6 +17,7 @@ const HIT = {
     sessionId: { type: 'string' },
     messageId: { type: 'string' },
     nodeKey: { type: 'string' },
+    line: { type: 'integer', description: '1-based line of the first match in the stored body (file hits).' },
     score: { type: 'number' },
   },
 } as const
@@ -61,9 +62,9 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void) {
         },
       },
       render: (_args, value) => {
-        const v = value as { ok: boolean; hits?: Array<{ kind: string; title?: string; snippet?: string; path?: string }>; error?: string; state?: ContentState }
+        const v = value as { ok: boolean; hits?: Array<{ kind: string; title?: string; snippet?: string; path?: string; line?: number }>; error?: string; state?: ContentState }
         if (!v.ok) return [{ type: 'text', text: `locator_find failed: ${v.error ?? 'unknown'}` }]
-        const lines = (v.hits ?? []).map((hit, index) => `${String(index + 1)}. [${hit.kind}] ${hit.title ?? ''} — ${hit.snippet ?? ''}\n   ${hit.path ?? ''}`)
+        const lines = (v.hits ?? []).map((hit, index) => `${String(index + 1)}. [${hit.kind}] ${hit.title ?? ''} — ${hit.snippet ?? ''}\n   ${hit.path ?? ''}${typeof hit.line === 'number' ? ` (line ${String(hit.line)})` : ''}`)
         const notes = [
           v.state?.building ? ' (index still building)' : '',
           v.state?.truncated === true ? ' (content budget reached: raise contentMaxTotalBytes or trim contentExcludes; later files are not searchable)' : '',

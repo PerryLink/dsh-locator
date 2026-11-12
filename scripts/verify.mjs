@@ -45,7 +45,7 @@ try {
   failures.push(`client.js does not parse: ${detail}`)
 }
 const clientSource = existsSync(join(root, 'client.js')) ? readFileSync(join(root, 'client.js'), 'utf8') : ''
-for (const marker of ['/dsh-locator/combined', '::highlight(dsh-locator-find)', 'Alt+1–3', 'dsh-locator-find-active']) {
+for (const marker of ['/dsh-locator/combined', '::highlight(dsh-locator-find)', 'Alt+1–3', 'dsh-locator-find-active', 'dsh-locator-findbar', 'dsh-locator-find-scope', 'contentEnabled']) {
   if (!clientSource.includes(marker)) failures.push(`client.js is missing ${marker}`)
 }
 for (const marker of ['/dsh-locator/combined', 'runCombinedSearch']) {

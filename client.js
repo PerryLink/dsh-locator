@@ -123,8 +123,39 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
   background:var(--dsw-alias-bg-layer-2,rgba(30,32,38,.92));color:var(--dsw-alias-label-primary,#fff);
   border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));box-shadow:0 8px 24px rgba(0,0,0,.25);
   animation:dsh-locator-in 120ms ease-out}
-::highlight(dsh-locator-find){background-color:rgba(245,158,11,.28);color:inherit}
-::highlight(dsh-locator-find-active){background-color:rgba(245,158,11,.45);color:inherit}
+::highlight(dsh-locator-find){background-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 28%,transparent);color:inherit}
+::highlight(dsh-locator-find-active){background-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#f59e0b) 50%,transparent);color:inherit;
+  text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px}
+::highlight(dsh-locator-find-scope){background-color:color-mix(in srgb,var(--dsw-alias-bg-document-selection,rgba(90,120,255,.25)) 35%,transparent)}
+.dsh-locator-findbar{position:fixed;z-index:70;display:flex;flex-direction:column;width:min(560px,calc(100vw - 24px));
+  border:1px solid var(--dsw-alias-border-l2,var(--dsw-alias-border-base,rgba(120,125,135,.28)));
+  border-radius:var(--dsw-radius-md,12px);background:var(--dsw-menu-surface-fill,var(--dsw-alias-bg-base,#fff));
+  color:var(--dsw-alias-label-primary,inherit);box-shadow:var(--dsw-elevation-prominent,0 12px 32px rgba(0,0,0,.24));
+  font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;animation:dsh-locator-in 120ms ease-out}
+@media (prefers-reduced-motion:reduce){.dsh-locator-findbar{animation:none}}
+.dsh-locator-findbar-main{display:flex;align-items:center;gap:6px;padding:6px 8px}
+.dsh-locator-findbar-glyph{font-size:14px;opacity:.6;padding:0 2px}
+.dsh-locator-findbar-input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:inherit;font:inherit;font-size:13px;padding:3px 0}
+.dsh-locator-findbar-count{font-variant-numeric:tabular-nums;font-size:12px;opacity:.75;white-space:nowrap;min-width:52px;text-align:right}
+.dsh-locator-findbar-btn{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;padding:0 5px;
+  border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:13px}
+.dsh-locator-findbar-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(120,125,135,.14))}
+.dsh-locator-findbar-btn:disabled{opacity:.4;cursor:default}
+.dsh-locator-findbar-btn[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-active,rgba(64,116,255,.18));
+  color:var(--dsw-alias-state-business-primary,#4f7cff)}
+.dsh-locator-findbar-opts{display:flex;align-items:center;gap:8px;padding:5px 9px 7px;flex-wrap:wrap;
+  border-top:1px solid var(--dsw-alias-border-l1,var(--dsw-alias-border-base,rgba(120,125,135,.16)));font-size:11.5px}
+.dsh-locator-findbar-opts select{border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));border-radius:5px;
+  background:transparent;color:inherit;font:inherit;font-size:11.5px;padding:1px 3px}
+.dsh-locator-findbar-label{display:inline-flex;align-items:center;gap:4px;opacity:.8;white-space:nowrap}
+.dsh-locator-findbar-status{display:flex;align-items:center;gap:8px;padding:4px 10px 6px;font-size:11.5px;opacity:.75;flex-wrap:wrap}
+.dsh-locator-findbar-status .grow{flex:1}
+.dsh-locator-findbar-error{padding:4px 10px 6px;font-size:11.5px;color:var(--dsw-alias-state-error-primary,#d33);
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 9%,transparent)}
+.dsh-locator-findbar-chip{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:999px;
+  background:var(--dsw-alias-bg-layer-2,rgba(120,125,135,.14));font-size:11px;white-space:nowrap}
+.dsh-locator-findbar-chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 1px;font:inherit;font-size:12px}
+.dsh-locator-findbar kbd{border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));border-radius:4px;padding:0 3px;font-size:10px;opacity:.6}
 `
     function ensureStyles() {
       if (typeof document === 'undefined') return
@@ -177,6 +208,25 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         launcher: 'Local file search (Ctrl+Shift+F)',
         justNow: 'just now', minutesAgo: '{n} min ago', hoursAgo: '{n} h ago',
         phraseNotFound: 'No match in the conversation (it may not be loaded yet)',
+        findOpen: 'Find in conversation', findTitle: 'Find in conversation', findAria: 'Find in conversation',
+        findPlaceholder: 'Find in conversation…', findPlaceholderSelection: 'Find in selection…',
+        findPrev: 'Previous match (Shift+F3)', findNext: 'Next match (F3)', findClose: 'Close (Esc)',
+        findCase: 'Match case', findWhole: 'Whole word', findWrap: 'Wrap around', findReverse: 'Search backwards',
+        findMode: 'Mode', modeNormal: 'Normal', modeExtended: 'Extended', modeRegex: 'Regex',
+        findScope: 'In selection', findScopeChip: 'selection {n} chars', findSessionChip: 'this conversation',
+        findNoMatch: 'No matches', findEmpty: 'Type to find in this conversation',
+        findInvalidRegex: 'Invalid regular expression: {message}', findInvalidEscape: 'Invalid extended escape: {token}',
+        findTimeout: 'Regex timed out; simplify the expression', findWrappedTop: 'Wrapped to top',
+        findWrappedBottom: 'Wrapped to bottom', findNoWrapEnd: 'Reached the last match (wrap is off)',
+        findNoWrapStart: 'Reached the first match (wrap is off)', findOlder: 'Load earlier messages and retry',
+        findLoadingOlder: 'Loading earlier messages…', findLoadedOnly: 'loaded window only · earlier history not loaded',
+        findCapped: 'capped', findCopied: 'Match copied', findSelectionLost: 'Selection expired; searching the whole conversation',
+        findNoSession: 'Open a conversation first', findOptions: 'Options',
+        findExtendedHelp: 'Extended: \\n \\r \\t \\0 \\xHH \\\\',
+        panelTotal: 'selected {index}/{total}', panelRangeAll: 'All indexed', panelRangeSession: 'This conversation',
+        panelSessionHint: 'This scope searches indexed session messages only; press Ctrl+F for live in-conversation find',
+        panelRegexPaused: 'Content scope paused in regex mode', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+        panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
       },
       zh: {
         scopeContent: '内容', scopeFiles: '文件', scopeDirs: '目录',
@@ -202,6 +252,25 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         launcher: '本地文件搜索 (Ctrl+Shift+F)',
         justNow: '刚刚', minutesAgo: '{n} 分钟前', hoursAgo: '{n} 小时前',
         phraseNotFound: '会话里没有找到匹配内容（可能还没加载）',
+        findOpen: '在会话中查找', findTitle: '在会话中查找', findAria: '在会话中查找',
+        findPlaceholder: '在会话中查找…', findPlaceholderSelection: '在选区内查找…',
+        findPrev: '上一个匹配 (Shift+F3)', findNext: '下一个匹配 (F3)', findClose: '关闭 (Esc)',
+        findCase: '区分大小写', findWhole: '全词匹配', findWrap: '循环查找', findReverse: '反向查找',
+        findMode: '模式', modeNormal: '普通', modeExtended: '扩展', modeRegex: '正则',
+        findScope: '仅在选区内', findScopeChip: '选区 {n} 字', findSessionChip: '本会话',
+        findNoMatch: '没有匹配', findEmpty: '输入关键词后在此会话中查找',
+        findInvalidRegex: '正则无效：{message}', findInvalidEscape: '扩展转义无效：{token}',
+        findTimeout: '正则执行超时，请简化表达式', findWrappedTop: '已回到顶部',
+        findWrappedBottom: '已到底部，回到开头', findNoWrapEnd: '已到最后一个匹配（循环查找已关闭）',
+        findNoWrapStart: '已到第一个匹配（循环查找已关闭）', findOlder: '加载更早消息后重试',
+        findLoadingOlder: '正在加载更早消息…', findLoadedOnly: '仅已加载窗口 · 更早历史未加载',
+        findCapped: '已截断', findCopied: '已复制匹配', findSelectionLost: '选区已失效，已切回整个会话',
+        findNoSession: '请先打开一个会话', findOptions: '选项',
+        findExtendedHelp: '扩展：\\n \\r \\t \\0 \\xHH \\\\',
+        panelTotal: '已选 {index}/{total}', panelRangeAll: '全部索引', panelRangeSession: '当前会话',
+        panelSessionHint: '此范围只查已索引的会话消息；实时查找请按 Ctrl+F',
+        panelRegexPaused: '正则模式下内容范围暂停', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+        panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
       },
       es: {
         scopeContent: 'Contenido', scopeFiles: 'Archivos', scopeDirs: 'Carpetas',
@@ -227,6 +296,25 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         launcher: 'Búsqueda local (Ctrl+Shift+F)',
         justNow: 'ahora', minutesAgo: 'hace {n} min', hoursAgo: 'hace {n} h',
         phraseNotFound: 'No se encontró en la conversación (quizá no está cargada)',
+        findOpen: 'Buscar en la conversación', findTitle: 'Buscar en la conversación', findAria: 'Buscar en la conversación',
+        findPlaceholder: 'Buscar en la conversación…', findPlaceholderSelection: 'Buscar en la selección…',
+        findPrev: 'Coincidencia anterior (Shift+F3)', findNext: 'Siguiente coincidencia (F3)', findClose: 'Cerrar (Esc)',
+        findCase: 'Distinguir mayúsculas', findWhole: 'Palabra completa', findWrap: 'Continuar al inicio', findReverse: 'Buscar hacia atrás',
+        findMode: 'Modo', modeNormal: 'Normal', modeExtended: 'Extendido', modeRegex: 'Regex',
+        findScope: 'En la selección', findScopeChip: 'selección {n} caracteres', findSessionChip: 'esta conversación',
+        findNoMatch: 'Sin coincidencias', findEmpty: 'Escribe para buscar en esta conversación',
+        findInvalidRegex: 'Expresión regular no válida: {message}', findInvalidEscape: 'Escape extendido no válido: {token}',
+        findTimeout: 'La regex agotó el tiempo; simplifícala', findWrappedTop: 'Vuelto al inicio',
+        findWrappedBottom: 'Vuelto al final', findNoWrapEnd: 'Última coincidencia (continuación desactivada)',
+        findNoWrapStart: 'Primera coincidencia (continuación desactivada)', findOlder: 'Cargar mensajes anteriores y reintentar',
+        findLoadingOlder: 'Cargando mensajes anteriores…', findLoadedOnly: 'solo ventana cargada · historial anterior sin cargar',
+        findCapped: 'limitado', findCopied: 'Coincidencia copiada', findSelectionLost: 'La selección caducó; buscando en toda la conversación',
+        findNoSession: 'Abre primero una conversación', findOptions: 'Opciones',
+        findExtendedHelp: 'Extendido: \\n \\r \\t \\0 \\xHH \\\\',
+        panelTotal: 'seleccionado {index}/{total}', panelRangeAll: 'Todo el índice', panelRangeSession: 'Esta conversación',
+        panelSessionHint: 'Este ámbito solo busca mensajes indexados; pulsa Ctrl+F para buscar en vivo',
+        panelRegexPaused: 'Ámbito de contenido en pausa en modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+        panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
       },
       pt: {
         scopeContent: 'Conteúdo', scopeFiles: 'Arquivos', scopeDirs: 'Pastas',
@@ -252,6 +340,25 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         launcher: 'Busca local (Ctrl+Shift+F)',
         justNow: 'agora', minutesAgo: 'há {n} min', hoursAgo: 'há {n} h',
         phraseNotFound: 'Não encontrado na conversa (talvez ainda não carregada)',
+        findOpen: 'Buscar na conversa', findTitle: 'Buscar na conversa', findAria: 'Buscar na conversa',
+        findPlaceholder: 'Buscar na conversa…', findPlaceholderSelection: 'Buscar na seleção…',
+        findPrev: 'Ocorrência anterior (Shift+F3)', findNext: 'Próxima ocorrência (F3)', findClose: 'Fechar (Esc)',
+        findCase: 'Diferenciar maiúsculas', findWhole: 'Palavra inteira', findWrap: 'Continuar do início', findReverse: 'Buscar para trás',
+        findMode: 'Modo', modeNormal: 'Normal', modeExtended: 'Estendido', modeRegex: 'Regex',
+        findScope: 'Na seleção', findScopeChip: 'seleção {n} caracteres', findSessionChip: 'esta conversa',
+        findNoMatch: 'Sem resultados', findEmpty: 'Digite para buscar nesta conversa',
+        findInvalidRegex: 'Expressão regular inválida: {message}', findInvalidEscape: 'Escape estendido inválido: {token}',
+        findTimeout: 'A regex excedeu o tempo; simplifique', findWrappedTop: 'Voltou ao início',
+        findWrappedBottom: 'Voltou ao fim', findNoWrapEnd: 'Última ocorrência (continuação desativada)',
+        findNoWrapStart: 'Primeira ocorrência (continuação desativada)', findOlder: 'Carregar mensagens anteriores e tentar novamente',
+        findLoadingOlder: 'Carregando mensagens anteriores…', findLoadedOnly: 'apenas janela carregada · histórico anterior não carregado',
+        findCapped: 'limitado', findCopied: 'Ocorrência copiada', findSelectionLost: 'A seleção expirou; buscando em toda a conversa',
+        findNoSession: 'Abra uma conversa primeiro', findOptions: 'Opções',
+        findExtendedHelp: 'Estendido: \\n \\r \\t \\0 \\xHH \\\\',
+        panelTotal: 'selecionado {index}/{total}', panelRangeAll: 'Todo o índice', panelRangeSession: 'Esta conversa',
+        panelSessionHint: 'Este escopo busca apenas mensagens indexadas; use Ctrl+F para buscar ao vivo',
+        panelRegexPaused: 'Escopo de conteúdo pausado no modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+        panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
       },
       hi: {
         scopeContent: 'सामग्री', scopeFiles: 'फ़ाइलें', scopeDirs: 'फ़ोल्डर',
@@ -277,6 +384,25 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         launcher: 'स्थानीय फ़ाइल खोज (Ctrl+Shift+F)',
         justNow: 'अभी', minutesAgo: '{n} मिनट पहले', hoursAgo: '{n} घंटे पहले',
         phraseNotFound: 'बातचीत में नहीं मिला (शायद अभी लोड नहीं हुआ)',
+        findOpen: 'बातचीत में खोजें', findTitle: 'बातचीत में खोजें', findAria: 'बातचीत में खोजें',
+        findPlaceholder: 'बातचीत में खोजें…', findPlaceholderSelection: 'चयन में खोजें…',
+        findPrev: 'पिछला मेल (Shift+F3)', findNext: 'अगला मेल (F3)', findClose: 'बंद करें (Esc)',
+        findCase: 'केस मिलाएँ', findWhole: 'पूरा शब्द', findWrap: 'चक्रीय खोज', findReverse: 'उल्टा खोजें',
+        findMode: 'मोड', modeNormal: 'सामान्य', modeExtended: 'विस्तृत', modeRegex: 'रेगेक्स',
+        findScope: 'चयन में', findScopeChip: 'चयन {n} अक्षर', findSessionChip: 'यह बातचीत',
+        findNoMatch: 'कोई मेल नहीं', findEmpty: 'इस बातचीत में खोजने के लिए लिखें',
+        findInvalidRegex: 'अमान्य रेगुलर एक्सप्रेशन: {message}', findInvalidEscape: 'अमान्य विस्तृत एस्केप: {token}',
+        findTimeout: 'रेगेक्स का समय समाप्त; सरल बनाएँ', findWrappedTop: 'शीर्ष पर लौटा',
+        findWrappedBottom: 'अंत पर लौटा', findNoWrapEnd: 'अंतिम मेल (चक्र बंद)',
+        findNoWrapStart: 'पहला मेल (चक्र बंद)', findOlder: 'पुराने संदेश लोड कर पुन: प्रयास',
+        findLoadingOlder: 'पुराने संदेश लोड हो रहे हैं…', findLoadedOnly: 'केवल लोडेड विंडो · पुराना इतिहास लोड नहीं',
+        findCapped: 'सीमित', findCopied: 'मेल कॉपी हुआ', findSelectionLost: 'चयन समाप्त; पूरी बातचीत में खोज',
+        findNoSession: 'पहले एक बातचीत खोलें', findOptions: 'विकल्प',
+        findExtendedHelp: 'विस्तृत: \\n \\r \\t \\0 \\xHH \\\\',
+        panelTotal: 'चयनित {index}/{total}', panelRangeAll: 'पूरा इंडेक्स', panelRangeSession: 'यह बातचीत',
+        panelSessionHint: 'यह क्षेत्र केवल इंडेक्स किए संदेश खोजता है; लाइव खोज के लिए Ctrl+F दबाएँ',
+        panelRegexPaused: 'रेगेक्स मोड में सामग्री क्षेत्र रुका है', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
+        panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
       },
     }
     const LANG = (() => {
@@ -382,7 +508,8 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
     const PREFS_KEY = 'dsh-locator.panel.v1'
     const SORTS = ['mtime', 'name', 'size', 'path']
     function readPrefs() {
-      const fallback = { scopes: { content: true, files: true, dirs: true }, sort: 'mtime', desc: true }
+      const fallback = { scopes: { content: true, files: true, dirs: true }, sort: 'mtime', desc: true,
+        matchMode: 'normal', caseSensitive: false, wholeWord: false }
       try {
         const raw = window.localStorage.getItem(PREFS_KEY)
         if (raw === null) return fallback
@@ -397,6 +524,9 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           },
           sort: SORTS.includes(value.sort) ? value.sort : 'mtime',
           desc: typeof value.desc === 'boolean' ? value.desc : true,
+          matchMode: ['normal', 'extended', 'regex'].includes(value.matchMode) ? value.matchMode : 'normal',
+          caseSensitive: typeof value.caseSensitive === 'boolean' ? value.caseSensitive : false,
+          wholeWord: typeof value.wholeWord === 'boolean' ? value.wholeWord : false,
         }
       } catch {
         return fallback
@@ -424,26 +554,39 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       legacyTargets.clear()
     }
 
-    function clearFindHighlight() {
+    const HL_SCOPE = 'dsh-locator-find-scope'
+    let highlightOwner = null
+
+    function clearFindHighlight(owner) {
+      if (owner && highlightOwner !== null && owner !== highlightOwner) return
+      highlightOwner = null
       clearLegacyTargets()
       if (!highlightsAvailable()) return
       CSS.highlights.delete(HL_BASE)
       CSS.highlights.delete(HL_ACTIVE)
+      CSS.highlights.delete(HL_SCOPE)
     }
 
-    function setFindHighlight(ranges) {
+    function setFindHighlight(ranges, activeIndex, owner) {
+      clearFindHighlight()
+      if (ranges.length === 0) return
+      highlightOwner = owner || null
+      const active = ranges[Math.max(0, Math.min(ranges.length - 1, activeIndex || 0))]
       if (!highlightsAvailable()) {
-        for (const range of ranges.slice(0, 1)) {
-          const node = range.startContainer
-          const element = node instanceof Element ? node : node.parentElement
-          const row = element === null ? null : element.closest('[data-chat-node-key]')
-          if (row !== null) { row.classList.add('dsh-locator-target'); legacyTargets.add(row) }
-        }
+        const node = active.startContainer
+        const element = node instanceof Element ? node : node.parentElement
+        const row = element === null ? null : element.closest('[data-chat-node-key]')
+        if (row !== null) { row.classList.add('dsh-locator-target'); legacyTargets.add(row) }
         return
       }
-      if (ranges.length === 0) return
       CSS.highlights.set(HL_BASE, new Highlight(...ranges))
-      CSS.highlights.set(HL_ACTIVE, new Highlight(ranges[0]))
+      CSS.highlights.set(HL_ACTIVE, new Highlight(active))
+    }
+
+    function setFindScope(range) {
+      if (!highlightsAvailable()) return
+      CSS.highlights.delete(HL_SCOPE)
+      if (range !== null) CSS.highlights.set(HL_SCOPE, new Highlight(range))
     }
 
     function isVisible(element) {
@@ -681,7 +824,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
     let activeHighlight = null
 
     function clearJumpHighlight() {
-      clearFindHighlight()
+      clearFindHighlight('jump')
       if (activeHighlight !== null) {
         const clear = activeHighlight
         activeHighlight = null
@@ -735,7 +878,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       }
       if (stale()) return false
       if (target === null) { showNotice(t('phraseNotFound')); return false }
-      setFindHighlight(target.ranges)
+      setFindHighlight(target.ranges, 0, 'jump')
       centerRange(target.ranges[0])
       const start = target.ranges[0].startContainer
       const chain = scrollChain(start instanceof Element ? start : start.parentElement)
@@ -753,7 +896,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           const fn = highlightCleanup.pop()
           try { fn() } catch { /* ignore */ }
         }
-        clearFindHighlight()
+        clearFindHighlight('jump')
       }
       // Cancelling must drop the scroll lock too, not only the paint: the lock
       // owns timers and scroll/pointer listeners that would otherwise outlive
@@ -799,7 +942,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         const next = finder()
         if (next === null) { cancelJump(); return }
         target = next
-        setFindHighlight(target.ranges)
+        setFindHighlight(target.ranges, 0, 'jump')
         centerRange(target.ranges[0])
       }, 1_000)
       highlightCleanup.push(() => clearInterval(sessionWatch))
@@ -811,6 +954,640 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
     let workspaceService = null
     const PAGE_NAME = 50
     const PAGE_CONTENT = 30
+
+    // ── in-conversation find bar ────────────────────────────────────────────
+    const FIND_MAX_MATCHES = 2000
+    const FIND_MAX_CHARS = 4_000_000
+    const FIND_BLOCK_SELECTOR = 'p,li,pre,td,th,h1,h2,h3,h4,h5,h6,blockquote,dd,dt'
+    const FIND_EXCLUDED = '[hidden]:not([hidden="until-found"]),[data-chat-history],[data-text-interaction-surface],'
+      + '[data-composer-seat],[data-text-interaction-exclude],script,style,button,input,textarea,select,'
+      + '.sr-only,.katex-mathml,[aria-hidden="true"]:not(.katex-html)'
+
+    function createFindStore() {
+      const listeners = new Set()
+      let state = {
+        open: false, sessionId: '', scope: 'session', selection: null, query: '',
+        mode: 'normal', caseSensitive: false, wholeWord: false, wrap: true, direction: 1,
+        optionsOpen: false, count: 0, index: -1, capped: false, status: 'idle', error: '', hint: '',
+      }
+      return {
+        get: () => state,
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+        set(patch) {
+          state = { ...state, ...patch }
+          for (const listener of listeners) listener()
+        },
+      }
+    }
+    const findStore = createFindStore()
+    const findApi = { move: () => false, cancel: () => {}, focus: () => {} }
+    function useFindState() {
+      return useSyncExternalStore(findStore.subscribe, findStore.get, findStore.get)
+    }
+
+    function selectionSnapshot(scope) {
+      if (scope === null || typeof window.getSelection !== 'function') return null
+      const selection = window.getSelection()
+      if (selection === null || selection.rangeCount !== 1 || selection.isCollapsed) return null
+      const range = selection.getRangeAt(0).cloneRange()
+      if (!scope.contains(range.commonAncestorContainer)) return null
+      const startEl = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+      if (startEl !== null && startEl.closest('[data-composer-seat]') !== null) return null
+      const text = String(selection.toString() || '').replace(/\s+/g, ' ').trim()
+      if (text === '') return null
+      return { range, text: text.slice(0, 500), chars: text.length }
+    }
+
+    function openFind(options) {
+      const opts = options || {}
+      let scope = opts.sessionId ? conversationScope(opts.sessionId) : null
+      if (scope === null) scope = conversationScope('')
+      if (scope === null) { showNotice(t('findNoSession')); return false }
+      const sessionId = scope.getAttribute('data-conversation-session') || opts.sessionId || ''
+      const selection = opts.selection === false ? null : selectionSnapshot(scope)
+      const useSelection = opts.selection === true && selection !== null
+      findApi.cancel()
+      cancelJump()
+      if (store.isOpen()) store.set(false)
+      findStore.set({
+        open: true, sessionId, scope: useSelection ? 'selection' : 'session',
+        selection: useSelection ? selection : null, query: '', mode: 'normal',
+        caseSensitive: false, wholeWord: false, wrap: true, direction: 1,
+        optionsOpen: false, count: 0, index: -1, capped: false, status: 'idle', error: '', hint: '',
+      })
+      return true
+    }
+
+    function closeFind() {
+      if (!findStore.get().open) return
+      findStore.set({ open: false, selection: null, query: '', error: '', hint: '', status: 'idle' })
+      findApi.cancel()
+      clearFindHighlight('find')
+      setFindScope(null)
+    }
+
+    const FIND_WORKER_SRC = `
+self.onmessage = event => {
+  const { id, pattern, flags, texts } = event.data
+  try {
+    const re = new RegExp(pattern, flags)
+    const out = []
+    for (let ti = 0; ti < texts.length; ti++) {
+      const text = texts[ti]
+      re.lastIndex = 0
+      let match
+      while ((match = re.exec(text)) !== null) {
+        if (match[0].length === 0) { re.lastIndex++; continue }
+        out.push([ti, match.index, match.index + match[0].length])
+        if (out.length >= 2000) break
+      }
+      if (out.length >= 2000) break
+    }
+    self.postMessage({ id, ok: true, matches: out, capped: out.length >= 2000 })
+  } catch (error) {
+    self.postMessage({ id, ok: false, error: String(error && error.message || error) })
+  }
+}
+`
+
+    function scanRegexInWorker(texts, source, flags) {
+      if (typeof Worker !== 'function' || typeof Blob !== 'function' || typeof URL.createObjectURL !== 'function') {
+        return Promise.resolve(null)
+      }
+      return new Promise(resolve => {
+        let worker = null
+        let url = ''
+        let done = false
+        const finish = value => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          try { if (worker !== null) worker.terminate() } catch { /* ignore */ }
+          try { if (url !== '') URL.revokeObjectURL(url) } catch { /* ignore */ }
+          resolve(value)
+        }
+        const timer = setTimeout(() => finish({ timeout: true }), 500)
+        try {
+          const blob = new Blob([FIND_WORKER_SRC], { type: 'text/javascript' })
+          url = URL.createObjectURL(blob)
+          worker = new Worker(url)
+          worker.onmessage = event => finish(event.data)
+          worker.onerror = () => finish(null)
+          worker.postMessage({ id: 1, pattern: source, flags, texts })
+        } catch {
+          finish(null)
+        }
+      })
+    }
+
+    function expandExtended(input) {
+      let out = ''
+      for (let index = 0; index < input.length; index++) {
+        const char = input[index]
+        if (char !== '\\') { out += char; continue }
+        const next = input[index + 1]
+        if (next === undefined) { out += '\\'; continue }
+        index++
+        if (next === 'n') out += '\n'
+        else if (next === 'r') out += '\r'
+        else if (next === 't') out += '\t'
+        else if (next === '0') out += '\u0000'
+        else if (next === '\\') out += '\\'
+        else if (next === 'x') {
+          const hex = input.slice(index + 1, index + 3)
+          if (!/^[0-9a-fA-F]{2}$/u.test(hex)) return { error: '\\x' }
+          out += String.fromCharCode(parseInt(hex, 16))
+          index += 2
+        } else if (next === 'u') {
+          const hex = input.slice(index + 1, index + 5)
+          if (!/^[0-9a-fA-F]{4}$/u.test(hex)) return { error: '\\u' }
+          out += String.fromCharCode(parseInt(hex, 16))
+          index += 4
+        } else out += '\\' + next
+      }
+      return { value: out }
+    }
+
+    function compileFind(query, mode, caseSensitive) {
+      let source = String(query || '')
+      if (mode === 'extended') {
+        const expanded = expandExtended(source)
+        if (expanded.error !== undefined) return { error: t('findInvalidEscape', { token: expanded.error }) }
+        source = expanded.value
+      }
+      if (mode !== 'regex') source = escapeRegExp(source)
+      const flags = 'g' + (caseSensitive ? '' : 'i')
+      try {
+        return { source, flags: /[\u{10000}-\u{10FFFF}]/u.test(source) ? flags + 'u' : flags, re: new RegExp(source, flags) }
+      } catch (error) {
+        if (mode === 'regex') {
+          try { return { source, flags: flags + 'u', re: new RegExp(source, flags + 'u') } } catch { /* fall through */ }
+        }
+        return { error: t('findInvalidRegex', { message: String(error && error.message || error).slice(0, 140) }) }
+      }
+    }
+
+    function isWordCharacter(char) {
+      return typeof char === 'string' && char !== '' && /^[A-Za-z0-9_]$/u.test(char)
+    }
+
+    function wholeWordAt(text, start, end) {
+      return !isWordCharacter(text[start - 1]) && !isWordCharacter(text[end])
+    }
+
+    function collectFindGroups(root) {
+      if (root === null) return []
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+      const groups = new Map()
+      let node = walker.nextNode()
+      while (node !== null) {
+        const parent = node.parentElement
+        if (parent !== null && parent.closest(FIND_EXCLUDED) === null) {
+          const value = node.nodeValue || ''
+          if (value !== '') {
+            const block = parent.closest(FIND_BLOCK_SELECTOR)
+              || parent.closest('[data-text-interaction-source]')
+              || parent.closest('[data-chat-node-key]')
+              || root
+            let group = groups.get(block)
+            if (group === undefined) { group = { block, nodes: [], text: '', starts: [] }; groups.set(block, group) }
+            group.starts.push(group.text.length)
+            group.nodes.push(node)
+            group.text += value
+          }
+        }
+        node = walker.nextNode()
+      }
+      return [...groups.values()]
+    }
+
+    function clipForGroup(group, range) {
+      if (range === null) return null
+      let start = null
+      let end = null
+      let position = 0
+      for (const node of group.nodes) {
+        const length = (node.nodeValue || '').length
+        let nodeStart = 0
+        let nodeEnd = length
+        try {
+          if (!range.intersectsNode(node)) { position += length; continue }
+        } catch { position += length; continue }
+        if (node === range.startContainer) nodeStart = range.startOffset
+        if (node === range.endContainer) nodeEnd = range.endOffset
+        if (nodeStart < nodeEnd) {
+          if (start === null) start = position + nodeStart
+          end = position + nodeEnd
+        }
+        position += length
+      }
+      if (start === null || end === null || start >= end) return null
+      return [start, end]
+    }
+
+    function rangeForGroupOffsets(group, start, end) {
+      if (group.nodes.length === 0) return null
+      const startOffset = offsetInGroup(group, start)
+      const endOffset = offsetInGroup(group, end)
+      const range = document.createRange()
+      try {
+        range.setStart(startOffset[0], startOffset[1])
+        range.setEnd(endOffset[0], endOffset[1])
+        return range
+      } catch {
+        return null
+      }
+    }
+
+    function findHistoryButton(scope) {
+      return scope === null ? null : scope.querySelector('[data-chat-history] button')
+    }
+
+    function FindToggle(props) {
+      const onClick = () => { openFind({ sessionId: props && props.sessionId ? props.sessionId : '', selection: false }) }
+      return h('button', {
+        className: 'dsh-locator-launch',
+        title: t('findOpen') + ' (Ctrl+F)',
+        'aria-label': t('findOpen'),
+        onClick,
+      }, '⌕')
+    }
+
+    function FindBar() {
+      const state = useFindState()
+      const inputRef = useRef(null)
+      const barRef = useRef(null)
+      const scopeRef = useRef(null)
+      const matchesRef = useRef([])
+      const activeRef = useRef(-1)
+      const sequenceRef = useRef(0)
+      const debounceRef = useRef(0)
+      const observerRef = useRef(null)
+      const revealTimersRef = useRef([])
+      const returnFocusRef = useRef(null)
+      const [anchor, setAnchor] = useState(null)
+      const composingRef = useRef(false)
+
+      const applyHighlight = useCallback((index) => {
+        const matches = matchesRef.current
+        if (matches.length === 0) { clearFindHighlight('find'); setFindScope(null); return }
+        const safe = Math.max(0, Math.min(matches.length - 1, index))
+        activeRef.current = safe
+        setFindHighlight(matches.map(match => match.range), safe, 'find')
+        setFindScope(state.scope === 'selection' && state.selection ? state.selection.range : null)
+      }, [state.scope, state.selection])
+
+      const revealActive = useCallback(() => {
+        const match = matchesRef.current[activeRef.current]
+        if (!match || !match.range.startContainer.isConnected) return false
+        expandHidden(match.range.startContainer)
+        const run = () => {
+          if (!match.range.startContainer.isConnected) return
+          centerRange(match.range)
+        }
+        requestAnimationFrame(run)
+        for (const delay of [80, 240]) {
+          const timer = setTimeout(run, delay)
+          revealTimersRef.current.push(timer)
+        }
+        return true
+      }, [])
+
+      const move = useCallback(delta => {
+        const matches = matchesRef.current
+        if (matches.length === 0) return false
+        const direction = delta === 0 ? (findStore.get().direction === -1 ? -1 : 1) : delta
+        if (!findStore.get().wrap && (activeRef.current + direction >= matches.length || activeRef.current + direction < 0)) {
+          findStore.set({ hint: direction > 0 ? t('findNoWrapEnd') : t('findNoWrapStart') })
+          return false
+        }
+        let next = activeRef.current + direction
+        if (next >= matches.length) next = 0
+        if (next < 0) next = matches.length - 1
+        const wrapped = (activeRef.current + direction >= matches.length) || (activeRef.current + direction < 0)
+        activeRef.current = next
+        applyHighlight(next)
+        findStore.set({
+          index: next,
+          hint: wrapped ? (direction > 0 ? t('findWrappedTop') : t('findWrappedBottom')) : '',
+        })
+        revealActive()
+        return true
+      }, [applyHighlight, revealActive])
+
+      const runScan = useCallback(async (keepActive) => {
+        const token = ++sequenceRef.current
+        const scope = scopeRef.current || conversationScope(state.sessionId) || conversationScope('')
+        if (scope === null) { return }
+        scopeRef.current = scope
+        if (state.query === '') {
+          matchesRef.current = []
+          activeRef.current = -1
+          clearFindHighlight('find')
+          setFindScope(state.scope === 'selection' && state.selection ? state.selection.range : null)
+          findStore.set({ count: 0, index: -1, capped: false, status: 'idle', error: '', hint: '' })
+          return
+        }
+        const compiled = compileFind(state.query, state.mode, state.caseSensitive)
+        if (compiled.error !== undefined) {
+          matchesRef.current = []
+          activeRef.current = -1
+          clearFindHighlight('find')
+          findStore.set({ count: 0, index: -1, capped: false, status: 'error', error: compiled.error })
+          return
+        }
+        let selectionRange = null
+        if (state.scope === 'selection' && state.selection) {
+          selectionRange = state.selection.range
+          if (!selectionRange.startContainer.isConnected) {
+            findStore.set({ scope: 'session', selection: null, hint: t('findSelectionLost') })
+            return
+          }
+        }
+        const groups = collectFindGroups(scope)
+        const texts = []
+        const clips = []
+        let chars = 0
+        for (const group of groups) {
+          const clip = selectionRange === null ? null : clipForGroup(group, selectionRange)
+          if (selectionRange !== null && clip === null) { texts.push(null); clips.push(null); continue }
+          const start = clip === null ? 0 : clip[0]
+          const end = clip === null ? group.text.length : clip[1]
+          const text = group.text.slice(start, end)
+          chars += text.length
+          if (chars > FIND_MAX_CHARS) { texts.push(null); clips.push(null); continue }
+          texts.push(text)
+          clips.push(clip === null ? [0, group.text.length] : clip)
+        }
+        let rawMatches = null
+        let capped = false
+        if (state.mode === 'regex') {
+          try {
+            const result = await scanRegexInWorker(texts.filter(text => text !== null), compiled.source, compiled.flags)
+            if (token !== sequenceRef.current) return
+            if (result !== null) {
+              if (result.timeout === true) {
+                matchesRef.current = []
+                clearFindHighlight('find')
+                findStore.set({ count: 0, index: -1, capped: false, status: 'error', error: t('findTimeout') })
+                return
+              }
+              if (result.ok === false) {
+                matchesRef.current = []
+                clearFindHighlight('find')
+                findStore.set({ count: 0, index: -1, capped: false, status: 'error', error: t('findInvalidRegex', { message: String(result.error || '') }) })
+                return
+              }
+              const compact = []
+              let cursor = 0
+              for (let groupIndex = 0; groupIndex < texts.length; groupIndex++) {
+                if (texts[groupIndex] === null) continue
+                compact.push(groupIndex)
+                cursor++
+              }
+              rawMatches = []
+              for (const item of result.matches) {
+                const groupIndex = compact[item[0]]
+                if (groupIndex === undefined) continue
+                rawMatches.push({ groupIndex, start: item[1] + clips[groupIndex][0], end: item[2] + clips[groupIndex][0] })
+              }
+              capped = result.capped === true
+            }
+          } catch { /* fall back below */ }
+        }
+        if (rawMatches === null) {
+          rawMatches = []
+          const re = new RegExp(compiled.source, compiled.flags)
+          const started = performance.now()
+          for (let groupIndex = 0; groupIndex < texts.length; groupIndex++) {
+            const text = texts[groupIndex]
+            if (text === null) continue
+            re.lastIndex = 0
+            let match
+            while ((match = re.exec(text)) !== null) {
+              if (match[0].length === 0) { re.lastIndex++; continue }
+              const start = clips[groupIndex][0] + match.index
+              const end = start + match[0].length
+              if (state.wholeWord && !wholeWordAt(groups[groupIndex].text, start, end)) continue
+              rawMatches.push({ groupIndex, start, end })
+              if (rawMatches.length >= FIND_MAX_MATCHES) break
+            }
+            if (rawMatches.length >= FIND_MAX_MATCHES) break
+            if (performance.now() - started > 1500) { capped = true; break }
+          }
+          capped = capped || rawMatches.length >= FIND_MAX_MATCHES
+        } else if (state.wholeWord) {
+          rawMatches = rawMatches.filter(raw => {
+            const group = groups[raw.groupIndex]
+            return group !== undefined && wholeWordAt(group.text, raw.start, raw.end)
+          })
+          capped = capped || rawMatches.length >= FIND_MAX_MATCHES
+        }
+        if (token !== sequenceRef.current) return
+        const matches = []
+        for (const raw of rawMatches) {
+          const group = groups[raw.groupIndex]
+          if (group === undefined) continue
+          const range = rangeForGroupOffsets(group, raw.start, raw.end)
+          if (range === null) continue
+          const row = group.block.closest('[data-chat-node-key]')
+          matches.push({ range, rowKey: row === null ? '' : (row.getAttribute('data-chat-node-key') || '') })
+        }
+        if (token !== sequenceRef.current) return
+        matchesRef.current = matches
+        const next = matches.length === 0 ? -1 : (keepActive && activeRef.current >= 0 ? Math.min(activeRef.current, matches.length - 1) : 0)
+        activeRef.current = next
+        const history = findHistoryButton(scopeRef.current)
+        findStore.set({
+          count: matches.length,
+          index: next,
+          capped,
+          status: matches.length === 0 ? 'none' : 'idle',
+          error: '',
+          hint: matches.length === 0 && history !== null && !history.disabled ? t('findLoadedOnly') : '',
+        })
+        if (next >= 0) { applyHighlight(next); revealActive() }
+        else { clearFindHighlight('find'); setFindScope(state.scope === 'selection' && state.selection ? state.selection.range : null) }
+      }, [applyHighlight, revealActive, state.caseSensitive, state.mode, state.query, state.scope, state.selection, state.sessionId, state.wholeWord])
+      const runScanRef = useRef(runScan)
+      runScanRef.current = runScan
+
+      useEffect(() => {
+        if (!state.open) return undefined
+        returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+        const measure = () => {
+          const scope = conversationScope(findStore.get().sessionId) || conversationScope('')
+          if (scope === null) { closeFind(); return }
+          scopeRef.current = scope
+          const rect = scope.getBoundingClientRect()
+          const width = Math.max(280, Math.min(560, rect.width - 24))
+          setAnchor({ top: Math.max(8, rect.top + 8), right: Math.max(8, window.innerWidth - rect.right + 12), width })
+        }
+        measure()
+        const timer = setTimeout(() => {
+          if (inputRef.current !== null) { inputRef.current.focus(); inputRef.current.select() }
+        }, 0)
+        const onResize = () => measure()
+        window.addEventListener('resize', onResize)
+        let observer = null
+        const schedule = () => {
+          clearTimeout(debounceRef.current)
+          debounceRef.current = setTimeout(() => { if (findStore.get().open) void runScanRef.current(true) }, 400)
+        }
+        const scope = scopeRef.current
+        if (scope !== null) {
+          try {
+            observer = new MutationObserver(schedule)
+            observer.observe(scope, { childList: true, subtree: true, characterData: true })
+          } catch { /* observer unavailable */ }
+        }
+        return () => {
+          clearTimeout(timer)
+          window.removeEventListener('resize', onResize)
+          clearTimeout(debounceRef.current)
+          if (observer !== null) observer.disconnect()
+          for (const id of revealTimersRef.current) clearTimeout(id)
+          revealTimersRef.current = []
+          sequenceRef.current++
+          clearFindHighlight('find')
+          setFindScope(null)
+          const target = returnFocusRef.current
+          if (target !== null && target.isConnected) target.focus({ preventScroll: true })
+        }
+      }, [state.open])
+
+      useEffect(() => {
+        if (!state.open) return undefined
+        const timer = setTimeout(() => { void runScan(false) }, 150)
+        return () => clearTimeout(timer)
+      }, [state.open, state.query, state.mode, state.caseSensitive, state.wholeWord, state.scope, state.sessionId, state.selection, runScan])
+
+      // Close when the conversation is switched, hidden, or the panel opens.
+      useEffect(() => {
+        if (!state.open) return undefined
+        const timer = setInterval(() => {
+          if (!findStore.get().open) return
+          if (store.isOpen()) { closeFind(); return }
+          if (conversationScope(findStore.get().sessionId) === null) closeFind()
+        }, 800)
+        return () => clearInterval(timer)
+      }, [state.open])
+
+      useEffect(() => {
+        findApi.move = delta => move(delta)
+        findApi.cancel = () => { sequenceRef.current++ }
+        findApi.focus = () => { if (inputRef.current !== null) { inputRef.current.focus(); inputRef.current.select() } }
+        return () => { findApi.move = () => false; findApi.cancel = () => {}; findApi.focus = () => {} }
+      }, [move])
+
+      if (!state.open) return null
+      const onInput = event => { findStore.set({ query: event.target.value, error: '', hint: '' }) }
+      const onKeyDown = event => {
+        if (composingRef.current || event.isComposing) return
+        if (event.key === 'Enter') { event.preventDefault(); move(event.shiftKey ? -1 : 0); return }
+        if (event.key === 'Escape') { event.preventDefault(); closeFind(); return }
+        if ((event.ctrlKey || event.metaKey) && event.shiftKey && String(event.key).toLowerCase() === 'c') {
+          const match = matchesRef.current[activeRef.current]
+          const text = match && match.range.startContainer.isConnected ? match.range.toString() : findStore.get().query
+          if (text !== '') { event.preventDefault(); copyText(text).then(() => findStore.set({ hint: t('findCopied') })).catch(() => {}) }
+        }
+      }
+      const pickMode = event => { findStore.set({ mode: event.target.value }) }
+      const toggle = key => { findStore.set({ [key]: !findStore.get()[key] }) }
+      const toggleScope = () => {
+        if (state.scope === 'selection') findStore.set({ scope: 'session', selection: null, hint: '' })
+        else {
+          const scope = scopeRef.current
+          const selection = scope === null ? null : selectionSnapshot(scope)
+          if (selection === null) { findStore.set({ hint: t('findPlaceholderSelection') }); return }
+          findStore.set({ scope: 'selection', selection })
+        }
+      }
+      const countText = state.query === '' ? '—'
+        : (state.count === 0 ? '0/0' : (state.index < 0 ? '…' : (state.index + 1) + '/' + state.count + (state.capped ? '+' : '')))
+      const history = scopeRef.current === null ? null : findHistoryButton(scopeRef.current)
+      const canLoadOlder = history !== null && !history.disabled
+      const loadOlder = () => {
+        if (scopeRef.current === null || !revealOlder(scopeRef.current)) return
+        findStore.set({ hint: t('findLoadingOlder') })
+        setTimeout(() => { if (findStore.get().open) void runScanRef.current(true) }, 700)
+      }
+      return h('div', {
+        ref: barRef,
+        className: 'dsh-locator-findbar',
+        role: 'search',
+        'aria-label': t('findAria'),
+        style: anchor === null ? { top: 12, right: 12, width: 'min(560px,calc(100vw - 24px))' } : { top: anchor.top, right: anchor.right, width: anchor.width },
+      },
+        h('div', { className: 'dsh-locator-findbar-main' },
+          h('span', { className: 'dsh-locator-findbar-glyph', 'aria-hidden': 'true' }, '⌕'),
+          h('input', {
+            ref: inputRef,
+            className: 'dsh-locator-findbar-input',
+            value: state.query,
+            placeholder: state.scope === 'selection' ? t('findPlaceholderSelection') : t('findPlaceholder'),
+            'aria-label': t('findAria'),
+            'aria-invalid': state.error !== '' ? 'true' : undefined,
+            spellCheck: false,
+            autoComplete: 'off',
+            onInput,
+            onKeyDown,
+            onCompositionStart: () => { composingRef.current = true },
+            onCompositionEnd: () => { composingRef.current = false; void runScan(false) },
+          }),
+          h('span', { className: 'dsh-locator-findbar-count', 'aria-hidden': 'true' }, countText),
+          h('span', { style: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }, role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
+            state.error !== '' ? state.error
+              : state.query === '' ? ''
+                : state.count === 0 ? t('findNoMatch')
+                  : (state.index + 1) + '/' + state.count),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findPrev'), 'aria-label': t('findPrev'),
+            disabled: state.count === 0, onMouseDown: event => event.preventDefault(), onClick: () => move(-1) }, '↑'),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findNext'), 'aria-label': t('findNext'),
+            disabled: state.count === 0, onMouseDown: event => event.preventDefault(), onClick: () => move(1) }, '↓'),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findClose'), 'aria-label': t('findClose'),
+            onClick: () => closeFind() }, '×'),
+        ),
+        h('div', { className: 'dsh-locator-findbar-opts' },
+          h('label', { className: 'dsh-locator-findbar-label' }, t('findMode'),
+            h('select', { value: state.mode, onChange: pickMode, 'aria-label': t('findMode') },
+              h('option', { value: 'normal' }, t('modeNormal')),
+              h('option', { value: 'extended' }, t('modeExtended')),
+              h('option', { value: 'regex' }, t('modeRegex')),
+            )),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findCase'), 'aria-label': t('findCase'),
+            'aria-pressed': state.caseSensitive ? 'true' : 'false', onClick: () => toggle('caseSensitive') }, t('panelCaseShort')),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findWhole'), 'aria-label': t('findWhole'),
+            'aria-pressed': state.wholeWord ? 'true' : 'false', onClick: () => toggle('wholeWord') }, t('panelWholeShort')),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findWrap'), 'aria-label': t('findWrap'),
+            'aria-pressed': state.wrap ? 'true' : 'false', onClick: () => toggle('wrap') }, '↻'),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findReverse'), 'aria-label': t('findReverse'),
+            'aria-pressed': state.direction === -1 ? 'true' : 'false', onClick: () => findStore.set({ direction: state.direction === -1 ? 1 : -1 }) }, '⇅'),
+          h('button', { className: 'dsh-locator-findbar-btn', title: t('findScope'), 'aria-label': t('findScope'),
+            'aria-pressed': state.scope === 'selection' ? 'true' : 'false', onClick: toggleScope }, '⛶'),
+          state.scope === 'selection' && state.selection
+            ? h('span', { className: 'dsh-locator-findbar-chip' }, t('findScopeChip', { n: state.selection.chars }),
+              h('button', { onClick: () => findStore.set({ scope: 'session', selection: null, hint: '' }), 'aria-label': t('findClose') }, '×'))
+            : h('span', { className: 'dsh-locator-findbar-chip' }, t('findSessionChip')),
+          state.mode === 'extended' ? h('span', { className: 'dsh-locator-findbar-label', style: { opacity: .55 } }, t('findExtendedHelp')) : null,
+        ),
+        state.error !== '' ? h('div', { className: 'dsh-locator-findbar-error', role: 'alert' }, state.error) : null,
+        h('div', { className: 'dsh-locator-findbar-status' },
+          h('span', null, state.query === '' ? t('findEmpty') : state.count === 0 ? t('findNoMatch') : (state.capped ? t('findCapped') : '')),
+          state.hint !== '' ? h('span', null, state.hint) : null,
+          h('span', { className: 'grow' }),
+          canLoadOlder && state.query !== '' && state.count === 0
+            ? h('button', { className: 'dsh-locator-dirbtn', onClick: loadOlder }, t('findOlder'))
+            : null,
+          h('kbd', null, 'Enter'), h('span', null, '↓'),
+          h('kbd', null, 'Shift+Enter'), h('span', null, '↑'),
+          h('kbd', null, 'Esc'),
+        ),
+      )
+    }
 
     function Panel() {
       const open = useOpen()
@@ -825,6 +1602,10 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       const [took, setTook] = useState(0)
       const [status, setStatus] = useState(null)
       const [availableContent, setAvailableContent] = useState(true)
+      const [matchMode, setMatchMode] = useState(prefs.matchMode || 'normal')
+      const [caseSensitive, setCaseSensitive] = useState(prefs.caseSensitive === true)
+      const [wholeWord, setWholeWord] = useState(prefs.wholeWord === true)
+      const [sessionOnly, setSessionOnly] = useState(false)
       const [selected, setSelected] = useState(0)
       const [toast, setToast] = useState('')
       const [refreshTick, setRefreshTick] = useState(0)
@@ -834,14 +1615,20 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       const listRef = useRef(null)
 
       const close = useCallback(() => store.set(false), [])
-      const anyScope = scopes.content || scopes.files || scopes.dirs
+      const activeScope = conversationScope('')
+      const activeSessionId = activeScope === null ? '' : (activeScope.getAttribute('data-conversation-session') || '')
+      const effectiveScopes = sessionOnly
+        ? { content: scopes.content, files: false, dirs: false }
+        : { content: scopes.content, files: scopes.files, dirs: scopes.dirs }
+      const anyScope = effectiveScopes.content || effectiveScopes.files || effectiveScopes.dirs
 
       useEffect(() => {
-        writePrefs({ scopes, sort, desc })
-      }, [scopes, sort, desc])
+        writePrefs({ scopes, sort, desc, matchMode, caseSensitive, wholeWord })
+      }, [scopes, sort, desc, matchMode, caseSensitive, wholeWord])
 
       useEffect(() => {
         if (!open) return undefined
+        closeFind()
         const previous = document.activeElement
         setError('')
         const timer = setTimeout(() => {
@@ -894,13 +1681,18 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           setError('')
           post('/dsh-locator/combined', {
             query,
-            content: scopes.content,
-            files: scopes.files,
-            dirs: scopes.dirs,
+            content: effectiveScopes.content,
+            files: effectiveScopes.files,
+            dirs: effectiveScopes.dirs,
             limit: PAGE_NAME,
             contentLimit: PAGE_CONTENT,
             sort,
             desc,
+            matchMode,
+            caseSensitive,
+            wholeWord,
+            sessionId: sessionOnly ? activeSessionId : '',
+            count: matchMode === 'regex' ? 'none' : 'exact',
           }, controller.signal).then(data => {
             if (controller.signal.aborted) return
             setGroups({
@@ -918,7 +1710,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           })
         }, 140)
         return () => clearTimeout(timer)
-      }, [open, query, sort, desc, scopes.content, scopes.files, scopes.dirs, refreshTick, anyScope])
+      }, [open, query, sort, desc, scopes.content, scopes.files, scopes.dirs, matchMode, caseSensitive, wholeWord, sessionOnly, activeSessionId, refreshTick, anyScope, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs])
 
       const contentBuilding = groups !== null && groups.content !== undefined && groups.content.building === true
       useEffect(() => {
@@ -931,16 +1723,22 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         if (groups === null) return []
         const out = []
         for (const group of ['content', 'files', 'dirs']) {
-          if (!scopes[group]) continue
+          if (!effectiveScopes[group]) continue
           const hits = groups[group] && Array.isArray(groups[group].hits) ? groups[group].hits : []
           for (const hit of hits) out.push({ group, hit })
         }
         return out
-      }, [groups, scopes])
+      }, [groups, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs])
 
       useEffect(() => {
         setSelected(value => Math.min(Math.max(0, value), Math.max(0, rows.length - 1)))
       }, [rows.length])
+
+      useEffect(() => {
+        if (!open) return
+        const row = document.getElementById('dsh-locator-opt-' + selected)
+        if (row !== null) row.scrollIntoView({ block: 'nearest' })
+      }, [open, selected, rows.length])
 
       const notify = useCallback(message => {
         setToast(message)
@@ -1016,6 +1814,11 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           toggleScope(scopeDigit === '1' ? 'content' : scopeDigit === '2' ? 'files' : 'dirs')
           return
         }
+        if (event.key === 'F3') {
+          event.preventDefault()
+          if (rows.length > 0) setSelected(value => (value + (event.shiftKey ? -1 : 1) + rows.length) % rows.length)
+          return
+        }
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
           event.preventDefault()
           setSelected(value => Math.max(0, Math.min(rows.length - 1, value + (event.key === 'ArrowDown' ? 1 : -1))))
@@ -1071,23 +1874,35 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       const content = groups !== null ? groups.content : undefined
       const files = groups !== null ? groups.files : undefined
       const dirs = groups !== null ? groups.dirs : undefined
+      const countLabel = (group, fallback) => {
+        const count = group && group.count
+        if (count && typeof count.value === 'number' && Number.isFinite(count.value)) {
+          return (count.kind === 'bounded' ? '≥ ' : '') + String(count.value)
+        }
+        return String(fallback)
+      }
       const contentCount = content === undefined ? 0 : (content.returned ?? 0)
       const filesCount = files === undefined ? 0 : (files.returned ?? files.hits?.length ?? 0)
       const dirsCount = dirs === undefined ? 0 : (dirs.returned ?? dirs.hits?.length ?? 0)
+      const contentCountText = content === undefined ? '' : countLabel(content, contentCount)
+      const filesCountText = files === undefined ? '' : countLabel(files, filesCount)
+      const dirsCountText = dirs === undefined ? '' : countLabel(dirs, dirsCount)
       const totalRows = rows.length
 
       const scopeBox = (key, label, count) => h('label', {
-        className: 'dsh-locator-check' + (key === 'content' && !availableContent ? ' disabled' : ''),
-        title: key === 'content' && !availableContent ? t('contentDisabled') : label,
+        className: 'dsh-locator-check' + (key === 'content' && !availableContent ? ' disabled' : '')
+          + (sessionOnly && key !== 'content' ? ' disabled' : ''),
+        title: key === 'content' && !availableContent ? t('contentDisabled')
+          : sessionOnly && key !== 'content' ? t('panelSessionHint') : label,
       },
         h('input', {
           type: 'checkbox',
           checked: scopes[key],
-          disabled: key === 'content' && !availableContent,
+          disabled: (key === 'content' && !availableContent) || (sessionOnly && key !== 'content'),
           onChange: () => toggleScope(key),
         }),
         label,
-        count > 0 ? h('span', { className: 'dsh-locator-count' }, String(count)) : null,
+        count ? h('span', { className: 'dsh-locator-count' }, count) : null,
       )
 
       const groupHead = (key, label, count, note) => h('div', {
@@ -1139,23 +1954,26 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         const hits = Array.isArray(group.hits) ? group.hits : []
         const count = typeof group.returned === 'number' ? group.returned : hits.length
         const note = key === 'content'
-          ? (contentBuilding ? t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
-            : (content?.capped ? t('contentCapped', { n: count }) : (query.trim() !== '' ? t('relevance') : null)))
+          ? (matchMode === 'regex' ? t('panelRegexPaused')
+            : contentBuilding ? t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
+              : (content?.capped ? t('contentCapped', { n: count }) : (query.trim() !== '' ? t('relevance') : null)))
           : (group.deduped > 0 ? t('deduped', { n: group.deduped }) : (group.truncated ? t('showing', { n: hits.length }) : null))
         if (typeof group.error === 'string' && group.error !== '') {
+          const message = group.error === 'content-regex-not-supported' ? t('panelRegexPaused') : group.error
           return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
             groupHead(key, label, count, null),
-            h('div', { className: 'dsh-locator-groupempty', role: 'alert' }, t('errorPrefix') + group.error,
+            h('div', { className: 'dsh-locator-groupempty', role: 'alert' }, t('errorPrefix') + message,
               h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry'))),
           )
         }
         return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
-          groupHead(key, label, count, note),
+          groupHead(key, label, countLabel(group, count), note),
           extra === undefined ? null : extra,
           hits.length === 0
             ? h('div', { className: 'dsh-locator-groupempty' },
                 key === 'content' && scopes.content
-                  ? (query.trim().length < 2 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
+                  ? (sessionOnly && query.trim().length >= 2 ? t('panelSessionHint')
+                    : query.trim().length < 2 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
                   : (query.trim() === '' ? t('emptyQuery') : t('emptyResults')))
             : hits.map(hit => { index++; return rowFor(key, hit, index) }),
         )
@@ -1189,14 +2007,32 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
             'aria-autocomplete': 'list',
             'aria-activedescendant': totalRows > 0 ? 'dsh-locator-opt-' + selected : undefined,
           }),
+          h('span', { className: 'dsh-locator-count', 'aria-hidden': 'true' },
+            loading ? t('loading') : totalRows > 0 ? t('panelTotal', { index: selected + 1, total: totalRows }) : ''),
           h('span', { className: 'dsh-locator-kbd' }, 'Ctrl+Shift+F'),
           h('button', { className: 'dsh-locator-close', onClick: close, title: t('closeTitle'), 'aria-label': t('closeLabel') }, '×'),
         ),
         h('div', { className: 'dsh-locator-bar' },
-          scopeBox('content', t('scopeContent'), contentCount),
-          scopeBox('files', t('scopeFiles'), filesCount),
-          scopeBox('dirs', t('scopeDirs'), dirsCount),
+          scopeBox('content', t('scopeContent'), contentCountText),
+          scopeBox('files', t('scopeFiles'), filesCountText),
+          scopeBox('dirs', t('scopeDirs'), dirsCountText),
           h('span', { className: 'grow' }),
+          h('label', { className: 'dsh-locator-check' + (activeSessionId === '' ? ' disabled' : ''),
+            title: activeSessionId === '' ? t('findNoSession') : t('panelSessionHint') },
+            h('input', { type: 'checkbox', checked: sessionOnly, disabled: activeSessionId === '',
+              onChange: () => setSessionOnly(value => !value) }),
+            t('panelRangeSession')),
+          h('label', { className: 'dsh-locator-check' }, t('panelModeLabel'),
+            h('select', { className: 'dsh-locator-sort', value: matchMode,
+              onChange: event => setMatchMode(['normal', 'extended', 'regex'].includes(event.target.value) ? event.target.value : 'normal') },
+              h('option', { value: 'normal' }, t('modeNormal')),
+              h('option', { value: 'extended' }, t('modeExtended')),
+              h('option', { value: 'regex' }, t('modeRegex')),
+            )),
+          h('button', { className: 'dsh-locator-dirbtn', title: t('findCase'),
+            'aria-pressed': caseSensitive ? 'true' : 'false', onClick: () => setCaseSensitive(value => !value) }, t('panelCaseShort')),
+          h('button', { className: 'dsh-locator-dirbtn', title: t('findWhole'),
+            'aria-pressed': wholeWord ? 'true' : 'false', onClick: () => setWholeWord(value => !value) }, t('panelWholeShort')),
           h('label', { className: 'dsh-locator-check' }, t('sortLabel'),
             h('select', {
               className: 'dsh-locator-sort',
@@ -1224,6 +2060,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
                   roots: (status.roots || []).length,
                 })),
         ),
+        sessionOnly ? h('div', { className: 'dsh-locator-groupempty' }, t('panelSessionHint')) : null,
         h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },
           error !== ''
             ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, t('errorPrefix') + error,
@@ -1245,7 +2082,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
             + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
           toast === '' ? null : h('span', { className: 'dsh-locator-toast' }, toast),
-          h('span', null, t('footer')),
+          h('span', null, t('footer') + ' · Ctrl+F ' + t('findOpen')),
         ),
         h('div', { style: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }, role: 'status', 'aria-live': 'polite' },
           t('results', { content: contentCount, files: filesCount, dirs: dirsCount, ms: Math.round(took) })),
@@ -1267,22 +2104,69 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       inject: ['slots', 'uiWorkspace'],
       apply(ctx) {
         workspaceService = ctx.uiWorkspace ?? (typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null)
-        ensureStyles()
+        ctx.effect(() => {
+          ensureStyles()
+          return () => {
+            const tag = document.querySelector('style[data-plugin-css="' + NS + '"]')
+            if (tag !== null) tag.remove()
+          }
+        }, 'dsh-locator: styles')
         ctx.effect(() => {
           const onKey = event => {
             if ((event.metaKey || event.ctrlKey) && event.shiftKey && String(event.key).toLowerCase() === 'f') {
               event.preventDefault()
               event.stopPropagation()
+              closeFind()
               store.toggle()
             }
           }
           document.addEventListener('keydown', onKey, true)
           return () => document.removeEventListener('keydown', onKey, true)
         }, 'dsh-locator: search hotkey')
-        ctx.effect(() => () => { cancelJump() }, 'dsh-locator: find highlight')
+        ctx.effect(() => {
+          const onFindKey = event => {
+            if (event.defaultPrevented || event.isComposing) return
+            const target = event.target
+            if (target instanceof Element && target.closest('.xterm,.monaco-editor,[data-code-editor]') !== null) return
+            const inFind = target instanceof Element && target.closest('.dsh-locator-findbar') !== null
+            const ctrl = event.ctrlKey || event.metaKey
+            if (ctrl && !event.shiftKey && !event.altKey && event.code === 'KeyF') {
+              if (store.isOpen()) {
+                event.preventDefault()
+                event.stopPropagation()
+                const panelInput = document.querySelector('.dsh-locator-input')
+                if (panelInput !== null) { panelInput.focus(); panelInput.select() }
+                return
+              }
+              if (document.querySelector('[role="dialog"][aria-modal="true"]') !== null && !inFind) return
+              if (findStore.get().open) { event.preventDefault(); event.stopPropagation(); findApi.focus(); return }
+              if (conversationScope('') === null) return
+              event.preventDefault()
+              event.stopPropagation()
+              openFind({ selection: true })
+              return
+            }
+            if (!ctrl && !event.altKey && event.code === 'F3') {
+              if (!findStore.get().open) return
+              event.preventDefault()
+              event.stopPropagation()
+              findApi.move(event.shiftKey ? -1 : 1)
+              return
+            }
+            if (event.key === 'Escape' && findStore.get().open) {
+              event.preventDefault()
+              event.stopPropagation()
+              closeFind()
+            }
+          }
+          document.addEventListener('keydown', onFindKey, true)
+          return () => document.removeEventListener('keydown', onFindKey, true)
+        }, 'dsh-locator: find hotkeys')
+        ctx.effect(() => () => { closeFind(); cancelJump() }, 'dsh-locator: find cleanup')
         try {
           ctx.slots.inject('shell.overlay', () => {
             const disposers = [
+              ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-findbar', order: 59 }, FindBar),
               ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-panel', order: 60 }, Panel),
               ctx.slots.register({ name: 'shell.overlay', id: 'dsh-locator-notice', order: 61 }, Notice),
             ]
@@ -1294,6 +2178,12 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
           })
         } catch (error) {
           console.error('dsh-locator: overlay slot unavailable', error)
+        }
+        try {
+          ctx.slots.inject('conversation.session.header.utilities', () =>
+            ctx.slots.register({ name: 'conversation.session.header.utilities', id: 'dsh-locator-find-toggle', order: 30 }, FindToggle))
+        } catch (error) {
+          console.error('dsh-locator: session header slot unavailable', error)
         }
         try {
           ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsh-locator-launch', order: 36 }, Launcher))

@@ -527,3 +527,178 @@ describe('ContentIndex', () => {
     expect((await content.search('first generation', 5)).length).toBe(0)
   })
 })
+
+interface AdvancedFile {
+  name: string
+  body: string
+}
+
+interface AdvancedSession {
+  id: string
+  texts: string[]
+}
+
+async function makeAdvancedIndex(
+  files: AdvancedFile[],
+  sessionLogs: AdvancedSession[] = [],
+): Promise<{ content: ContentIndex }> {
+  const root = mkdtempSync(join(tmpdir(), 'locator-adv-'))
+  const state = mkdtempSync(join(tmpdir(), 'locator-adv-state-'))
+  const sessions = mkdtempSync(join(tmpdir(), 'locator-adv-sessions-'))
+  cleanups.push(
+    () => rmSync(root, { recursive: true, force: true }),
+    () => rmSync(state, { recursive: true, force: true }),
+    () => rmSync(sessions, { recursive: true, force: true }),
+  )
+  const entries = files.map(file => {
+    const path = join(root, file.name)
+    writeFileSync(path, file.body)
+    return { path, name: file.name, size: Buffer.byteLength(file.body), mtime: Date.now(), ext: file.name.split('.').pop() ?? '', dir: false }
+  })
+  for (const log of sessionLogs) {
+    const dir = join(sessions, '--workspace--', log.id)
+    mkdirSync(dir, { recursive: true })
+    const lines = log.texts
+      .map((text, index) => JSON.stringify({ type: 'user/message', data: { id: `${log.id}-${String(index)}`, seq: index, content: [{ type: 'text', text }] } }))
+      .join('\n')
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(lines)))
+  }
+  const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+  const content = new ContentIndex(runtime, {
+    stateDir: state,
+    sessionDirs: [sessions],
+    maxFileBytes: 1_000_000,
+    maxTotalBytes: 0,
+    maxFiles: 100,
+    maxSessions: 10,
+  })
+  cleanups.push(() => content.close())
+  content.start()
+  await settle(content)
+  return { content }
+}
+
+describe('advanced content search', () => {
+  it('returns exact counts and a line number while keeping the legacy hit array', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'notes.md', body: '# Notes\n\nthe quick brown fox\nlast line' },
+    ])
+    const result = await content.search('brown fox', 5, {})
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+    expect(result.hits).toHaveLength(1)
+    expect(result.hits[0]?.line).toBe(3)
+    expect(result.hits[0]?.snippet).toContain('brown fox')
+    expect(result.hits[0]?.snippet.length).toBeLessThanOrEqual(400)
+    expect(typeof result.hits[0]?.score).toBe('number')
+    const legacy = await content.search('brown fox', 5)
+    expect(Array.isArray(legacy)).toBe(true)
+    expect(legacy[0]?.path).toBe(result.hits[0]?.path)
+  })
+
+  it('finds queries that mix long and short terms instead of returning nothing', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'a.md', body: 'sql ab together' },
+      { name: 'b.md', body: 'sql only' },
+    ])
+    const result = await content.search('sql ab', 5, {})
+    expect(result.hits.map(hit => hit.title)).toEqual(['a.md'])
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+  })
+
+  it('matches case exactly through GLOB and reports exact counts', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'upper.md', body: 'The Alpha release' },
+      { name: 'lower.md', body: 'the alpha release' },
+    ])
+    const sensitive = await content.search('The', 10, { caseSensitive: true })
+    expect(sensitive.hits.map(hit => hit.title)).toEqual(['upper.md'])
+    expect(sensitive.count).toEqual({ value: 1, kind: 'exact' })
+    const insensitive = await content.search('The', 10, {})
+    expect(insensitive.count.value).toBe(2)
+  })
+
+  it('applies ASCII whole-word boundaries and bounds the count above the cap', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'testing.md', body: 'testing only' },
+      { name: 'standalone.md', body: 'a test here' },
+      { name: 'underscore.md', body: 'test_case marker' },
+      { name: 'second.md', body: 'another test.' },
+    ])
+    const result = await content.search('test', 10, { wholeWord: true })
+    expect(result.hits.map(hit => hit.title).sort()).toEqual(['second.md', 'standalone.md'])
+    expect(result.count).toEqual({ value: 2, kind: 'exact' })
+    const capped = await content.search('test', 10, { wholeWord: true, countLimit: 1 })
+    expect(capped.count).toEqual({ value: 1, kind: 'bounded', limit: 1 })
+    expect(capped.warnings).toContain('bounded-count')
+  })
+
+  it('matches extended-mode escapes as one literal and rejects malformed hex', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'multi.md', body: 'alpha beta\nsecond line\nab token' },
+    ])
+    const multiline = await content.search('alpha beta\\nsecond', 5, { matchMode: 'extended' })
+    expect(multiline.hits).toHaveLength(1)
+    expect(multiline.count).toEqual({ value: 1, kind: 'exact' })
+    expect(multiline.hits[0]?.snippet).toContain('alpha beta second')
+    const invalid = await content.search('bad\\xZZ', 5, { matchMode: 'extended' })
+    expect(invalid.error).toBe('invalid-escape')
+    expect(invalid.hits).toEqual([])
+    const short = await content.search('ab', 5, { matchMode: 'extended' })
+    expect(short.hits).toHaveLength(1)
+    const caseSensitive = await content.search('Alpha', 5, { matchMode: 'extended', caseSensitive: true })
+    expect(caseSensitive.hits).toHaveLength(0)
+  })
+
+  it('restricts hits to one session and reports unknown sessions', async () => {
+    const { content } = await makeAdvancedIndex([], [
+      { id: 'session-one', texts: ['ALPHAMARK one'] },
+      { id: 'session-two', texts: ['ALPHAMARK two'] },
+    ])
+    const scoped = await content.search('ALPHAMARK', 10, { sessionId: 'session-one' })
+    expect(scoped.hits.map(hit => hit.sessionId)).toEqual(['session-one'])
+    expect(scoped.count).toEqual({ value: 1, kind: 'exact' })
+    const missing = await content.search('ALPHAMARK', 10, { sessionId: 'session-missing' })
+    expect(missing.hits).toEqual([])
+    expect(missing.warnings).toEqual(['unknown-session'])
+    const all = await content.search('ALPHAMARK', 10, {})
+    expect(all.count.value).toBe(2)
+  })
+
+  it('honours count none/bounded and keeps GLOB literals escaped', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'one.md', body: 'COUNTMARK one' },
+      { name: 'two.md', body: 'COUNTMARK two' },
+      { name: 'three.md', body: 'COUNTMARK three' },
+      { name: 'four.md', body: 'COUNTMARK four' },
+      { name: 'five.md', body: 'COUNTMARK five' },
+      { name: 'bracket.md', body: 'literal a[b]c token' },
+      { name: 'plain.md', body: 'literal abc token' },
+    ])
+    expect((await content.search('COUNTMARK', 5, { count: 'none' })).count.kind).toBe('unknown')
+    expect((await content.search('COUNTMARK', 5, { count: 'bounded', countLimit: 3 })).count).toEqual({ value: 3, kind: 'bounded', limit: 3 })
+    expect((await content.search('COUNTMARK', 5, { count: 'bounded', countLimit: 10 })).count).toEqual({ value: 5, kind: 'exact' })
+    const brackets = await content.search('a[b]c', 10, { caseSensitive: true })
+    expect(brackets.hits.map(hit => hit.title)).toEqual(['bracket.md'])
+    expect(brackets.count).toEqual({ value: 1, kind: 'exact' })
+  })
+
+  it('escapes LIKE and GLOB metacharacters in literal terms', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'lit.md', body: 'percent 100% and a_b and star *x* here a' },
+      { name: 'plain.md', body: 'percent 1000 and axb and star xx here a' },
+    ])
+    const like = await content.search('100% a', 5, {})
+    expect(like.hits.map(hit => hit.title)).toEqual(['lit.md'])
+    const underscore = await content.search('a_b a', 5, {})
+    expect(underscore.hits.map(hit => hit.title)).toEqual(['lit.md'])
+    const glob = await content.search('*x*', 5, { caseSensitive: true })
+    expect(glob.hits.map(hit => hit.title)).toEqual(['lit.md'])
+    expect(glob.count).toEqual({ value: 1, kind: 'exact' })
+  })
+
+  it('pauses content in regex mode instead of scanning', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'a.md', body: 'anything' }])
+    const paused = await content.search('a.*g', 5, { matchMode: 'regex' })
+    expect(paused).toEqual({ hits: [], count: { value: 0, kind: 'unknown' }, warnings: ['content-regex-paused'], error: 'content-regex-not-supported' })
+  })
+})
