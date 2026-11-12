@@ -109,16 +109,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Node tests run on Linux and Windows. macOS is covered by the engine
+        # (cgo/FSEvents) and Go jobs above, which consistently get runners; the
+        # hosted macOS Node jobs were repeatedly cancelled after 15+ min without
+        # ever starting (0.10.0/0.10.1 release gates), making green CI a
+        # scheduling lottery that blocked the release. Re-add Node-on-macOS when
+        # the hosted runner pool is reliable again.
+        os: [ubuntu-latest, windows-latest]
         node: [22, 24]
-        # macOS Node 24 is covered indirectly: macOS runs Node 22, while Node 24
-        # runs on Linux and Windows. The extra macOS/24 combination was repeatedly
-        # cancelled after 15+ min in GitHub's hosted macOS queue (0.10.0/0.10.1
-        # release gates) while all other jobs and macOS/22 completed; keeping it
-        # made green CI a scheduling lottery, which would block the release gate.
-        exclude:
-          - os: macos-latest
-            node: 24
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
