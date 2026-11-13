@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.2 — 2026-11-13
+
+* Add `contentIndexReasoning: true` (default off). When enabled, assistant `reasoning`/`thinking` blocks are indexed as part of the same session message document, after the final answer, so `locator_find` can search thinking traces while jumps still target the message. The 8KB session body cap keeps the answer before reasoning.
+* Toggling the option is persisted with a `reasoning` content-meta flag; changing it forces a session rebuild so turning it off removes stale thinking rows instead of leaving hidden searchable text.
+* Default remains off: reasoning is noisy, large, and may contain scratch work; this is an explicit privacy/disk choice. Live is configured with it on.
+* Tests cover default exclusion, enabled indexing, and the rebuild-on-toggle path.
+* HTTP panel routes are now registered even when the host `connection` service is still activating; every request re-checks the trust fence and answers 503 while it is unavailable, instead of leaving the panel with permanently missing routes until restart. `httpConnectionOptional: true` falls back to host authentication plus same-origin Fetch metadata on hosts where connection is absent by design (default false, fail-closed).
+
 ## 0.11.1 — 2026-11-13
 
 * Add `contentFullIndex: true` as the explicit one-switch full-content mode. It overrides `contentMaxTotalBytes`/`contentMaxFiles` to unlimited; the numeric caps and their defaults are unchanged. This avoids making users hand-write two zeros and makes the disk/build trade-off discoverable.

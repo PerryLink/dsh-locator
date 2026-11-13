@@ -86,6 +86,7 @@ export function apply(ctx: Context, config: Config): void {
         maxFileBytes: config.contentMaxFileBytes,
         maxTotalBytes: contentLimits(config).maxTotalBytes,
         maxFiles: contentLimits(config).maxFiles,
+        includeReasoning: config.contentIndexReasoning,
         maxSessions: config.contentMaxSessions,
       })
     : undefined
@@ -170,5 +171,5 @@ export function apply(ctx: Context, config: Config): void {
 
   // The Web GUI panel is optional: profiles without a Web server keep the
   // tools and never mount an HTTP route.
-  registerHttp(ctx, rt, content, ensureContent)
+  registerHttp(ctx, rt, content, ensureContent, { connectionOptional: config.httpConnectionOptional })
 }

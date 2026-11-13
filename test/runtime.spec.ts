@@ -23,6 +23,7 @@ function config(overrides: Partial<Config> = {}): Config {
     contentRefreshMs: 120_000,
     contentMaxFiles: 0,
     contentFullIndex: false,
+    contentIndexReasoning: false,
     contentMaxSessions: 0,
     contentSessionDirs: [],
     contentExcludes: [],
@@ -34,6 +35,7 @@ function config(overrides: Partial<Config> = {}): Config {
     maxResults: 100,
     startupTimeoutMs: 30_000,
     requestTimeoutMs: 10_000,
+    httpConnectionOptional: false,
     ...overrides,
   }
 }

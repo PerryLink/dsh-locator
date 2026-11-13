@@ -81,7 +81,7 @@ class HttpError extends Error {
  * @param content - content index, when enabled.
  * @param ensure - lazy content boot hook.
  */
-export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void): void {
+export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void, options: { connectionOptional?: boolean } = {}): void {
   const inject = (ctx as unknown as {
     inject?: (deps: string[], callback: (scoped: Context) => void) => unknown
   }).inject
@@ -89,13 +89,16 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
   inject.call(ctx, ['webServer', 'connection'], (scoped: Context) => {
     const server = webServerOf(scoped)
     if (server === undefined) return
-    // Hard dependency: no trust fence, no routes (fail closed, never "allow").
-    if (activeConnection(scoped) === undefined) return
+    // Register even if the connection service is still activating. The service
+    // is injected asynchronously during host boot; bailing out here used to
+    // leave the panel with permanently missing routes until a restart. Every
+    // request re-checks the trust fence and answers 503 when it is unavailable,
+    // so this remains fail-closed.
     const route = (
       path: string,
       run: (body: Record<string, unknown>) => Promise<unknown>,
     ): void => {
-      scoped.effect(() => server.register({ kind: 'exact', path, handler: handler(scoped, run) }))
+      scoped.effect(() => server.register({ kind: 'exact', path, handler: handler(scoped, run, options.connectionOptional === true) }))
     }
     route('/dsh-locator/search', async body => await search(rt, body))
     route('/dsh-locator/status', async () => await status(rt, content))
@@ -126,9 +129,10 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
 function handler(
   scoped: Context,
   run: (body: Record<string, unknown>) => Promise<unknown>,
+  connectionOptional = false,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
-    const rejection = trustRejection(scoped, req)
+    const rejection = trustRejection(scoped, req, connectionOptional)
     if (rejection !== undefined) {
       res.statusCode = rejection
       res.end()
@@ -170,9 +174,14 @@ function handler(
  * regression here cannot silently expose a route to another site.
  * @returns an HTTP status to reject with, or undefined to proceed.
  */
-function trustRejection(scoped: Context, req: IncomingMessage): number | undefined {
+function trustRejection(scoped: Context, req: IncomingMessage, connectionOptional = false): number | undefined {
   const connection = activeConnection(scoped)
-  if (connection === undefined) return 503
+  if (connection === undefined) {
+    // Explicit opt-in for hosts whose connection service is absent/not active.
+    // The host has already authenticated the request; still enforce same-origin
+    // Fetch metadata so a cross-site page cannot drive the local API.
+    return connectionOptional ? originRejection(req.headers) : 503
+  }
   let rejection: number | undefined
   try {
     rejection = connection.requestRejection(req)

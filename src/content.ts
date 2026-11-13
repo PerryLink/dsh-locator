@@ -103,6 +103,8 @@ export interface ContentOptions {
   maxTotalBytes?: number
   maxFiles: number
   maxSessions: number
+  /** Index assistant reasoning blocks as part of the message body. */
+  includeReasoning?: boolean
   /**
    * Run content queries in a worker thread so a slow search never blocks the
    * DSH host event loop. Off by default so direct embedders and tests stay
@@ -300,6 +302,13 @@ export class ContentIndex {
       // A database whose last build never finished (crash, update, forced
       // reload) has a stale byte counter; rebuild instead of trusting it.
       if (this.readFlag('complete') !== 1) return await this.full(generation)
+      // The reasoning flag is absent in databases built before 0.11.2; default
+      // to "not indexed" without forcing a rebuild. Turning reasoning on (or
+      // later off) rebuilds sessions so old rows cannot keep stale thinking.
+      const storedReasoning = this.readFlag('reasoning')
+      const wantReasoning = this.options.includeReasoning === true ? 1 : 0
+      if (storedReasoning !== undefined && storedReasoning !== wantReasoning) return await this.full(generation)
+      if (storedReasoning === undefined && wantReasoning === 1) return await this.full(generation)
       this.totalBytes = this.readTotalBytes()
       await this.refreshFiles(generation)
       if (generation !== this.generation) return
@@ -605,6 +614,7 @@ export class ContentIndex {
     this.state.updatedAt = Date.now()
     this.writeTotalBytes()
     this.writeFlag('complete', 1)
+    this.writeFlag('reasoning', this.options.includeReasoning === true ? 1 : 0)
     this.refreshSessionPaths()
     this.reopenWorker()
   }
@@ -860,9 +870,9 @@ export class ContentIndex {
       }
       let event: { type?: string; data?: Record<string, unknown> }
       try { event = JSON.parse(line) } catch { continue }
-      const extracted = messageText(event)
+      const extracted = messageText(event, this.options.includeReasoning === true)
       if (extracted === undefined) continue
-      if (title === '') title = extracted.text.replace(/\s+/g, ' ').slice(0, 90)
+      if (title === '') title = extracted.titleText.replace(/\s+/g, ' ').slice(0, 90)
       const body = extracted.text.slice(0, SESSION_BODY_BYTES)
       const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, nodeKey: extracted.nodeKey, mtime: file.mtime }
       if (!this.addDoc(row)) return false
@@ -1050,7 +1060,7 @@ function conversationNodeKey(kind: string, id: string): string {
   return `${kind.length}:${kind}${id}`
 }
 
-function messageText(event: { type?: string; data?: Record<string, unknown> }): { text: string; id: string; nodeKey: string | null } | undefined {
+function messageText(event: { type?: string; data?: Record<string, unknown> }, includeReasoning = false): { text: string; titleText: string; id: string; nodeKey: string | null } | undefined {
   if (event.type !== 'user/message' && event.type !== 'assistant/message') return undefined
   const data = event.data ?? {}
   if (event.type === 'user/message') {
@@ -1060,12 +1070,19 @@ function messageText(event: { type?: string; data?: Record<string, unknown> }): 
   const message = (data.message ?? {}) as Record<string, unknown>
   const content = event.type === 'user/message' ? data.content : message.content
   if (!Array.isArray(content)) return undefined
-  const text = content
-    .filter((block): block is { type: string; text: string } => typeof block === 'object' && block !== null && (block as { type?: string }).type === 'text' && typeof (block as { text?: unknown }).text === 'string')
-    .map(block => block.text)
-    .join('\n')
-    .trim()
-  if (text === '') return undefined
+  const blocks = content.filter((block): block is { type: string; text: string } =>
+    typeof block === 'object' && block !== null
+      && typeof (block as { type?: unknown }).type === 'string'
+      && typeof (block as { text?: unknown }).text === 'string')
+  const text = blocks.filter(block => block.type === 'text').map(block => block.text).join('\n').trim()
+  const reasoning = includeReasoning
+    ? blocks.filter(block => block.type === 'reasoning' || block.type === 'thinking').map(block => block.text).join('\n').trim()
+    : ''
+  if (text === '' && reasoning === '') return undefined
+  // Final answer first: the 8 KB body cap must not let a long reasoning trace
+  // evict the answer itself. Reasoning follows for opt-in search only.
+  const body = [text, reasoning].filter(part => part !== '').join('\n')
+  const titleText = text !== '' ? text : reasoning
   const id = event.type === 'user/message' ? String(data.id ?? '') : String(message.id ?? '')
   const safeId = id || `seq-${String(data.seq ?? '')}`
   let nodeKey: string | null = null
@@ -1076,7 +1093,7 @@ function messageText(event: { type?: string; data?: Record<string, unknown> }): 
     const step = Number(data.step)
     if (Number.isInteger(turn) && Number.isInteger(step)) nodeKey = conversationNodeKey('assistant-step', `${turn}:${step}`)
   }
-  return { text, id: safeId, nodeKey }
+  return { text: body, titleText, id: safeId, nodeKey }
 }
 
 async function sessionFiles(roots: string[]): Promise<Array<{ path: string; mtime: number }>> {

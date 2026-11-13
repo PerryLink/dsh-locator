@@ -61,6 +61,8 @@ export interface ContentOptions {
     maxTotalBytes?: number;
     maxFiles: number;
     maxSessions: number;
+    /** Index assistant reasoning blocks as part of the message body. */
+    includeReasoning?: boolean;
     /**
      * Run content queries in a worker thread so a slow search never blocks the
      * DSH host event loop. Off by default so direct embedders and tests stay

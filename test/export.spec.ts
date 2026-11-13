@@ -67,6 +67,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
     contentRefreshMs: 120_000,
       contentMaxFiles: 0,
       contentFullIndex: false,
+      contentIndexReasoning: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],
@@ -78,6 +79,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
       maxResults: 100,
       startupTimeoutMs: 30_000,
       requestTimeoutMs: 10_000,
+      httpConnectionOptional: false,
     }
     apply(ctx, config)
     cleanups.push(() => { for (const dispose of disposers.reverse()) dispose() })

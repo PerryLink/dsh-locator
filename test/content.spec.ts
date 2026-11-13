@@ -1075,4 +1075,49 @@ describe('content database self-healing', () => {
   })
 
 
+
+  it('indexes assistant reasoning only with includeReasoning and rebuilds when toggled', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-reasoning-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-reasoning-sessions-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const dir = join(sessions, '--workspace--', 'session-reasoning')
+    mkdirSync(dir, { recursive: true })
+    const line = JSON.stringify({
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: 'msg-reasoning',
+          content: [
+            { type: 'reasoning', text: 'THINK-MARKER private chain of thought' },
+            { type: 'text', text: 'FINAL-MARKER public answer' },
+          ],
+        },
+      },
+    })
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(line)))
+    const runtime = { dump: async () => ({ entries: [], next: 1, done: true }) } as unknown as LocatorRuntime
+    const make = (includeReasoning: boolean) => new ContentIndex(runtime, {
+      stateDir: state, sessionDirs: [sessions], maxFileBytes: 10_000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 10, includeReasoning,
+    })
+    const without = make(false)
+    cleanups.push(() => without.close())
+    without.boot()
+    await settle(without)
+    expect((await without.search('THINK-MARKER', 5)).length).toBe(0)
+    expect((await without.search('FINAL-MARKER', 5)).length).toBeGreaterThan(0)
+    without.close()
+
+    const withReasoning = make(true)
+    cleanups.push(() => withReasoning.close())
+    withReasoning.boot()
+    await settle(withReasoning)
+    const thinking = await withReasoning.search('THINK-MARKER', 5)
+    expect(thinking).toHaveLength(1)
+    expect(thinking[0]?.messageId).toBe('msg-reasoning')
+    expect(thinking[0]?.nodeKey).toBe('14:assistant-step1:1')
+    expect((await withReasoning.search('FINAL-MARKER', 5)).length).toBeGreaterThan(0)
+  })
+
 })
