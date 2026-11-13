@@ -55,6 +55,21 @@ const STATUS_OUTPUT = {
     watchReason: { type: 'string' },
     watchRoots: { type: 'integer' },
     refreshFallback: { type: 'boolean' },
+    content: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        enabled: { type: 'boolean' },
+        building: { type: 'boolean' },
+        files: { type: 'integer' },
+        sessions: { type: 'integer' },
+        messages: { type: 'integer' },
+        truncated: { type: 'boolean' },
+        fullIndex: { type: 'boolean' },
+        reasoningIndex: { type: 'boolean' },
+        warnings: { type: 'array', items: { type: 'string' } },
+      },
+    },
     usn: { type: 'boolean' },
     scanning: { type: 'boolean' },
     stateDir: { type: 'string' },
@@ -294,6 +309,7 @@ export function makeStatusTool(rt: LocatorRuntime) {
           watchReason?: string
           watchRoots?: number
           refreshFallback?: boolean
+          content?: { enabled?: boolean; files?: number; sessions?: number; messages?: number; truncated?: boolean; fullIndex?: boolean; reasoningIndex?: boolean; warnings?: string[] }
           usn?: boolean
           scanning?: boolean
           stateDir?: string
@@ -310,6 +326,9 @@ export function makeStatusTool(rt: LocatorRuntime) {
           `  engine: ${v.binary ?? ''}${v.version === undefined ? '' : ` (${v.version}, ${v.platform ?? ''})`}`,
         ]
         if (v.refreshFallback === true) lines.push('  fallback: periodic rebuild is active (native watcher incomplete)')
+        if (v.content?.enabled === true) {
+          lines.push(`  content: ${String(v.content.files ?? 0)} files / ${String(v.content.messages ?? 0)} messages${v.content.fullIndex === true ? ' · full-index' : ''}${v.content.reasoningIndex === true ? ' · reasoning-indexed' : ''}${v.content.truncated === true ? ' · truncated' : ''}`)
+        }
         if (v.warning !== undefined) lines.push(`  warning: ${v.warning}`)
         if (v.error !== undefined) lines.push(`  error: ${v.error}`)
         return [{ type: 'text', text: lines.join('\n') }]

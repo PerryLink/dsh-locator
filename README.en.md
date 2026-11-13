@@ -404,6 +404,8 @@ The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOG
 
 ## 0.11.0 upgrade notes
 
+- Status/panel expose **full-index** and **reasoning-indexed**; client language prefers the host `<html lang>` (DSH locale) and falls back to the browser language.
+
 - Panel routes are registered even when the host `connection` service is still activating; each request re-checks it and answers 503 meanwhile. Hosts without connection can set `httpConnectionOptional: true` to fall back to host authentication + same-origin Fetch metadata (default false).
 
 - Optional **reasoning index**: `contentIndexReasoning: true` appends assistant `reasoning`/`thinking` blocks to the same session message document (final answer first, inside the 8KB body cap), so `locator_find` can search thinking traces while jumps still target the message. Off by default; toggling it forces a session rebuild.

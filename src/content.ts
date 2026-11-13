@@ -85,6 +85,10 @@ export interface ContentState {
    */
   warnings: string[]
   updatedAt: number
+  /** Both numeric content caps are explicitly unlimited. */
+  fullIndex?: boolean
+  /** Assistant reasoning/thinking blocks are included in session docs. */
+  reasoningIndex?: boolean
 }
 
 export interface ContentOptions {
@@ -155,7 +159,13 @@ export class ContentIndex {
 
   status(): ContentState {
     if (this.db !== null && !this.state.building && !this.databaseIsCurrent()) this.recoverExternal()
-    return { ...this.state, warnings: [...this.state.warnings], building: this.state.building || this.pendingStart }
+    return {
+      ...this.state,
+      warnings: [...this.state.warnings],
+      building: this.state.building || this.pendingStart,
+      fullIndex: this.options.maxTotalBytes === 0 && this.options.maxFiles === 0,
+      reasoningIndex: this.options.includeReasoning === true,
+    }
   }
 
   /**
