@@ -403,6 +403,10 @@ El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` 
 
 ## Notas de actualización 0.11.0
 
+- Las rutas del panel se registran aunque el servicio `connection` aún esté activando; cada petición lo revisa y responde 503. Sin connection, `httpConnectionOptional: true` usa la autenticación del host + mismo origen (por defecto false).
+
+- **Índice de razonamiento opcional**: `contentIndexReasoning: true` añade los bloques `reasoning`/`thinking` del asistente al mismo documento de sesión (respuesta final primero, dentro del límite de 8KB); `locator_find` puede buscar el razonamiento y el salto sigue apuntando al mensaje. Desactivado por defecto; cambiarlo fuerza reconstrucción de sesiones.
+
 - **Índice de contenido completo**: `contentFullIndex: true` (o ambos caps a `0`) indexa todos los archivos de texto elegibles (~185k archivos / 2.0 GB, ~5.9 GB de FTS en la máquina de referencia); la primera construcción tarda unos minutos y las consultas rondan 0.04–0.7 s. Los límites por defecto siguen activos para no consumir decenas de GB sin avisar.
 - `locator_find` sigue limitado al workspace; si el cwd no está dentro de ningún root indexado, ya no restringe los archivos a ese cwd (antes devolvía vacío) y busca en los roots; las sesiones siguen limitadas a la actual. Usa `scope: "all"` para cruzar ámbitos.
 - Panel: **cargar más** (paginación por offset), **búsquedas recientes** y **filtro de resultados cargados**.

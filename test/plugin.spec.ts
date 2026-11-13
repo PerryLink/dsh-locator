@@ -70,6 +70,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
     contentRefreshMs: 120_000,
     contentMaxFiles: 0,
       contentFullIndex: false,
+      contentIndexReasoning: false,
     contentMaxSessions: 0,
     contentSessionDirs: [],
     contentExcludes: [],
@@ -81,6 +82,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       maxResults: 100,
       startupTimeoutMs: 30_000,
       requestTimeoutMs: 10_000,
+      httpConnectionOptional: false,
     }
     apply(ctx, config)
     stopEngines.push(() => {
@@ -130,6 +132,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       contentRefreshMs: 0,
       contentMaxFiles: 0,
       contentFullIndex: false,
+      contentIndexReasoning: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],
@@ -141,6 +144,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       maxResults: 100,
       startupTimeoutMs: 30_000,
       requestTimeoutMs: 10_000,
+      httpConnectionOptional: false,
     }
     const previousHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, 'dsh-home')
@@ -217,6 +221,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       contentRefreshMs: 60_000,
       contentMaxFiles: 0,
       contentFullIndex: false,
+      contentIndexReasoning: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],
@@ -228,6 +233,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       maxResults: 100,
       startupTimeoutMs: 30_000,
       requestTimeoutMs: 10_000,
+      httpConnectionOptional: false,
     }
     const previousHome = process.env.DSH_HOME
     process.env.DSH_HOME = join(root, 'dsh-home')
@@ -304,6 +310,7 @@ describe('HTTP surface gating (no engine required)', () => {
       contentRefreshMs: 0,
       contentMaxFiles: 0,
       contentFullIndex: false,
+      contentIndexReasoning: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],
@@ -315,6 +322,7 @@ describe('HTTP surface gating (no engine required)', () => {
       maxResults: 100,
       startupTimeoutMs: 1_000,
       requestTimeoutMs: 1_000,
+      httpConnectionOptional: false,
     }
     apply(ctx, config)
     return {

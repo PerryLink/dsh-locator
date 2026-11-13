@@ -34,7 +34,9 @@ import type { ContentIndex } from './content.ts';
  * @param content - content index, when enabled.
  * @param ensure - lazy content boot hook.
  */
-export declare function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void): void;
+export declare function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void, options?: {
+    connectionOptional?: boolean;
+}): void;
 /**
  * The exact JSON media type required by every locator route. A charset or any
  * other parameter is tolerated (`application/json; charset=utf-8`), any other

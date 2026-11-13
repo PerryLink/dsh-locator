@@ -42,6 +42,12 @@ export interface Config {
   /** Maximum text files indexed per build; 0 means no cap. */
   contentMaxFiles: number
   /**
+   * Index assistant reasoning/thinking blocks in session messages too. Off by
+   * default: reasoning is large, noisy, and may contain scratch work the user
+   * does not expect to be searchable. Enabling it forces a session rebuild.
+   */
+  contentIndexReasoning: boolean
+  /**
    * One switch for full content search: overrides both body and file caps to
    * unlimited. Off by default because a full index costs gigabytes of disk and
    * a long first build; set this instead of hand-writing two zero values.
@@ -80,6 +86,13 @@ export interface Config {
   startupTimeoutMs: number
   /** Per-request deadline for the engine. */
   requestTimeoutMs: number
+  /**
+   * Allow the panel HTTP routes to operate without the DSH connection service,
+   * relying on the host's request authentication plus the same-origin Fetch
+   * metadata check. Off by default; useful on hosts where the connection
+   * service is not injected during plugin boot.
+   */
+  httpConnectionOptional: boolean
 }
 
 /** Configuration schema; invalid values fail the profile load loudly. */
@@ -107,6 +120,7 @@ export const Config: Schema<Config> = Schema.object({
   contentMaxTotalBytes: Schema.number().default(1_000_000_000),
   contentRefreshMs: Schema.number().default(300_000),
   contentMaxFiles: Schema.number().default(200_000),
+  contentIndexReasoning: Schema.boolean().default(false),
   contentFullIndex: Schema.boolean().default(false),
   contentMaxSessions: Schema.number().default(100),
   contentIncludeArchived: Schema.boolean().default(false),
@@ -149,6 +163,7 @@ export const Config: Schema<Config> = Schema.object({
   maxResults: Schema.number().default(100),
   startupTimeoutMs: Schema.number().default(120_000),
   requestTimeoutMs: Schema.number().default(15_000),
+  httpConnectionOptional: Schema.boolean().default(false),
 })
 
 /**

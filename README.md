@@ -366,6 +366,10 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 
 ## 0.11.0 升级注意
 
+- 宿主 `connection` 服务在插件启动时尚未就绪也不会永久丢路由：先注册、每个请求再检查并 503；确实没有 connection 的 host 可设 `httpConnectionOptional: true`，退回宿主鉴权 + 同源 Fetch 检查（默认 false）。
+
+- 可选 **思考内容索引**：`contentIndexReasoning: true` 会把 assistant 的 `reasoning`/`thinking` block 并入同一条会话消息（最终答案在前，8KB 上限内），因此 `locator_find` 能搜思考过程，跳转仍指向消息；默认关闭，切换该开关会强制重建会话索引。
+
 - **全量内容索引**：设置 `contentFullIndex: true`（或把两个 cap 都设为 `0`），即可索引全部符合文本扩展名/单文件上限的文件。实测本机 eligible 约 **185k 文件 / 2.0GB 文本**，FTS 库约 **5.9GB**；首次构建约几分钟，查询约 **0.04–0.7s**。默认仍保留 1GB/200k 上限，避免普通用户磁盘暴涨；面板会显示 `truncated`。
 - `locator_find` 默认仍 workspace：当前会话 + 调用者 cwd；但如果 cwd **不在任何已索引 root 内**，不再把文件命中限制到 cwd（否则必然为空），而是搜索已索引 root 的文件；会话仍只查当前会话。跨范围仍用 `scope:"all"`。
 - 面板新增：**加载更多**（按 offset 分页）、**最近搜索**（localStorage，可清空）、**过滤已加载结果**。

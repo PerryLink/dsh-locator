@@ -158,10 +158,12 @@ function tempDir(prefix: string): string {
 }
 
 describe('HTTPS fail-closed registration', () => {
-  it('registers no routes when the connection service is missing', () => {
+  it('registers routes but answers 503 when the connection service is not active yet', async () => {
     const harness = fakeHarness()
     registerHttp(harness.ctx, fakeRuntime())
-    expect(harness.routes).toEqual([])
+    expect(harness.routes.length).toBeGreaterThan(0)
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(503)
   })
 
   it('registers no routes when the connection dependency never resolves', () => {
@@ -169,6 +171,13 @@ describe('HTTPS fail-closed registration', () => {
     const harness = fakeHarness({ connection, missingDeps: ['connection'] })
     registerHttp(harness.ctx, fakeRuntime())
     expect(harness.routes).toEqual([])
+  })
+
+  it('can explicitly fall back to host auth + same-origin checks when connection is absent', async () => {
+    const harness = fakeHarness()
+    registerHttp(harness.ctx, fakeRuntime(), undefined, undefined, { connectionOptional: true })
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(200)
   })
 
   it('registers the panel routes when webserver and connection are present', () => {
