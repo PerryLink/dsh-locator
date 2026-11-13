@@ -366,6 +366,8 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 
 ## 0.11.0 升级注意
 
+- 状态/面板会显示 **全量内容** 与 **含思考内容**；客户端语言优先跟随宿主 `<html lang>`（DSH locale），没有时退回浏览器语言。
+
 - 宿主 `connection` 服务在插件启动时尚未就绪也不会永久丢路由：先注册、每个请求再检查并 503；确实没有 connection 的 host 可设 `httpConnectionOptional: true`，退回宿主鉴权 + 同源 Fetch 检查（默认 false）。
 
 - 可选 **思考内容索引**：`contentIndexReasoning: true` 会把 assistant 的 `reasoning`/`thinking` block 并入同一条会话消息（最终答案在前，8KB 上限内），因此 `locator_find` 能搜思考过程，跳转仍指向消息；默认关闭，切换该开关会强制重建会话索引。

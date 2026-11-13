@@ -403,6 +403,8 @@ El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` 
 
 ## Notas de actualización 0.11.0
 
+- El estado/panel muestra **índice completo** y **razonamiento indexado**; el idioma prefiere `<html lang>` del host y usa el navegador como respaldo.
+
 - Las rutas del panel se registran aunque el servicio `connection` aún esté activando; cada petición lo revisa y responde 503. Sin connection, `httpConnectionOptional: true` usa la autenticación del host + mismo origen (por defecto false).
 
 - **Índice de razonamiento opcional**: `contentIndexReasoning: true` añade los bloques `reasoning`/`thinking` del asistente al mismo documento de sesión (respuesta final primero, dentro del límite de 8KB); `locator_find` puede buscar el razonamiento y el salto sigue apuntando al mensaje. Desactivado por defecto; cambiarlo fuerza reconstrucción de sesiones.

@@ -404,6 +404,8 @@ DeepSeek Harness
 
 ## 0.11.0 अपग्रेड नोट्स
 
+- status/पैनल **full-index** और **reasoning-indexed** दिखाते हैं; भाषा host `<html lang>` को प्राथमिकता देती है, अन्यथा browser language।
+
 - पैनल रूट तब भी पंजीकृत होते हैं जब host `connection` सेवा सक्रिय हो रही हो; हर अनुरोध जाँचता है और 503 देता है। connection न होने पर `httpConnectionOptional: true` host auth + same-origin पर निर्भर करता है (डिफ़ॉल्ट false)।
 
 - वैकल्पिक **reasoning इंडेक्स**: `contentIndexReasoning: true` assistant के `reasoning`/`thinking` ब्लॉक को उसी session message दस्तावेज़ में जोड़ता है (अंतिम उत्तर पहले, 8KB सीमा में), जिससे `locator_find` सोच-प्रक्रिया खोज सकता है; jump संदेश पर ही रहता है। डिफ़ॉल्ट बंद; बदलने पर session rebuild होता है।

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.3 — 2026-11-14
+
+* Expose content capabilities in status: `fullIndex` (both caps explicitly 0) and `reasoningIndex` (assistant reasoning blocks included). `locator_status` and the panel status line show `full-index` / `reasoning-indexed` so users can tell which mode is active.
+* Client language selection now prefers the host `<html lang>` set by the DSH locale service, falling back to `navigator.language`; this follows the product locale instead of only the browser UI language.
+* Six engine binaries rebuilt at 0.11.3; 130 tests.
+
 ## 0.11.2 — 2026-11-13
 
 * Add `contentIndexReasoning: true` (default off). When enabled, assistant `reasoning`/`thinking` blocks are indexed as part of the same session message document, after the final answer, so `locator_find` can search thinking traces while jumps still target the message. The 8KB session body cap keeps the answer before reasoning.

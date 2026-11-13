@@ -44,6 +44,10 @@ export interface ContentState {
      */
     warnings: string[];
     updatedAt: number;
+    /** Both numeric content caps are explicitly unlimited. */
+    fullIndex?: boolean;
+    /** Assistant reasoning/thinking blocks are included in session docs. */
+    reasoningIndex?: boolean;
 }
 export interface ContentOptions {
     stateDir: string;

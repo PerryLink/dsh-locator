@@ -236,6 +236,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
 contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget reached; some files are not indexed', contentTooShort: 'Content needs at least 3 characters (use Ctrl+F for shorter searches)', contentTimeout: 'Content search timed out; narrow the query or scope', contentBadChars: 'Content search does not support NUL/control characters',
         panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
         watchDegraded: 'watcher degraded; periodic refresh active',
+        contentFullIndex: 'full-index', contentReasoningIndex: 'reasoning-indexed',
         panelFilter: 'Filter loaded results…', filterEmpty: 'No loaded result matches this filter', panelLoadMore: 'Load more', panelHistory: 'Recent searches', panelHistoryClear: 'Clear',
       },
       zh: {
@@ -283,6 +284,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
 contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预算上限，部分文件未被收录', contentTooShort: '内容搜索至少需要 3 个字符（更短的词请用 Ctrl+F 在会话内查找）', contentTimeout: '内容搜索超时，请缩小关键词或范围', contentBadChars: '内容搜索不支持 NUL/控制字符',
         panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
         watchDegraded: '文件监听降级，正在周期刷新',
+        contentFullIndex: '全量内容', contentReasoningIndex: '含思考内容',
         panelFilter: '过滤当前结果…', filterEmpty: '已加载结果中没有符合过滤条件的内容', panelLoadMore: '加载更多', panelHistory: '最近搜索', panelHistoryClear: '清空',
       },
       es: {
@@ -330,6 +332,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
 contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el presupuesto del índice; algunos archivos no están indexados', contentTooShort: 'El contenido requiere al menos 3 caracteres (usa Ctrl+F para búsquedas más cortas)', contentTimeout: 'La búsqueda de contenido agotó el tiempo; reduce la consulta o el ámbito', contentBadChars: 'La búsqueda de contenido no admite NUL/caracteres de control',
         panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
         watchDegraded: 'vigilante degradado; refresco periódico activo',
+        contentFullIndex: 'índice completo', contentReasoningIndex: 'razonamiento indexado',
         panelFilter: 'Filtrar resultados cargados…', filterEmpty: 'Ningún resultado cargado coincide con el filtro', panelLoadMore: 'Cargar más', panelHistory: 'Búsquedas recientes', panelHistoryClear: 'Borrar',
       },
       pt: {
@@ -377,6 +380,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
 contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índice foi atingido; alguns arquivos não estão indexados', contentTooShort: 'O conteúdo exige pelo menos 3 caracteres (use Ctrl+F para buscas menores)', contentTimeout: 'A busca de conteúdo excedeu o tempo; reduza a consulta ou o escopo', contentBadChars: 'A busca de conteúdo não suporta NUL/caracteres de controle',
         panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
         watchDegraded: 'watcher degradado; atualização periódica ativa',
+        contentFullIndex: 'índice completo', contentReasoningIndex: 'raciocínio indexado',
         panelFilter: 'Filtrar resultados carregados…', filterEmpty: 'Nenhum resultado carregado corresponde ao filtro', panelLoadMore: 'Carregar mais', panelHistory: 'Buscas recentes', panelHistoryClear: 'Limpar',
       },
       hi: {
@@ -424,11 +428,15 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
 contentWarning: 'इंडेक्स चेतावनी: {list}', contentBudget: 'सामग्री इंडेक्स बजट पूरा; कुछ फ़ाइलें इंडेक्स नहीं हैं', contentTooShort: 'सामग्री के लिए कम से कम 3 अक्षर चाहिए (छोटी खोज के लिए Ctrl+F)', contentTimeout: 'सामग्री खोज का समय समाप्त; क्वेरी या क्षेत्र घटाएँ', contentBadChars: 'सामग्री खोज NUL/नियंत्रण अक्षर नहीं लेती',
         panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
         watchDegraded: 'वॉचर क्षीण; आवधिक रिफ्रेश सक्रिय',
+        contentFullIndex: 'पूर्ण इंडेक्स', contentReasoningIndex: 'reasoning इंडेक्स',
         panelFilter: 'लोड किए गए परिणाम छाँटें…', filterEmpty: 'लोड किए गए परिणामों में फ़िल्टर से मेल नहीं', panelLoadMore: 'और लोड करें', panelHistory: 'हाल की खोजें', panelHistoryClear: 'साफ़ करें',
       },
     }
     const LANG = (() => {
-      const tag = String((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase()
+      // The host sets <html lang> from the active DSH locale; prefer it over
+      // the browser UI language so the panel follows the product setting.
+      const hostTag = typeof document !== 'undefined' && document.documentElement ? document.documentElement.lang : ''
+      const tag = String(hostTag || (typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase()
       if (tag.startsWith('zh')) return 'zh'
       if (tag.startsWith('es')) return 'es'
       if (tag.startsWith('pt')) return 'pt'
@@ -2381,7 +2389,9 @@ self.onmessage = event => {
                   roots: (status.roots || []).length,
                 }) + (status.watchDegraded === true || status.refreshFallback === true
                   ? ' · ' + t('watchDegraded')
-                  : '')),
+                  : '')
+                  + (status.content && status.content.fullIndex === true ? ' · ' + t('contentFullIndex') : '')
+                  + (status.content && status.content.reasoningIndex === true ? ' · ' + t('contentReasoningIndex') : '')),
         ),
         history.length > 0
           ? h('div', { className: 'dsh-locator-history' },
