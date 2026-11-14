@@ -199,7 +199,7 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex) {
         const indexedAt = messageId === undefined ? content.sessionIndexedMtime(parsed.sessionId) : content.indexedMtime('session', '', messageId)
         const body = messageId === undefined ? undefined : content.sessionBody(parsed.sessionId, messageId)
         const excerpt = mode === 'excerpt' ? body?.slice(0, maxBytes) : undefined
-        const provenance: RefProvenance = { origin: 'index', sessionId: parsed.sessionId, ...(messageId === undefined ? {} : { messageId }), ...(indexedAt === undefined ? {} : { indexedAt }) }
+        const provenance: RefProvenance = { origin: 'index', sessionId: parsed.sessionId, ...(messageId === undefined ? {} : { messageId }), ...(indexedAt === undefined ? {} : { indexedAt: Math.trunc(indexedAt) }) }
         return {
           ok: true as const,
           ref: parsed.ref,
@@ -249,7 +249,7 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex) {
           title: basename(authorized.path),
           ...(size === undefined ? {} : { size }),
           ...(hash === null ? {} : { hash }),
-          provenance: { origin: 'index' as const, path: authorized.path, ...(indexedAt === undefined ? {} : { indexedAt }) },
+          provenance: { origin: 'index' as const, path: authorized.path, ...(indexedAt === undefined ? {} : { indexedAt: Math.trunc(indexedAt) }) },
           freshness: freshnessFor(indexedAt, currentMtime, observedAt),
           permissions: { read: 'allowed' as const, visibility: 'roots' as const, reason: 'path is inside the configured roots' },
           ...(excerpt === undefined ? {} : { excerpt }),
@@ -268,7 +268,7 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex) {
           kind: 'session-event' as const,
           title: `session ${parsed.sessionId.slice(0, 12)} event ${String(parsed.seq)}`,
           ...(raw === undefined ? {} : { size: raw.length }),
-          provenance: { origin: 'session' as const, sessionId: parsed.sessionId, ...(indexedAt === undefined ? {} : { indexedAt }) },
+          provenance: { origin: 'session' as const, sessionId: parsed.sessionId, ...(indexedAt === undefined ? {} : { indexedAt: Math.trunc(indexedAt) }) },
           freshness: freshnessFor(indexedAt, indexedAt, observedAt),
           permissions: { read: 'allowed' as const, visibility: 'session' as const, reason: 'caller workspace authorization' },
           ...(excerpt === undefined ? {} : { excerpt }),
