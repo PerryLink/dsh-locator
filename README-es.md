@@ -403,6 +403,11 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
+## Notas de actualización 0.14.0
+
+- **Adaptador de capacidades**: `capability_search` (encontrar "quién puede hacer esto" desde una intención) y `capability_preflight` (visibilidad, validación del esquema de argumentos, aprobación/sandbox y efectos secundarios) leen el registro de herramientas en vivo (incluidas acciones MCP) y el catálogo de skills. Sin descubrimiento duplicado ni embeddings; refresco cada 60 s.
+- Primera parte de Wave 3; la vista de capacidades en el panel, el empaquetado multi-tenant/empresa y los refs persistentes de Wave 2 quedan para versiones posteriores.
+
 ## Notas de actualización 0.13.0
 
 - **Corrección de autorización**: `locator_find` ya no permite que `sessionId`, `scope:"all"` o `pathPrefix` eludan la identidad del llamador. Un id de sesión explícito solo se acepta para la sesión del llamador o sesiones cuyo `cwd` inmutable coincide (misma regla que las herramientas session-query de DSH); `pathPrefix` debe resolver dentro de los roots configurados; `scope:"all"` sigue buscando todos los archivos pero limita las sesiones al conjunto autorizado salvo `allowCrossWorkspaceSessions: true`.

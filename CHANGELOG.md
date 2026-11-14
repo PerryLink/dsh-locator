@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.0 — 2026-11-14
+
+* **Capability adapter (Wave 3, part 1)**: new tools `capability_search(intent, kinds?, riskMax?, ...)` and `capability_preflight(capability, argsJson?)` index the **live** DSH registries — tool definitions (including `mcp__<server>__<tool>` entries) and the skill catalog — and add intent matching, inferred risk (read/write/exec plus approval/sandbox hints), argument-schema validation and side-effect reporting. It reads `ctx.tools.definitions()` / `ctx.skills.list()`; it does not duplicate discovery and has no embedding dependency.
+* Snapshot cache (60 s) and graceful degradation: a missing skill service or registry produces warnings instead of breaking the tool.
+* `171 tests`; six engine binaries rebuilt at 0.14.0.
+* Deferred and explicitly documented: refs persistence plus URL/spill/attachment refs and the panel ref chip (Wave 2), the panel capability view (Wave 3 UI), and tenant/enterprise packaging (blocked on a real dsh-ee instance and credentials).
+
 ## 0.13.0 — 2026-11-14
 
 * **Authorization fix**: `locator_find` no longer lets `sessionId`, `scope: "all"` or `pathPrefix` bypass the caller's identity. An explicit session id is allowed only for the caller session or sessions whose immutable `cwd` equals the caller cwd (the same rule as DSH's session-query tools); `pathPrefix` must resolve inside the configured roots; `scope: "all"` still searches every indexed file but keeps session documents inside the caller's authorized set unless the new `allowCrossWorkspaceSessions: true` is configured.

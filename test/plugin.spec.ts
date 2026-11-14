@@ -91,7 +91,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       for (const dispose of disposers.reverse()) dispose()
     })
 
-    expect(tools.map(tool => tool.name).sort()).toEqual(['locator_cite', 'locator_export', 'locator_rebuild', 'locator_resolve', 'locator_search', 'locator_status'])
+    expect(tools.map(tool => tool.name).sort()).toEqual(['capability_preflight', 'capability_search', 'locator_cite', 'locator_export', 'locator_rebuild', 'locator_resolve', 'locator_search', 'locator_status'])
     const statusTool = tools.find(tool => tool.name === 'locator_status')
     await waitForIndex(statusTool)
     const search = tools.find(tool => tool.name === 'locator_search')

@@ -366,6 +366,11 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.14.0 更新
+
+- **能力索引适配器**：新增 `capability_search`（自然语言找“谁能做这件事”）与 `capability_preflight`（能力是否可见、参数是否符合 schema、需要什么审批/沙箱、有哪些副作用）；数据来自宿主已有的 tool registry（含 MCP 工具）与 skill catalog，不重复发现、不用 embedding，60s 自动刷新。
+- 本版是 Wave 3 的第一部分；面板能力页、租户/企业包，以及 Wave 2 的 refs 持久化/URL·spill·attachment ref 留待后续版本（企业包需 dsh-ee 实例与凭据）。
+
 ## 0.13.0 更新
 
 - **授权修复**：`locator_find` 的 `sessionId`/`scope:"all"`/`pathPrefix` 不再绕过调用方身份——显式会话 id 只允许「当前会话」或「header.cwd 与调用方相同的会话」（与 DSH session-query 工具一致）；`pathPrefix` 必须落在已配置 root 内；`scope:"all"` 仍可搜全部文件，但会话正文默认限调用方授权集合（`allowCrossWorkspaceSessions: true` 可显式放开）。

@@ -14,6 +14,7 @@ import { makeReindexTool } from './reindex.ts'
 import { registerHttp } from './http.ts'
 import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
+import { makeCapabilityTools, type CapabilitySources } from './capabilities.ts'
 import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
 import { makeRebuildTool, makeSearchTool, makeStatusTool } from './tools.ts'
 
@@ -168,6 +169,14 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(makeExportTool(rt))
   ctx.tools.register(makeResolveTool(rt, content))
   ctx.tools.register(makeCiteTool())
+  // Capability adapter: read the host's tool registry and skill catalog instead
+  // of duplicating discovery. Optional services stay optional.
+  const skillsService = (ctx as unknown as { get?: (name: string) => unknown }).get?.('skills')
+  const capabilitySources: CapabilitySources = {
+    tools: ctx.tools as unknown as CapabilitySources['tools'],
+    ...(skillsService === undefined ? {} : { skills: skillsService as CapabilitySources['skills'] }),
+  }
+  for (const tool of makeCapabilityTools(capabilitySources)) ctx.tools.register(tool)
   if (content !== undefined) {
     ctx.tools.register(makeFindTool(content, ensureContent, roots, config.allowCrossWorkspaceSessions))
     ctx.tools.register(makeReindexTool(content, ensureContent))

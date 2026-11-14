@@ -404,6 +404,11 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
 
+## 0.14.0 अपग्रेड नोट्स
+
+- **क्षमता अनुकूलक (capability adapter)**: `capability_search` (स्वाभाविक भाषा में "यह कौन कर सकता है" खोजें) और `capability_preflight` (दृश्यता, argument schema जाँच, approval/sandbox आवश्यकताएँ, side effects) होस्ट के live tool registry (MCP actions सहित) और skill catalog से पढ़ते हैं। कोई दोहरा discovery या embedding नहीं; snapshot हर 60 s में ताज़ा।
+- यह Wave 3 का पहला भाग है; panel capability view, tenant/enterprise packaging और Wave 2 के refs persistence/URL·spill·attachment refs आगे के संस्करणों में।
+
 ## 0.13.0 अपग्रेड नोट्स
 
 - **अधिकार सुधार**: `locator_find` अब `sessionId`, `scope:"all"` या `pathPrefix` को कॉलर की पहचान बायपास करने नहीं देता। स्पष्ट session id केवल कॉलर सत्र या जिनका अपरिवर्तनीय `cwd` कॉलर के बराबर है (DSH session-query नियम) के लिए मान्य है; `pathPrefix` कॉन्फ़िगर किए roots के अंदर होना चाहिए; `scope:"all"` सभी फ़ाइलें खोजता है पर सत्र पंक्तियाँ कॉलर के अधिकृत सेट तक सीमित रहती हैं जब तक `allowCrossWorkspaceSessions: true` न हो।

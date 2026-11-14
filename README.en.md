@@ -404,6 +404,11 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.14.0 upgrade notes
+
+- **Capability adapter**: `capability_search` (find "who can do this" from a natural-language intent) and `capability_preflight` (visibility, argument-schema validation, approval/sandbox requirements and side effects) read the host's live tool registry (including MCP actions) and skill catalog. No duplicate discovery and no embedding model; snapshots refresh every 60 s.
+- This is part 1 of Wave 3. The panel capability view, tenancy/enterprise packaging (needs a real dsh-ee instance and credentials) and the Wave 2 refs persistence/URL·spill·attachment refs remain future work.
+
 ## 0.13.0 upgrade notes
 
 - **Authorization fix**: `locator_find` no longer lets `sessionId`, `scope: "all"` or `pathPrefix` bypass the caller identity. An explicit session id is allowed only for the caller session or sessions whose immutable `cwd` equals the caller cwd (same rule as DSH's session-query tools); `pathPrefix` must resolve inside the configured roots; `scope: "all"` still searches every indexed file but keeps session bodies inside the caller's authorized set unless `allowCrossWorkspaceSessions: true` is configured.
