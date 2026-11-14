@@ -326,7 +326,6 @@ jobs:
       - name: Assert the published tarball points back at this SHA
         if: ${{ inputs.publish && env.SKIP_PUBLISH != '1' }}
         shell: bash
-        shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
           SHA: ${{ needs.preflight.outputs.sha }}
