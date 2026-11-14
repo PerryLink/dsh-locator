@@ -80,6 +80,11 @@ export interface ContentSearchOptions {
   /** Internal: archived session ids to drop from the query. */
   excludeArchivedSessions?: string[]
   /**
+   * Restrict session documents to these ids (caller + same-workspace sessions).
+   * An empty array means "file documents only". Absent means no restriction.
+   */
+  allowedSessionIds?: readonly string[]
+  /**
    * Keep file documents from every indexed root while session documents stay
    * scoped to `sessionPath`. Used by `locator_find` workspace scope when the
    * caller cwd is outside every indexed root: there is no workspace file
@@ -445,8 +450,9 @@ function buildPlan(terms: readonly string[], options: {
   excludeSessions: boolean
   fileHitsAllRoots: boolean
   archivedExcluded: readonly string[]
+  allowedSessions: readonly string[] | null
 }): QueryPlan | null {
-  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded } = options
+  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded, allowedSessions } = options
   if (terms.length === 0) return null
   const suffix: string[] = []
   const suffixParams: Array<string | number> = []
@@ -472,6 +478,15 @@ function buildPlan(terms: readonly string[], options: {
     suffixParams.push(escapeLike(pathPrefix) + '%')
   }
   if (excludeSessions) suffix.push(" AND kind = 'file'")
+  if (allowedSessions !== null) {
+    // Caller authorization for session documents; file documents are scoped by
+    // the roots/cwd filters instead. An empty allow-list keeps only files.
+    if (allowedSessions.length === 0) suffix.push(" AND kind = 'file'")
+    else {
+      suffix.push(` AND (kind = 'file' OR session_id IN (${allowedSessions.map(() => '?').join(', ')}))`)
+      suffixParams.push(...allowedSessions)
+    }
+  }
   if (archivedExcluded.length > 0) {
     // Archived session logs are indexed but hidden by default; file documents
     // have no session id and must stay visible.
@@ -742,6 +757,7 @@ export function searchContent(
     excludeSessions: options.excludeSessions === true,
     fileHitsAllRoots: options.fileHitsAllRoots === true,
     archivedExcluded: options.excludeArchivedSessions ?? [],
+    allowedSessions: options.allowedSessionIds === undefined ? null : options.allowedSessionIds,
   })
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 

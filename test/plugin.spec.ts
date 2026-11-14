@@ -34,7 +34,7 @@ afterAll(async () => {
 })
 
 describe.skipIf(!existsSync(binary))('plugin mount', () => {
-  it('registers the three tools and runs a search end to end', async () => {
+  it('registers the tools and runs a search end to end', async () => {
     const root = mkdtempSync(join(tmpdir(), 'locator-plugin-'))
     const state = mkdtempSync(join(tmpdir(), 'locator-plugin-state-'))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
@@ -72,6 +72,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       contentFullIndex: false,
       contentIndexReasoning: false,
       contentIndexToolResults: false,
+      allowCrossWorkspaceSessions: false,
     contentMaxSessions: 0,
     contentSessionDirs: [],
     contentExcludes: [],
@@ -90,7 +91,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       for (const dispose of disposers.reverse()) dispose()
     })
 
-    expect(tools.map(tool => tool.name).sort()).toEqual(['locator_export', 'locator_rebuild', 'locator_search', 'locator_status'])
+    expect(tools.map(tool => tool.name).sort()).toEqual(['locator_cite', 'locator_export', 'locator_rebuild', 'locator_resolve', 'locator_search', 'locator_status'])
     const statusTool = tools.find(tool => tool.name === 'locator_status')
     await waitForIndex(statusTool)
     const search = tools.find(tool => tool.name === 'locator_search')
@@ -135,6 +136,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       contentFullIndex: false,
       contentIndexReasoning: false,
       contentIndexToolResults: false,
+      allowCrossWorkspaceSessions: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],
@@ -225,6 +227,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       contentFullIndex: false,
       contentIndexReasoning: false,
       contentIndexToolResults: false,
+      allowCrossWorkspaceSessions: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],
@@ -315,6 +318,7 @@ describe('HTTP surface gating (no engine required)', () => {
       contentFullIndex: false,
       contentIndexReasoning: false,
       contentIndexToolResults: false,
+      allowCrossWorkspaceSessions: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],

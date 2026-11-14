@@ -248,6 +248,7 @@ Web GUI में कहीं भी `Ctrl+Shift+F` दबाएँ, या स
 | `contentRefreshMs` | `300000` | कंटेंट इंक्रीमेंटल रिफ़्रेश अंतराल; `0` बंद। |
 | `contentIncludeArchived` | `false` | सामान्य खोजों में आर्काइव सेशन शामिल करें (वे हर हाल में इंडेक्स होते हैं; पैनल प्रति क्वेरी शामिल कर सकता है)। |
 | `contentIndexToolResults` | `false` | `tool/result` टेक्स्ट को अलग session दस्तावेज़ों के रूप में इंडेक्स करें (बदलने पर केवल session rebuild)। |
+| `allowCrossWorkspaceSessions` | `false` | `scope:"all"` अन्य workspaces के session बॉडी पढ़ सके या नहीं (डिफ़ॉल्ट: कॉलर cwd से अधिकृत)। |
 | `contentActiveSessionDelayMs` | `120000` | सेशन लॉग इस अवधि तक शांत रहने पर इंडेक्स हो। |
 | `contentSessionDirs` | `[]` | अतिरिक्त सेशन डायरेक्टरी; खाली = `$DSH_HOME/sessions`। |
 | `contentExcludes` | डिपेंडेंसी/toolchain नाम | कंटेंट इंडेक्स में छोड़े जाने वाले पाथ हिस्से/सबस्ट्रिंग; नाम इंडेक्स उन्हें कवर करता है। |
@@ -402,6 +403,13 @@ DeepSeek Harness
 ## मेमोरी
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
+
+## 0.13.0 अपग्रेड नोट्स
+
+- **अधिकार सुधार**: `locator_find` अब `sessionId`, `scope:"all"` या `pathPrefix` को कॉलर की पहचान बायपास करने नहीं देता। स्पष्ट session id केवल कॉलर सत्र या जिनका अपरिवर्तनीय `cwd` कॉलर के बराबर है (DSH session-query नियम) के लिए मान्य है; `pathPrefix` कॉन्फ़िगर किए roots के अंदर होना चाहिए; `scope:"all"` सभी फ़ाइलें खोजता है पर सत्र पंक्तियाँ कॉलर के अधिकृत सेट तक सीमित रहती हैं जब तक `allowCrossWorkspaceSessions: true` न हो।
+- **नाम खोज में workspace स्कोप**: `locator_search` अब कॉलर cwd (जब वह किसी indexed root के अंदर हो) पर डिफ़ॉल्ट है; `scope:"all"` सभी roots खोजता है; cwd बाहर होने पर indexed roots पर फ़ॉलबैक और `scopeFallback` संकेत।
+- **उद्धरण योग्य refs**: हर hit में अब `ref` (`dsh-session:` URI सत्र संदेशों के लिए, `ref://file?...&sha256=` फ़ाइलों के लिए), `provenance`, `freshness`, `permissions` हैं; नए `locator_resolve` (मेटाडेटा + सीमित अधिकृत अंश) और `locator_cite` (markdown/mention/json)।
+- सत्र cwd इंडेक्स में दर्ज होता है (`sources.cwd`, additive माइग्रेशन; अपग्रेड के बाद पहला रिफ्रेश केवल session दस्तावेज़ rebuild करता है)।
 
 ## 0.12.1 अपग्रेड नोट्स
 

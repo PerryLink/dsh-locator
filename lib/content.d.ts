@@ -129,6 +129,10 @@ export declare class ContentIndex {
     private readonly sessionPaths;
     /** Archived session ids, excluded from queries unless asked for. */
     private archivedSessions;
+    /** Session id → the session header's cwd, for caller/workspace authorization. */
+    private readonly sessionCwds;
+    /** A legacy database gained `sources.cwd`; rebuild session docs to fill it. */
+    private needsSessionBackfill;
     private readonly pending;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
@@ -267,6 +271,25 @@ export declare class ContentIndex {
      * needs no rebuild.
      */
     private sessionCandidates;
+    /** Add the additive `sources.cwd` column without bumping the schema version. */
+    private ensureSourcesCwdColumn;
+    /** The session header's cwd for one indexed session, when known. */
+    sessionCwd(sessionId: string): string | undefined;
+    /**
+     * Session ids the caller may read: its own session plus sessions whose
+     * header cwd equals the caller cwd (the same rule as DSH's
+     * `tool-session-query` workspace authorization).
+     * @param callerCwd - caller session cwd (immutable header value).
+     * @param callerSessionId - caller session id.
+     * @returns allowed session ids; empty when the caller has no identity.
+     */
+    authorizedSessionIds(callerCwd: string | undefined, callerSessionId: string | undefined): Set<string>;
+    /** The mtime the index stored for one document (file or session message). */
+    indexedMtime(kind: 'file' | 'session', path: string, messageId?: string): number | undefined;
+    /** The stored (≤8KB) body for one indexed session message. */
+    sessionBody(sessionId: string, messageId: string): string | undefined;
+    /** The mtime recorded for one session log in `sources`. */
+    sessionIndexedMtime(sessionId: string): number | undefined;
     sessionRoots(): string[];
     /**
      * Search file bodies and session messages. With `searchWorker` enabled the

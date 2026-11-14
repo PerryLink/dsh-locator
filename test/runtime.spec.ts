@@ -25,6 +25,7 @@ function config(overrides: Partial<Config> = {}): Config {
     contentFullIndex: false,
     contentIndexReasoning: false,
       contentIndexToolResults: false,
+      allowCrossWorkspaceSessions: false,
     contentMaxSessions: 0,
     contentSessionDirs: [],
     contentExcludes: [],

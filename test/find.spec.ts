@@ -1,8 +1,22 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { CONTENT_STATE_SCHEMA, makeFindTool } from '../src/find.ts'
 import type { ContentIndex } from '../src/content.ts'
 import type { ContentSearchOptions } from '../src/content-search.ts'
+
+/** Fake content store with the authorization/ref helpers locator_find now uses. */
+function withAuth(fake: Record<string, unknown>): ContentIndex {
+  return {
+    authorizedSessionIds: () => new Set(['caller-session', 'session-1', 'other']),
+    indexedMtime: () => undefined,
+    sessionIndexedMtime: () => undefined,
+    sessionBody: () => undefined,
+    ...fake,
+  } as unknown as ContentIndex
+}
 
 const tool = makeFindTool({} as unknown as ContentIndex)
 
@@ -76,8 +90,12 @@ describe('locator_find advanced result', () => {
         return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: ['content-query-too-short'], error: 'content-query-too-short' }
       },
       status: () => ({ ...state }),
+      authorizedSessionIds: () => new Set(['caller-session', 'session-1', 'other']),
+      indexedMtime: () => undefined,
+      sessionIndexedMtime: () => undefined,
+      sessionBody: () => undefined,
     } as unknown as ContentIndex
-    const tool = makeFindTool(fake)
+    const tool = makeFindTool(fake, undefined, ['/tmp/workspace'])
     const result = await tool.execute({
       query: 'note',
       limit: 5,
@@ -88,7 +106,7 @@ describe('locator_find advanced result', () => {
       count: 'bounded',
       countLimit: 7,
       pathPrefix: '/tmp/workspace',
-    }, {} as never) as { ok: boolean; error?: string; warnings?: string[] }
+    }, { agent: { session: { id: 'caller-session', header: { cwd: '/tmp/workspace' } } } } as never) as { ok: boolean; error?: string; warnings?: string[] }
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({
       query: 'note',
@@ -123,6 +141,10 @@ describe('locator_find workspace scope', () => {
         return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] }
       },
       status: () => ({ ...state }),
+      authorizedSessionIds: () => new Set(['caller-session', 'session-1', 'other']),
+      indexedMtime: () => undefined,
+      sessionIndexedMtime: () => undefined,
+      sessionBody: () => undefined,
     } as unknown as ContentIndex
     const tool = makeFindTool(fake, undefined, ['/tmp/caller-workspace'])
     await tool.execute({ query: 'note' }, exec())
@@ -136,11 +158,18 @@ describe('locator_find workspace scope', () => {
         return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] }
       },
       status: () => ({ ...state }),
+      authorizedSessionIds: () => new Set(['caller-session', 'session-1', 'other']),
+      indexedMtime: () => undefined,
+      sessionIndexedMtime: () => undefined,
+      sessionBody: () => undefined,
     } as unknown as ContentIndex
-    const tool = makeFindTool(fake, undefined, ['/tmp/caller-workspace'])
+    const tool = makeFindTool(fake, undefined, ['/tmp'])
     await tool.execute({ query: 'note', scope: 'all' }, exec())
     expect(calls[0]!.sessionId).toBeUndefined()
     expect(calls[0]!.pathPrefix).toBeUndefined()
+    // `all` still limits session documents to the caller's authorized set.
+    expect(calls[0]!.allowedSessionIds).toEqual(['caller-session', 'session-1', 'other'])
+    // An explicit, authorized session id is honored (root-scoped path allowed).
     await tool.execute({ query: 'note', scope: 'all', sessionId: 'other', pathPrefix: '/tmp/other' }, exec())
     expect(calls[1]!).toMatchObject({ sessionId: 'other', pathPrefix: '/tmp/other' })
   })
@@ -153,12 +182,16 @@ describe('locator_find workspace scope', () => {
         return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] }
       },
       status: () => ({ ...state }),
+      authorizedSessionIds: () => new Set(['caller-session', 'session-1', 'other']),
+      indexedMtime: () => undefined,
+      sessionIndexedMtime: () => undefined,
+      sessionBody: () => undefined,
     } as unknown as ContentIndex
     const tool = makeFindTool(fake, undefined, ['/home/yy'])
     await tool.execute({ query: 'note' }, {
       agent: { session: { id: 'caller-session', header: { cwd: '/mnt/d/projects/elsewhere' } } },
     } as never)
-    expect(calls[0]).toMatchObject({ sessionId: 'caller-session' })
+    expect(calls[0]).toMatchObject({ sessionId: 'caller-session', fileHitsAllRoots: true })
     expect(calls[0]!.pathPrefix).toBeUndefined()
   })
 
@@ -171,6 +204,10 @@ describe('locator_find workspace scope', () => {
         return { hits: [], count: { value: 42, kind: 'exact' }, warnings: [] }
       },
       status: () => ({ ...state }),
+      authorizedSessionIds: () => new Set(['caller-session', 'session-1', 'other']),
+      indexedMtime: () => undefined,
+      sessionIndexedMtime: () => undefined,
+      sessionBody: () => undefined,
     } as unknown as ContentIndex
     const tool = makeFindTool(fake)
     const result = await tool.execute({ query: 'note', offset: 7, limit: 5 }, {} as never) as { offset?: number }
@@ -198,6 +235,68 @@ describe('locator_find workspace scope', () => {
       progress: { phase: 'files', scanned: 3, indexed: 1, total: 9, path: '/tmp/a.md', startedAt: 2 },
     }
     expect(validateJsonSchemaValue(schema, state)).toEqual([])
+  })
+
+
+  it('denies an explicit session id outside the caller workspace', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = withAuth({
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        return { hits: [], count: { value: 0, kind: 'unknown' as const }, warnings: [] }
+      },
+      status: () => ({ building: false, files: 0, sessions: 0, messages: 0, truncated: false, updatedAt: 0, error: '', warnings: [] }),
+      authorizedSessionIds: () => new Set(['caller-session']),
+    })
+    const tool = makeFindTool(fake, undefined, ['/tmp/workspace'])
+    const result = await tool.execute({ query: 'note', sessionId: 'other-project-session' }, exec()) as { ok: boolean; error?: string }
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe('content-scope-denied')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('denies a pathPrefix outside the indexed roots', async () => {
+    const fake = withAuth({
+      search: async () => ({ hits: [], count: { value: 0, kind: 'unknown' as const }, warnings: [] }),
+      status: () => ({ building: false, files: 0, sessions: 0, messages: 0, truncated: false, updatedAt: 0, error: '', warnings: [] }),
+    })
+    const tool = makeFindTool(fake, undefined, ['/tmp/workspace'])
+    const result = await tool.execute({ query: 'note', pathPrefix: '/etc' }, exec()) as { ok: boolean; error?: string }
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe('content-path-denied')
+  })
+
+  it('attaches refs, provenance, freshness and permissions to hits', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-ref-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'ref evidence body')
+    try {
+      const fake = withAuth({
+        search: async () => ({
+          hits: [
+            { kind: 'file' as const, path: file, title: 'notes.md', snippet: 'ref evidence', line: 1, score: 1 },
+            { kind: 'session' as const, path: '/home/u/.dsh/sessions/--w--/session-1/session.v4.jsonl.zstd', title: 'chat', snippet: 'ref evidence', sessionId: 'session-1', messageId: 'msg-1', score: 1 },
+          ],
+          count: { value: 2, kind: 'exact' as const },
+          warnings: [],
+        }),
+        status: () => ({ building: false, files: 1, sessions: 1, messages: 1, truncated: false, updatedAt: 1, error: '', warnings: [] }),
+      })
+      const tool = makeFindTool(fake, undefined, ['/tmp/workspace'])
+      const result = await tool.execute({ query: 'ref evidence' }, {
+        agent: { session: { id: 'caller-session', header: { cwd: '/tmp/workspace' } } },
+      } as never) as { ok: boolean; hits?: Array<{ ref?: string; freshness?: { state?: string }; permissions?: { visibility?: string }; hash?: string }> }
+      expect(result.ok).toBe(true)
+      const hits = result.hits ?? []
+      expect(hits[0]?.ref).toMatch(/^ref:\/\/file\?/)
+      expect(hits[0]?.hash).toMatch(/^[0-9a-f]{64}$/)
+      expect(hits[0]?.freshness?.state).toBe('fresh')
+      expect(hits[0]?.permissions?.visibility).toBe('workspace')
+      expect(hits[1]?.ref).toMatch(/^dsh-session:/)
+      expect(hits[1]?.permissions?.visibility).toBe('session')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
 })

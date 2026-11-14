@@ -69,6 +69,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
       contentFullIndex: false,
       contentIndexReasoning: false,
       contentIndexToolResults: false,
+      allowCrossWorkspaceSessions: false,
       contentMaxSessions: 0,
       contentSessionDirs: [],
       contentExcludes: [],

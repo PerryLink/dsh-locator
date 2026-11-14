@@ -6,8 +6,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentIndex } from './content.ts'
 import { CONTENT_STATE_SCHEMA } from './find.ts'
+import { fileRef } from './refs.ts'
 import type { LocatorRuntime, SearchHit } from './runtime.ts'
-import { resolveWithinRoots } from './reveal.ts'
+import { resolveWithinRoots, withinRoots } from './reveal.ts'
 
 const HIT_SCHEMA = {
   type: 'object',
@@ -20,6 +21,25 @@ const HIT_SCHEMA = {
     modified: { type: 'string', description: 'ISO-8601 modification time.' },
     ext: { type: 'string' },
     dir: { type: 'boolean' },
+    ref: { type: 'string', description: 'Citable ref://file reference (files only).' },
+    freshness: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        state: { type: 'string', enum: ['fresh', 'stale', 'missing', 'unknown'] },
+        observedAt: { type: 'integer' },
+        mtime: { type: 'integer' },
+      },
+    },
+    permissions: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        read: { type: 'string', enum: ['allowed', 'denied'] },
+        visibility: { type: 'string', enum: ['workspace', 'roots', 'session', 'external'] },
+        reason: { type: 'string' },
+      },
+    },
   },
 } as const
 
@@ -36,6 +56,8 @@ const SEARCH_OUTPUT = {
     indexing: { type: 'boolean' },
     tookMs: { type: 'number' },
     hits: { type: 'array', items: HIT_SCHEMA },
+    scope: { type: 'string', enum: ['workspace', 'all'] },
+    scopeFallback: { type: 'string' },
     error: { type: 'string' },
   },
 } as const
@@ -181,6 +203,11 @@ export function makeSearchTool(rt: LocatorRuntime) {
       wholeWord: { type: 'boolean', description: 'Require word boundaries around each bare term.' },
       filesOnly: { type: 'boolean', description: 'Return files only.' },
       dirsOnly: { type: 'boolean', description: 'Return directories only.' },
+      scope: {
+        type: 'string',
+        enum: ['workspace', 'all'],
+        description: 'workspace (default) restricts hits to the caller cwd when that cwd is inside an indexed root; all searches every configured root.',
+      },
     },
     output: {
       schema: SEARCH_OUTPUT,
@@ -193,7 +220,9 @@ export function makeSearchTool(rt: LocatorRuntime) {
           truncated?: boolean
           indexing?: boolean
           tookMs?: number
-          hits?: SearchHit[]
+          hits?: Array<SearchHit & { ref?: string; freshness?: { state?: string } }>
+          scope?: string
+          scopeFallback?: string
           error?: string
         }
         if (!v.ok) return [{ type: 'text', text: `locator_search failed: ${v.error ?? 'unknown error'}` }]
@@ -202,12 +231,14 @@ export function makeSearchTool(rt: LocatorRuntime) {
           `locator_search ${JSON.stringify(v.query ?? '')}: ${String(v.total ?? 0)} match(es)` +
             `${v.truncated === true ? `, showing ${String(v.returned ?? 0)}` : ''}` +
             ` in ${(v.tookMs ?? 0).toFixed(1)} ms` +
-            (v.indexing === true ? ' (initial scan still running; results are partial)' : ''),
+            (v.indexing === true ? ' (initial scan still running; results are partial)' : '') +
+            (v.scope === undefined ? '' : ` (scope: ${v.scope}${v.scopeFallback === undefined ? '' : `; ${v.scopeFallback}`})`),
         ]
         for (const hit of hits) {
           const suffix = hit.dir ? '/' : ''
           const size = hit.dir ? '' : `  ${formatSize(hit.size)}`
           lines.push(`${hit.path}${suffix}${size}`)
+          if (hit.ref !== undefined) lines.push(`   ref ${hit.ref}`)
         }
         if (v.truncated === true && (v.total ?? 0) > (v.returned ?? 0)) {
           lines.push(`(${String((v.total ?? 0) - (v.returned ?? 0))} more not shown; raise limit/offset or narrow the query)`)
@@ -236,13 +267,20 @@ export function makeSearchTool(rt: LocatorRuntime) {
         total: meta.total,
       }
     },
-    async execute(args) {
+    async execute(args, exec) {
       const limit = clamp(args.limit ?? 50, 1, rt.config.maxResults)
+      const scope = args.scope === 'all' ? 'all' : 'workspace'
+      const callerCwd = exec?.agent?.session?.header?.cwd
+      const cwdIsIndexed = callerCwd !== undefined && rt.roots.some(root => withinRoots(callerCwd, [root]))
+      const narrowToCwd = scope === 'workspace' && cwdIsIndexed
+      // Ask for a wider page when the cwd filter will drop rows so the returned
+      // page stays full for the workspace scope.
+      const fetchLimit = narrowToCwd ? Math.min(rt.config.maxResults, limit * 5) : limit
       try {
         rt.start()
         const result = await rt.search({
           query: args.query,
-          limit,
+          limit: fetchLimit,
           offset: Math.max(0, args.offset ?? 0),
           sort: args.sort ?? 'name',
           desc: args.desc ?? false,
@@ -252,24 +290,35 @@ export function makeSearchTool(rt: LocatorRuntime) {
           filesOnly: args.filesOnly ?? false,
           dirsOnly: args.dirsOnly ?? false,
         })
+        const observedAt = Date.now()
+        const visibility = cwdIsIndexed ? 'workspace' : 'roots'
+        const mapped = result.hits.map(hit => ({
+          path: hit.path,
+          name: hit.name,
+          size: hit.size,
+          mtime: hit.mtime,
+          modified: new Date(hit.mtime).toISOString(),
+          ext: hit.ext,
+          dir: hit.dir,
+          ...(hit.dir ? {} : { ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }),
+          freshness: { state: 'unknown' as const, observedAt, mtime: hit.mtime },
+          permissions: { read: 'allowed' as const, visibility: visibility as 'workspace' | 'roots', reason: 'name hits come from the configured index roots' },
+        }))
+        const kept = narrowToCwd
+          ? mapped.filter(hit => withinRoots(hit.path, [callerCwd as string])).slice(0, limit)
+          : mapped
         return {
           ok: true as const,
           query: args.query,
           total: result.total,
-          returned: result.returned,
+          returned: kept.length,
           offset: result.offset,
-          truncated: result.truncated,
+          truncated: result.truncated || kept.length < mapped.length,
           indexing: result.indexing === true,
           tookMs: result.tookNs / 1e6,
-          hits: result.hits.map(hit => ({
-            path: hit.path,
-            name: hit.name,
-            size: hit.size,
-            mtime: hit.mtime,
-            modified: new Date(hit.mtime).toISOString(),
-            ext: hit.ext,
-            dir: hit.dir,
-          })),
+          hits: kept,
+          scope: scope as 'workspace' | 'all',
+          ...(scope === 'workspace' && !cwdIsIndexed ? { scopeFallback: 'cwd-not-indexed; searched every configured root' } : {}),
         }
       } catch (error) {
         return { ok: false as const, query: args.query, error: messageOf(error) }

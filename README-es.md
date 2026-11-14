@@ -247,6 +247,7 @@ Cada campo es un campo de configuración de Schemastery; sobrescribe la entrada 
 | `contentRefreshMs` | `300000` | Cadencia de actualización incremental del contenido; `0` la desactiva. |
 | `contentIncludeArchived` | `false` | Incluir sesiones archivadas en las búsquedas normales (se indexan igualmente; el panel puede incluirlas por consulta). |
 | `contentIndexToolResults` | `false` | Indexar el texto de `tool/result` como documentos de sesión propios (cambiarlo solo reconstruye sesiones). |
+| `allowCrossWorkspaceSessions` | `false` | Si `scope: "all"` puede leer sesiones de otros workspaces (por defecto se autoriza por cwd del llamador). |
 | `contentActiveSessionDelayMs` | `120000` | Indexar un log de sesión solo tras este tiempo de calma. |
 | `contentSessionDirs` | `[]` | Directorios de sesión adicionales; vacío = `$DSH_HOME/sessions`. |
 | `contentExcludes` | nombres de dependencias/toolchains | Segmentos o subcadenas de ruta que omite el índice de contenido; el de nombres sí los cubre. |
@@ -401,6 +402,13 @@ DeepSeek Harness
 ## Memoria
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
+
+## Notas de actualización 0.13.0
+
+- **Corrección de autorización**: `locator_find` ya no permite que `sessionId`, `scope:"all"` o `pathPrefix` eludan la identidad del llamador. Un id de sesión explícito solo se acepta para la sesión del llamador o sesiones cuyo `cwd` inmutable coincide (misma regla que las herramientas session-query de DSH); `pathPrefix` debe resolver dentro de los roots configurados; `scope:"all"` sigue buscando todos los archivos pero limita las sesiones al conjunto autorizado salvo `allowCrossWorkspaceSessions: true`.
+- **Ámbito workspace en búsqueda por nombre**: `locator_search` usa por defecto el cwd del llamador cuando está dentro de un root indexado (`scope:"all"` busca todos los roots; un cwd fuera de los roots vuelve a los roots indexados e informa `scopeFallback`).
+- **Refs de evidencia citables**: cada acierto incluye `ref` (URI `dsh-session:` para mensajes, `ref://file?...&sha256=` para archivos), `provenance`, `freshness` y `permissions`; nuevas `locator_resolve` (metadatos + extracto acotado autorizado) y `locator_cite` (markdown/mention/json).
+- El cwd de la sesión se guarda en el índice (`sources.cwd`, migración aditiva; la primera actualización tras el upgrade reconstruye solo documentos de sesión).
 
 ## Notas de actualización 0.12.1
 

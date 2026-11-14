@@ -73,6 +73,11 @@ export interface ContentSearchOptions {
     /** Internal: archived session ids to drop from the query. */
     excludeArchivedSessions?: string[];
     /**
+     * Restrict session documents to these ids (caller + same-workspace sessions).
+     * An empty array means "file documents only". Absent means no restriction.
+     */
+    allowedSessionIds?: readonly string[];
+    /**
      * Keep file documents from every indexed root while session documents stay
      * scoped to `sessionPath`. Used by `locator_find` workspace scope when the
      * caller cwd is outside every indexed root: there is no workspace file

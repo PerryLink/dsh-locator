@@ -77,5 +77,5 @@ export declare const CONTENT_STATE_SCHEMA: {
     };
 };
 /** Build the locator_find tool. */
-export declare function makeFindTool(content: ContentIndex, ensure?: () => void, roots?: readonly string[]): import("@deepseek-ai/dsh-tools").ToolDefinition;
+export declare function makeFindTool(content: ContentIndex, ensure?: () => void, roots?: readonly string[], allowCrossWorkspaceSessions?: boolean): import("@deepseek-ai/dsh-tools").ToolDefinition;
 //# sourceMappingURL=find.d.ts.map

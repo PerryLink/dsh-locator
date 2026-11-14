@@ -14,6 +14,7 @@ import { makeReindexTool } from './reindex.ts'
 import { registerHttp } from './http.ts'
 import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
+import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
 import { makeRebuildTool, makeSearchTool, makeStatusTool } from './tools.ts'
 
 export { ConfigSchema as Config }
@@ -165,8 +166,10 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(makeStatusTool(rt, content))
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
+  ctx.tools.register(makeResolveTool(rt, content))
+  ctx.tools.register(makeCiteTool())
   if (content !== undefined) {
-    ctx.tools.register(makeFindTool(content, ensureContent, roots))
+    ctx.tools.register(makeFindTool(content, ensureContent, roots, config.allowCrossWorkspaceSessions))
     ctx.tools.register(makeReindexTool(content, ensureContent))
   }
 

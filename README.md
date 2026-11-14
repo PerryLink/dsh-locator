@@ -243,6 +243,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentRefreshMs` | 300000 | 内容增量刷新周期；0 关闭自动刷新。 |
 | `contentIncludeArchived` | `false` | 是否在普通搜索中包含已归档会话（归档会话始终索引，面板可逐次勾选）。 |
 | `contentIndexToolResults` | `false` | 是否把 `tool/result` 文本作为独立会话文档入索引（切换只重建会话）。 |
+| `allowCrossWorkspaceSessions` | `false` | `scope:"all"` 是否可读其他 workspace 的会话正文（默认按调用方 cwd 授权）。 |
 | `contentActiveSessionDelayMs` | 120000 | 会话日志安静多久后才索引。 |
 | `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
 | `contentExcludes` | 依赖/工具链目录 | 内容索引跳过的路径片段/子串；名称索引不受影响。 |
@@ -364,6 +365,13 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - **全库内容正则 P0 不做**：正则模式会暂停内容组（文件/目录名仍可正则），避免 1GB 级全库扫描和 ReDoS；会话内查找条支持正则。
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
+
+## 0.13.0 更新
+
+- **授权修复**：`locator_find` 的 `sessionId`/`scope:"all"`/`pathPrefix` 不再绕过调用方身份——显式会话 id 只允许「当前会话」或「header.cwd 与调用方相同的会话」（与 DSH session-query 工具一致）；`pathPrefix` 必须落在已配置 root 内；`scope:"all"` 仍可搜全部文件，但会话正文默认限调用方授权集合（`allowCrossWorkspaceSessions: true` 可显式放开）。
+- **名称搜索默认 workspace**：`locator_search` 在 cwd 位于索引 root 内时默认只返回 cwd 下的命中（`scope:"all"` 搜全部 root；cwd 不在 root 内时退回索引 roots 并用 `scopeFallback` 说明）。
+- **可引用证据 ref**：`locator_search`/`locator_find` 的每条命中新增 `ref`（会话用 `dsh-session:` URI，文件用 `ref://file?...&sha256=`）、`provenance`、`freshness`、`permissions`；新增 `locator_resolve`（元数据+有界摘录，带授权）与 `locator_cite`（markdown/mention/json 引用），结果从"路径"升级为"可引用证据"。
+- 内容索引记录会话 `cwd`（`sources.cwd`，additive 迁移；升级后首次刷新只重建会话文档，不动 6.6GB 文件索引）。
 
 ## 0.12.1 更新
 

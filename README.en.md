@@ -248,6 +248,7 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentRefreshMs` | `300000` | Incremental content refresh cadence; `0` disables it. |
 | `contentIncludeArchived` | `false` | Include archived sessions in ordinary searches (archived logs are indexed either way; the panel can include them per query). |
 | `contentIndexToolResults` | `false` | Index `tool/result` text as its own session documents (toggling rebuilds session documents only). |
+| `allowCrossWorkspaceSessions` | `false` | Whether `scope: "all"` may read session bodies from other workspaces (default: authorize by caller cwd). |
 | `contentActiveSessionDelayMs` | `120000` | Only index a session log after it has been quiet this long. |
 | `contentSessionDirs` | `[]` | Extra session directories; empty means `$DSH_HOME/sessions`. |
 | `contentExcludes` | dependency/toolchain names | Path segments or substrings the content index skips; the name index still covers them. |
@@ -402,6 +403,13 @@ DeepSeek Harness
 ## Memory
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
+
+## 0.13.0 upgrade notes
+
+- **Authorization fix**: `locator_find` no longer lets `sessionId`, `scope: "all"` or `pathPrefix` bypass the caller identity. An explicit session id is allowed only for the caller session or sessions whose immutable `cwd` equals the caller cwd (same rule as DSH's session-query tools); `pathPrefix` must resolve inside the configured roots; `scope: "all"` still searches every indexed file but keeps session bodies inside the caller's authorized set unless `allowCrossWorkspaceSessions: true` is configured.
+- **Workspace scope for name search**: `locator_search` defaults to the caller cwd when it is inside an indexed root (`scope: "all"` searches every root; a cwd outside the roots falls back to the indexed roots and reports `scopeFallback`).
+- **Citable evidence refs**: every hit now carries `ref` (`dsh-session:` URIs for session messages, `ref://file?...&sha256=` for files), `provenance`, `freshness` and `permissions`; new `locator_resolve` (metadata + bounded authorized excerpt) and `locator_cite` (markdown/mention/json) turn hits into citations instead of bare paths.
+- Session cwd is recorded in the content index (`sources.cwd`, additive migration; the first refresh after upgrading rebuilds session documents only, never the 6.6 GB file index).
 
 ## 0.12.1 upgrade notes
 

@@ -66,6 +66,13 @@ export interface Config {
      */
     contentIncludeArchived: boolean;
     /**
+     * Let `locator_find scope:"all"` read session bodies from other workspaces.
+     * Off by default: files stay searchable across roots, but session documents
+     * are limited to the caller session and sessions with the same immutable cwd
+     * (the DSH `tool-session-query` authorization rule).
+     */
+    allowCrossWorkspaceSessions: boolean;
+    /**
      * Session logs modified more recently than this are skipped until they have
      * been quiet that long, so the session being written now is not re-read on
      * every background refresh.

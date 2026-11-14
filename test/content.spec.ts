@@ -1356,4 +1356,35 @@ describe('content database self-healing', () => {
     expect(hits[0]?.title).toBe('shell')
   })
 
+
+  it('records session cwd and filters session documents by allowed ids', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-cwd-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-cwd-sessions-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const dir = join(sessions, '--work-a--', 'session-ws-a')
+    mkdirSync(dir, { recursive: true })
+    const lines = [
+      JSON.stringify({ type: 'session', version: 4, id: 'session-ws-a', createdAt: 1, cwd: '/work/a', isSeeded: false, delegationDepth: 0 }),
+      JSON.stringify({ type: 'user/message', data: { id: 'm-cwd', seq: 1, content: [{ type: 'text', text: 'CWD-MARKER body' }] } }),
+    ].join('\n')
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(lines)))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.sessionCwd('session-ws-a')).toBe('/work/a')
+    const sameWorkspace = content.authorizedSessionIds('/work/a', 'caller-session')
+    expect(sameWorkspace.has('session-ws-a')).toBe(true)
+    expect(sameWorkspace.has('caller-session')).toBe(true)
+    const otherWorkspace = content.authorizedSessionIds('/work/b', 'caller-session')
+    expect(otherWorkspace.has('session-ws-a')).toBe(false)
+    const allowed = await content.search('CWD-MARKER', 5, { allowedSessionIds: ['session-ws-a'] })
+    expect(allowed.hits.some(hit => hit.sessionId === 'session-ws-a')).toBe(true)
+    const denied = await content.search('CWD-MARKER', 5, { allowedSessionIds: ['some-other-session'] })
+    expect(denied.hits).toHaveLength(0)
+    const filesOnly = await content.search('CWD-MARKER', 5, { allowedSessionIds: [] })
+    expect(filesOnly.hits).toHaveLength(0)
+  })
+
 })

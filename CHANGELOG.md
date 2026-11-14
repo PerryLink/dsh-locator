@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.0 — 2026-11-14
+
+* **Authorization fix**: `locator_find` no longer lets `sessionId`, `scope: "all"` or `pathPrefix` bypass the caller's identity. An explicit session id is allowed only for the caller session or sessions whose immutable `cwd` equals the caller cwd (the same rule as DSH's session-query tools); `pathPrefix` must resolve inside the configured roots; `scope: "all"` still searches every indexed file but keeps session documents inside the caller's authorized set unless the new `allowCrossWorkspaceSessions: true` is configured.
+* **Workspace scope for name search**: `locator_search` now defaults to the caller cwd when that cwd is inside an indexed root (`scope: "all"` searches every configured root; a cwd outside the roots falls back to the indexed roots and says so in `scopeFallback`).
+* **Citable evidence refs**: every `locator_search`/`locator_find` hit now carries `ref` (`dsh-session:` URI for session messages, `ref://file?...&sha256=` for files) plus `provenance`, `freshness` (fresh/stale/missing/unknown) and `permissions`. New tools `locator_resolve` (metadata + bounded, authorized excerpt) and `locator_cite` (markdown/mention/json citations) make hits quotable instead of just paths.
+* Session cwd is recorded in the content index (`sources.cwd`, additive migration; first refresh re-reads session logs only, never the 6.6 GB file index) to drive the authorization rule.
+* `164 tests`; six engine binaries rebuilt at 0.13.0.
+
 ## 0.12.1 — 2026-11-14
 
 * Panel: **root filter** for multi-root installs (files, dirs and content hits narrow to the selected root; the route re-authorizes the requested prefix against the configured roots), **CSV/JSON export** of the currently loaded/filtered rows, **recent-query suggestions** in the `Ctrl+F` find bar, and an **archived-sessions** checkbox that includes archived logs for one query.

@@ -184,6 +184,10 @@ export class ContentIndex {
   private readonly sessionPaths = new Map<string, string>()
   /** Archived session ids, excluded from queries unless asked for. */
   private archivedSessions = new Set<string>()
+  /** Session id → the session header's cwd, for caller/workspace authorization. */
+  private readonly sessionCwds = new Map<string, string>()
+  /** A legacy database gained `sources.cwd`; rebuild session docs to fill it. */
+  private needsSessionBackfill = false
   private readonly pending = new Map<number, (result: ContentSearchResult) => void>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
@@ -243,6 +247,7 @@ export class ContentIndex {
     this.progress = null
     this.dbIdentity = null
     this.sessionPaths.clear()
+    this.sessionCwds.clear()
   }
 
   /** Build everything from scratch. */
@@ -335,6 +340,7 @@ export class ContentIndex {
     this.open(true)
     this.totalBytes = 0
     await this.indexSessions(generation)
+    this.needsSessionBackfill = false
     if (generation !== this.generation) return
     await this.indexFiles(generation)
     if (generation !== this.generation) return
@@ -346,6 +352,16 @@ export class ContentIndex {
       this.open(false)
       const stored = (this.db!.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version ?? 0
       if (Number(stored) !== SCHEMA_VERSION) return await this.full(generation)
+      if (this.needsSessionBackfill) {
+        // Upgrading an existing database added `sources.cwd`; session docs must
+        // be re-read once so the authorization rule has a cwd for every log.
+        this.needsSessionBackfill = false
+        this.clearSessions()
+        await this.indexSessions(generation)
+        if (generation !== this.generation) return
+        this.finish()
+        return
+      }
       // A database whose last build never finished (crash, update, forced
       // reload) has a stale byte counter; rebuild instead of trusting it.
       if (this.readFlag('complete') !== 1) return await this.full(generation)
@@ -438,6 +454,7 @@ export class ContentIndex {
     )`)
     this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT, node_key TEXT)')
     this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
+    if (this.ensureSourcesCwdColumn()) this.needsSessionBackfill = true
     this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_path ON docs_meta(path)')
     if (fresh) {
       this.db.exec('DROP TABLE IF EXISTS content_meta')
@@ -609,6 +626,7 @@ export class ContentIndex {
     this.stopWorker()
     this.totalBytes = 0
     this.sessionPaths.clear()
+    this.sessionCwds.clear()
     this.state.updatedAt = 0
     this.state.error = ''
     this.state.truncated = false
@@ -753,12 +771,13 @@ export class ContentIndex {
     this.sessionPaths.clear()
     if (this.db === null) return
     try {
-      const rows = this.db.prepare('SELECT path FROM sources').all() as Array<{ path?: string }>
+      const rows = this.db.prepare('SELECT path, cwd FROM sources').all() as Array<{ path?: string; cwd?: string | null }>
       for (const row of rows) {
         const path = row.path
         if (typeof path !== 'string' || path === '') continue
         const sessionId = basename(dirname(path))
         if (sessionId !== '') this.sessionPaths.set(sessionId, path)
+        if (sessionId !== '' && typeof row.cwd === 'string' && row.cwd !== '') this.sessionCwds.set(sessionId, row.cwd)
       }
     } catch {
       // A database from an older schema cannot answer session-scoped queries
@@ -943,8 +962,9 @@ export class ContentIndex {
         continue
       }
       this.deletePath(file.path)
-      if (!(await this.indexSessionText(file, read.text, generation))) return
-      this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+      const indexed = await this.indexSessionText(file, read.text, generation)
+      if (!indexed.ok) return
+      this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime, cwd) VALUES (?, ?, ?)').run(file.path, file.mtime, indexed.cwd)
       this.countIndexed()
       await this.breathe()
     }
@@ -973,8 +993,9 @@ export class ContentIndex {
         continue
       }
       this.deletePath(file.path)
-      if (!(await this.indexSessionText(file, read.text, generation))) return
-      this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+      const indexed = await this.indexSessionText(file, read.text, generation)
+      if (!indexed.ok) return
+      this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime, cwd) VALUES (?, ?, ?)').run(file.path, file.mtime, indexed.cwd)
       this.countIndexed()
       await this.breathe()
     }
@@ -999,27 +1020,39 @@ export class ContentIndex {
   }
 
   /** Index one already-decoded session log; the caller owns row replacement. */
-  private async indexSessionText(file: { path: string; mtime: number }, text: string, generation: number): Promise<boolean> {
-    if (generation !== this.generation) return false
+  private async indexSessionText(file: { path: string; mtime: number }, text: string, generation: number): Promise<{ ok: boolean; cwd: string | null }> {
+    if (generation !== this.generation) return { ok: false, cwd: null }
     const sessionId = basename(dirname(file.path))
     this.sessionPaths.set(sessionId, file.path)
     const callNames = new Map<string, string>()
+    let headerCwd: string | null = null
     let title = ''
     let parsed = 0
     for (const line of text.split('\n')) {
       if (!line) continue
       if ((++parsed & 0xff) === 0) {
         await this.breathe()
-        if (generation !== this.generation) return false
+        if (generation !== this.generation) return { ok: false, cwd: null }
       }
       let event: { type?: string; data?: Record<string, unknown> }
       try { event = JSON.parse(line) } catch { continue }
+      if (event.type === 'session') {
+        // The first physical line is the session header (not a data envelope):
+        // `{ type: 'session', id, cwd?, ... }`. It carries the immutable cwd that
+        // authorizes cross-session reads.
+        const header = event as { cwd?: unknown }
+        if (typeof header.cwd === 'string' && header.cwd !== '') {
+          headerCwd = header.cwd
+          this.sessionCwds.set(sessionId, header.cwd)
+        }
+        continue
+      }
       const extracted = messageText(event, this.options.includeReasoning === true)
       if (extracted !== undefined) {
         if (title === '') title = extracted.titleText.replace(/\s+/g, ' ').slice(0, 90)
         const body = extracted.text.slice(0, SESSION_BODY_BYTES)
         const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, nodeKey: extracted.nodeKey, mtime: file.mtime }
-        if (!this.addDoc(row)) return false
+        if (!this.addDoc(row)) return { ok: false, cwd: headerCwd }
         continue
       }
       if (this.options.includeToolResults === true) {
@@ -1049,10 +1082,10 @@ export class ContentIndex {
         const id = callId !== '' ? callId : `tool-seq-${String(data.seq ?? parsed)}`
         const toolName = callNames.get(callId) ?? 'tool result'
         const row: DocRow = { key: `session:${sessionId}:tool-${id}`, body, kind: 'session', path: file.path, title: toolName, sessionId, messageId: id, nodeKey: null, mtime: file.mtime }
-        if (!this.addDoc(row)) return false
+        if (!this.addDoc(row)) return { ok: false, cwd: headerCwd }
       }
     }
-    return true
+    return { ok: true, cwd: headerCwd }
   }
 
   /**
@@ -1072,6 +1105,81 @@ export class ContentIndex {
       out.push(file)
     }
     return out
+  }
+
+  /** Add the additive `sources.cwd` column without bumping the schema version. */
+  private ensureSourcesCwdColumn(): boolean {
+    if (this.db === null) return false
+    try {
+      const columns = this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name?: string }>
+      if (columns.some(column => column.name === 'cwd')) return false
+      this.db.exec('ALTER TABLE sources ADD COLUMN cwd TEXT')
+      return true
+    } catch {
+      // An older/foreign database keeps path-only behavior.
+      return false
+    }
+  }
+
+  /** The session header's cwd for one indexed session, when known. */
+  sessionCwd(sessionId: string): string | undefined {
+    return this.sessionCwds.get(sessionId)
+  }
+
+  /**
+   * Session ids the caller may read: its own session plus sessions whose
+   * header cwd equals the caller cwd (the same rule as DSH's
+   * `tool-session-query` workspace authorization).
+   * @param callerCwd - caller session cwd (immutable header value).
+   * @param callerSessionId - caller session id.
+   * @returns allowed session ids; empty when the caller has no identity.
+   */
+  authorizedSessionIds(callerCwd: string | undefined, callerSessionId: string | undefined): Set<string> {
+    const allowed = new Set<string>()
+    if (callerSessionId !== undefined && callerSessionId !== '') allowed.add(callerSessionId)
+    if (callerCwd === undefined || callerCwd === '') return allowed
+    for (const [sessionId, cwd] of this.sessionCwds) {
+      if (cwd === callerCwd) allowed.add(sessionId)
+    }
+    return allowed
+  }
+
+  /** The mtime the index stored for one document (file or session message). */
+  indexedMtime(kind: 'file' | 'session', path: string, messageId?: string): number | undefined {
+    if (this.db === null) return undefined
+    if (kind === 'session' && (messageId === undefined || messageId === '')) return undefined
+    const messageKey = messageId ?? ''
+    try {
+      const row = kind === 'file'
+        ? this.db.prepare('SELECT mtime FROM docs_meta WHERE kind = ? AND path = ? LIMIT 1').get(kind, path) as { mtime?: number } | undefined
+        : this.db.prepare(`SELECT m.mtime AS mtime FROM docs_meta m JOIN docs d ON d.rowid = m.rowid
+            WHERE m.kind = 'session' AND d.session_id = ? AND d.message_id = ? LIMIT 1`).get(basename(dirname(path)), messageKey) as { mtime?: number } | undefined
+      return row?.mtime === undefined ? undefined : Number(row.mtime)
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The stored (≤8KB) body for one indexed session message. */
+  sessionBody(sessionId: string, messageId: string): string | undefined {
+    if (this.db === null) return undefined
+    try {
+      const row = this.db.prepare('SELECT body FROM docs WHERE kind = ? AND session_id = ? AND message_id = ? LIMIT 1').get('session', sessionId, messageId) as { body?: string } | undefined
+      return typeof row?.body === 'string' ? row.body : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The mtime recorded for one session log in `sources`. */
+  sessionIndexedMtime(sessionId: string): number | undefined {
+    if (this.db === null) return undefined
+    try {
+      const row = this.db.prepare('SELECT mtime FROM sources WHERE path = ?').get(this.sessionPaths.get(sessionId) ?? '') as { mtime?: number } | undefined
+      return row?.mtime === undefined ? undefined : Number(row.mtime)
+    } catch {
+      return undefined
+    }
   }
 
   sessionRoots(): string[] {
