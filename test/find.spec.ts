@@ -161,4 +161,20 @@ describe('locator_find workspace scope', () => {
     expect(calls[0]!.pathPrefix).toBeUndefined()
   })
 
+
+  it('passes an offset through to the content search', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = {
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        return { hits: [], count: { value: 42, kind: 'exact' }, warnings: [] }
+      },
+      status: () => ({ ...state }),
+    } as unknown as ContentIndex
+    const tool = makeFindTool(fake)
+    const result = await tool.execute({ query: 'note', offset: 7, limit: 5 }, {} as never) as { offset?: number }
+    expect(calls[0]!.offset).toBe(7)
+    expect(result.offset).toBe(7)
+  })
+
 })

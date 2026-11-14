@@ -181,6 +181,10 @@ export declare class ContentIndex {
     private recoverExternal;
     /** Whether the engine is re-scanning, which can move its dump cursor. */
     private engineRescanning;
+    /** Remove all session documents, keeping file documents and their bytes. */
+    private clearSessions;
+    /** Whether the stored rows already respect the configured file/body caps. */
+    private capsSatisfied;
     private readFlag;
     private writeFlag;
     /**

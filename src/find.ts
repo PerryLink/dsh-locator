@@ -55,6 +55,7 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
     parameters: {
       query: { type: 'string', required: true, description: 'Words or a phrase to find in file/session content.' },
       limit: { type: 'integer', description: 'Maximum hits (default 30, at most 100).' },
+      offset: { type: 'integer', description: 'Skip this many ranked hits (pagination).' },
       matchMode: { type: 'string', enum: ['normal', 'extended'], description: 'normal: whitespace-separated substring terms. extended: one literal phrase with Notepad++ escapes (\\n, \\r, \\t, \\0, \\xNN, \\\\).' },
       caseSensitive: { type: 'boolean', description: 'Match letter case exactly.' },
       wholeWord: { type: 'boolean', description: 'Only match whole words ([A-Za-z0-9_] boundaries; CJK counts as non-word).' },
@@ -71,6 +72,7 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
         properties: {
           ok: { type: 'boolean', required: true },
           query: { type: 'string' },
+          offset: { type: 'integer' },
           hits: { type: 'array', items: HIT },
           count: {
             type: 'object',
@@ -90,6 +92,7 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
         const v = value as {
           ok: boolean
           hits?: Array<{ kind: string; title?: string; snippet?: string; path?: string; line?: number; sessionId?: string; messageId?: string }>
+          offset?: number
           count?: { value: number; kind: 'exact' | 'bounded' | 'unknown' }
           warnings?: string[]
           error?: string
@@ -126,6 +129,7 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
       const query = args.query.trim()
       if (query === '') return { ok: false as const, error: 'query is empty' }
       const limit = Math.max(1, Math.min(100, args.limit ?? 30))
+      const offset = Math.max(0, Math.trunc(args.offset ?? 0))
       const scope = args.scope === 'all' ? 'all' : 'workspace'
       const callerSessionId = scope === 'workspace' ? exec?.agent?.session?.id : undefined
       const callerCwd = scope === 'workspace' ? exec?.agent?.session?.header?.cwd : undefined
@@ -142,6 +146,7 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
           : callerSessionId === undefined ? {} : { sessionId: String(callerSessionId) }),
         ...(args.count === undefined ? {} : { count: args.count }),
         ...(args.countLimit === undefined ? {} : { countLimit: args.countLimit }),
+        ...(offset === 0 ? {} : { offset }),
         ...(args.pathPrefix !== undefined && args.pathPrefix !== ''
           ? { pathPrefix: args.pathPrefix }
           : !cwdIsIndexed ? {} : { pathPrefix: callerCwd }),
@@ -149,9 +154,9 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
       const result = await content.search(query, limit, options)
       const state = content.status()
       if (result.error !== undefined) {
-        return { ok: false as const, query, error: result.error, warnings: result.warnings, hits: [], state }
+        return { ok: false as const, query, offset, error: result.error, warnings: result.warnings, hits: [], state }
       }
-      return { ok: true as const, query, hits: result.hits, count: result.count, warnings: result.warnings, state }
+      return { ok: true as const, query, offset, hits: result.hits, count: result.count, warnings: result.warnings, state }
     },
   })
 }

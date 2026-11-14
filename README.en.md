@@ -404,6 +404,8 @@ The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOG
 
 ## 0.11.0 upgrade notes
 
+- Toggling `contentIndexReasoning` rebuilds sessions only (the file index is kept); shrinking content caps forces a rebuild so out-of-budget rows cannot stay searchable; `locator_find` accepts `offset`; the panel can copy all loaded/filtered paths.
+
 - Status/panel expose **full-index** and **reasoning-indexed**; client language prefers the host `<html lang>` (DSH locale) and falls back to the browser language.
 
 - Panel routes are registered even when the host `connection` service is still activating; each request re-checks it and answers 503 meanwhile. Hosts without connection can set `httpConnectionOptional: true` to fall back to host authentication + same-origin Fetch metadata (default false).

@@ -1120,4 +1120,62 @@ describe('content database self-healing', () => {
     expect((await withReasoning.search('FINAL-MARKER', 5)).length).toBeGreaterThan(0)
   })
 
+
+  it('rebuilds only sessions when reasoning indexing is toggled', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-reason-file-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-reason-file-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-reason-file-sessions-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const file = join(root, 'keep.txt')
+    writeFileSync(file, 'KEEP-MARKER stays searchable')
+    const dir = join(sessions, '--workspace--', 'session-reason-toggle')
+    mkdirSync(dir, { recursive: true })
+    const line = JSON.stringify({ type: 'assistant/message', data: { turn: 1, step: 1, message: { id: 'msg-toggle', content: [{ type: 'reasoning', text: 'TOGGLE-THINK-MARKER' }, { type: 'text', text: 'TOGGLE-FINAL-MARKER' }] } } })
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(line)))
+    const entries = [{ path: file, name: 'keep.txt', size: 30, mtime: Date.now(), ext: 'txt', dir: false }]
+    let dumps = 0
+    const runtime = { dump: async () => { dumps++; return { entries, next: 1, done: true } } } as unknown as LocatorRuntime
+    const make = (includeReasoning: boolean) => new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 10, maxSessions: 10, includeReasoning })
+    const first = make(false)
+    cleanups.push(() => first.close())
+    first.boot()
+    await settle(first)
+    expect((await first.search('KEEP-MARKER', 5)).length).toBe(1)
+    expect((await first.search('TOGGLE-THINK-MARKER', 5)).length).toBe(0)
+    const dumpsAfterFirst = dumps
+    first.close()
+    const second = make(true)
+    cleanups.push(() => second.close())
+    second.boot()
+    await settle(second)
+    expect((await second.search('TOGGLE-THINK-MARKER', 5)).length).toBe(1)
+    expect((await second.search('KEEP-MARKER', 5)).length).toBe(1)
+    expect(dumps).toBe(dumpsAfterFirst)
+  })
+
+  it('enforces a smaller maxFiles cap on an existing database', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-cap-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-cap-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries: Array<{ path: string; name: string; size: number; mtime: number; ext: string; dir: boolean }> = []
+    for (let i = 0; i < 3; i++) {
+      const path = join(root, `cap-${String(i)}.txt`)
+      writeFileSync(path, `CAP-MARKER ${i}`)
+      entries.push({ path, name: `cap-${String(i)}.txt`, size: 20, mtime: Date.now(), ext: 'txt', dir: false })
+    }
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const first = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 3, maxSessions: 0 })
+    cleanups.push(() => first.close())
+    first.boot()
+    await settle(first)
+    expect(first.status().files).toBe(3)
+    first.close()
+    const second = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 1, maxSessions: 0 })
+    cleanups.push(() => second.close())
+    second.boot()
+    await settle(second)
+    expect(second.status().files).toBe(1)
+    expect(second.status().truncated).toBe(true)
+  })
+
 })

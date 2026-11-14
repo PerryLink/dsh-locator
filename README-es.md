@@ -403,6 +403,8 @@ El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` 
 
 ## Notas de actualización 0.11.0
 
+- Cambiar `contentIndexReasoning` reconstruye solo las sesiones (el índice de archivos se conserva); reducir los caps fuerza reconstrucción; `locator_find` acepta `offset`; el panel copia todas las rutas cargadas/filtradas.
+
 - El estado/panel muestra **índice completo** y **razonamiento indexado**; el idioma prefiere `<html lang>` del host y usa el navegador como respaldo.
 
 - Las rutas del panel se registran aunque el servicio `connection` aún esté activando; cada petición lo revisa y responde 503. Sin connection, `httpConnectionOptional: true` usa la autenticación del host + mismo origen (por defecto false).

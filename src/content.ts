@@ -317,9 +317,19 @@ export class ContentIndex {
       // later off) rebuilds sessions so old rows cannot keep stale thinking.
       const storedReasoning = this.readFlag('reasoning')
       const wantReasoning = this.options.includeReasoning === true ? 1 : 0
-      if (storedReasoning !== undefined && storedReasoning !== wantReasoning) return await this.full(generation)
-      if (storedReasoning === undefined && wantReasoning === 1) return await this.full(generation)
+      // Changing reasoning participation only invalidates session rows. Keep
+      // the file index instead of dropping/rebuilding 185k files.
       this.totalBytes = this.readTotalBytes()
+      if ((storedReasoning ?? 0) !== wantReasoning) {
+        this.clearSessions()
+        await this.indexSessions(generation)
+        if (generation !== this.generation) return
+        this.finish()
+        return
+      }
+      // A smaller cap must be enforced against rows written under the previous
+      // larger budget; incremental refresh only adds, it never trims.
+      if (!this.capsSatisfied()) return await this.full(generation)
       await this.refreshFiles(generation)
       if (generation !== this.generation) return
       await this.refreshSessions(generation)
@@ -575,6 +585,31 @@ export class ContentIndex {
     return scanning !== undefined && scanning !== null
   }
 
+  /** Remove all session documents, keeping file documents and their bytes. */
+  private clearSessions(): void {
+    const row = this.db!.prepare(`SELECT COALESCE(SUM(length(d.body)), 0) AS n
+      FROM docs_meta m LEFT JOIN docs d ON d.rowid = m.rowid WHERE m.kind = 'session'`).get() as { n?: number } | undefined
+    this.db!.exec("DELETE FROM docs WHERE rowid IN (SELECT rowid FROM docs_meta WHERE kind = 'session')")
+    this.db!.exec("DELETE FROM docs_meta WHERE kind = 'session'")
+    this.db!.exec('DELETE FROM sources')
+    this.totalBytes = Math.max(0, this.totalBytes - Number(row?.n ?? 0))
+  }
+
+  /** Whether the stored rows already respect the configured file/body caps. */
+  private capsSatisfied(): boolean {
+    const maxTotal = this.options.maxTotalBytes ?? 0
+    if (maxTotal > 0 && this.totalBytes > maxTotal) return false
+    if (this.options.maxFiles > 0) {
+      const count = this.db!.prepare("SELECT COUNT(*) AS n FROM docs_meta WHERE kind = 'file'").get() as { n?: number } | undefined
+      if (Number(count?.n ?? 0) > this.options.maxFiles) return false
+    }
+    if (this.options.maxFileBytes > 0) {
+      const oversized = this.db!.prepare('SELECT 1 AS n FROM docs WHERE kind = ? AND length(body) > ? LIMIT 1').get('file', this.options.maxFileBytes) as { n?: number } | undefined
+      if (oversized !== undefined) return false
+    }
+    return true
+  }
+
   private readFlag(key: string): number | undefined {
     const row = this.db!.prepare('SELECT value FROM content_meta WHERE key = ?').get(key) as { value?: number } | undefined
     return row?.value === undefined ? undefined : Number(row.value)
@@ -718,7 +753,7 @@ export class ContentIndex {
         if (!this.addDoc(row)) return
         await this.breathe()
       }
-      if (capped) break
+      if (capped) { this.state.truncated = true; break }
       after = page.next
       if (page.done || page.entries.length === 0) break
     }
@@ -769,7 +804,7 @@ export class ContentIndex {
         indexed++
         await this.breathe()
       }
-      if (capped) break
+      if (capped) { this.state.truncated = true; break }
       after = page.next
       if (page.done || page.entries.length === 0) break
     }

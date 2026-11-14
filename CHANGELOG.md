@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.4 — 2026-11-14
+
+* Toggling `contentIndexReasoning` now rebuilds **only session documents**, keeping the 185k-file index intact instead of re-reading every file.
+* Enforce smaller content caps against an existing database: if `contentMaxTotalBytes`, `contentMaxFiles` or `contentMaxFileBytes` shrink, the next boot rebuilds instead of leaving out-of-budget rows searchable. Hitting `contentMaxFiles` now sets `truncated`.
+* `locator_find` accepts `offset` and returns it, so agents can page through content hits; content search already supported the underlying offset.
+* Panel adds **Copy paths** for all currently loaded/filtered rows, in addition to Load more.
+* 133 tests; six engine binaries rebuilt at 0.11.4.
+
 ## 0.11.3 — 2026-11-14
 
 * Expose content capabilities in status: `fullIndex` (both caps explicitly 0) and `reasoningIndex` (assistant reasoning blocks included). `locator_status` and the panel status line show `full-index` / `reasoning-indexed` so users can tell which mode is active.

@@ -236,6 +236,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
 contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget reached; some files are not indexed', contentTooShort: 'Content needs at least 3 characters (use Ctrl+F for shorter searches)', contentTimeout: 'Content search timed out; narrow the query or scope', contentBadChars: 'Content search does not support NUL/control characters',
         panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
         watchDegraded: 'watcher degraded; periodic refresh active',
+        copyAll: 'Copy paths', copiedAll: 'Copied {n} paths',
         contentFullIndex: 'full-index', contentReasoningIndex: 'reasoning-indexed',
         panelFilter: 'Filter loaded results…', filterEmpty: 'No loaded result matches this filter', panelLoadMore: 'Load more', panelHistory: 'Recent searches', panelHistoryClear: 'Clear',
       },
@@ -284,6 +285,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
 contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预算上限，部分文件未被收录', contentTooShort: '内容搜索至少需要 3 个字符（更短的词请用 Ctrl+F 在会话内查找）', contentTimeout: '内容搜索超时，请缩小关键词或范围', contentBadChars: '内容搜索不支持 NUL/控制字符',
         panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
         watchDegraded: '文件监听降级，正在周期刷新',
+        copyAll: '复制路径', copiedAll: '已复制 {n} 条路径',
         contentFullIndex: '全量内容', contentReasoningIndex: '含思考内容',
         panelFilter: '过滤当前结果…', filterEmpty: '已加载结果中没有符合过滤条件的内容', panelLoadMore: '加载更多', panelHistory: '最近搜索', panelHistoryClear: '清空',
       },
@@ -332,6 +334,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
 contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el presupuesto del índice; algunos archivos no están indexados', contentTooShort: 'El contenido requiere al menos 3 caracteres (usa Ctrl+F para búsquedas más cortas)', contentTimeout: 'La búsqueda de contenido agotó el tiempo; reduce la consulta o el ámbito', contentBadChars: 'La búsqueda de contenido no admite NUL/caracteres de control',
         panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
         watchDegraded: 'vigilante degradado; refresco periódico activo',
+        copyAll: 'Copiar rutas', copiedAll: 'Se copiaron {n} rutas',
         contentFullIndex: 'índice completo', contentReasoningIndex: 'razonamiento indexado',
         panelFilter: 'Filtrar resultados cargados…', filterEmpty: 'Ningún resultado cargado coincide con el filtro', panelLoadMore: 'Cargar más', panelHistory: 'Búsquedas recientes', panelHistoryClear: 'Borrar',
       },
@@ -380,6 +383,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
 contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índice foi atingido; alguns arquivos não estão indexados', contentTooShort: 'O conteúdo exige pelo menos 3 caracteres (use Ctrl+F para buscas menores)', contentTimeout: 'A busca de conteúdo excedeu o tempo; reduza a consulta ou o escopo', contentBadChars: 'A busca de conteúdo não suporta NUL/caracteres de controle',
         panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
         watchDegraded: 'watcher degradado; atualização periódica ativa',
+        copyAll: 'Copiar caminhos', copiedAll: '{n} caminhos copiados',
         contentFullIndex: 'índice completo', contentReasoningIndex: 'raciocínio indexado',
         panelFilter: 'Filtrar resultados carregados…', filterEmpty: 'Nenhum resultado carregado corresponde ao filtro', panelLoadMore: 'Carregar mais', panelHistory: 'Buscas recentes', panelHistoryClear: 'Limpar',
       },
@@ -428,6 +432,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
 contentWarning: 'इंडेक्स चेतावनी: {list}', contentBudget: 'सामग्री इंडेक्स बजट पूरा; कुछ फ़ाइलें इंडेक्स नहीं हैं', contentTooShort: 'सामग्री के लिए कम से कम 3 अक्षर चाहिए (छोटी खोज के लिए Ctrl+F)', contentTimeout: 'सामग्री खोज का समय समाप्त; क्वेरी या क्षेत्र घटाएँ', contentBadChars: 'सामग्री खोज NUL/नियंत्रण अक्षर नहीं लेती',
         panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
         watchDegraded: 'वॉचर क्षीण; आवधिक रिफ्रेश सक्रिय',
+        copyAll: 'पथ कॉपी करें', copiedAll: '{n} पथ कॉपी हुए',
         contentFullIndex: 'पूर्ण इंडेक्स', contentReasoningIndex: 'reasoning इंडेक्स',
         panelFilter: 'लोड किए गए परिणाम छाँटें…', filterEmpty: 'लोड किए गए परिणामों में फ़िल्टर से मेल नहीं', panelLoadMore: 'और लोड करें', panelHistory: 'हाल की खोजें', panelHistoryClear: 'साफ़ करें',
       },
@@ -1983,6 +1988,12 @@ self.onmessage = event => {
         copyText(hit.path).then(() => notify(t('copiedPath'))).catch(() => {})
       }, [notify])
 
+      const copyAll = useCallback(() => {
+        const paths = rows.map(entry => entry.hit.path).filter(path => typeof path === 'string' && path !== '')
+        if (paths.length === 0) return
+        copyText(paths.join('\n')).then(() => notify(t('copiedAll', { n: paths.length }))).catch(() => {})
+      }, [notify, rows])
+
       const reveal = useCallback(hit => {
         if (!hit || loading) return
         post('/dsh-locator/reveal', { path: hit.path }).then(() => notify(t('revealed'))).catch(() => copy(hit))
@@ -2441,6 +2452,9 @@ self.onmessage = event => {
             + (status && status.scanning ? ' · ' + t('indexing') : '')
             + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
+          rows.length > 0
+            ? h('button', { className: 'dsh-locator-dirbtn', onClick: copyAll, title: t('copyAll') }, t('copyAll'))
+            : null,
           canLoadMore
             ? h('button', { className: 'dsh-locator-dirbtn', disabled: loadingMore, onClick: loadMore }, loadingMore ? t('loading') : t('panelLoadMore'))
             : null,

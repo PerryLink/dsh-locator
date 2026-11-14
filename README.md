@@ -366,6 +366,8 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 
 ## 0.11.0 升级注意
 
+- 切换 `contentIndexReasoning` 只重建会话，不再全量重建 185k 文件；调小内容 cap 会在下次启动重建，避免旧数据继续越预算可搜；`locator_find` 支持 `offset`；面板可一键复制当前已加载/过滤结果的路径。
+
 - 状态/面板会显示 **全量内容** 与 **含思考内容**；客户端语言优先跟随宿主 `<html lang>`（DSH locale），没有时退回浏览器语言。
 
 - 宿主 `connection` 服务在插件启动时尚未就绪也不会永久丢路由：先注册、每个请求再检查并 503；确实没有 connection 的 host 可设 `httpConnectionOptional: true`，退回宿主鉴权 + 同源 Fetch 检查（默认 false）。

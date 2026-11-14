@@ -404,6 +404,8 @@ DeepSeek Harness
 
 ## 0.11.0 अपग्रेड नोट्स
 
+- `contentIndexReasoning` बदलने पर केवल sessions rebuild होते हैं (फ़ाइल इंडेक्स रहता है); caps छोटा करने पर rebuild होता है; `locator_find` में `offset`; पैनल सभी loaded/filtered paths कॉपी कर सकता है।
+
 - status/पैनल **full-index** और **reasoning-indexed** दिखाते हैं; भाषा host `<html lang>` को प्राथमिकता देती है, अन्यथा browser language।
 
 - पैनल रूट तब भी पंजीकृत होते हैं जब host `connection` सेवा सक्रिय हो रही हो; हर अनुरोध जाँचता है और 503 देता है। connection न होने पर `httpConnectionOptional: true` host auth + same-origin पर निर्भर करता है (डिफ़ॉल्ट false)।
