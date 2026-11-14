@@ -70,6 +70,8 @@ export interface ContentState {
     fullIndex?: boolean;
     /** Assistant reasoning/thinking blocks are included in session docs. */
     reasoningIndex?: boolean;
+    /** Tool-result text is indexed as its own session documents. */
+    toolResultsIndex?: boolean;
 }
 export interface ContentOptions {
     stateDir: string;
@@ -89,6 +91,8 @@ export interface ContentOptions {
     maxSessions: number;
     /** Index assistant reasoning blocks as part of the message body. */
     includeReasoning?: boolean;
+    /** Index `tool/result` text as its own session document (opt-in). */
+    includeToolResults?: boolean;
     /**
      * Run content queries in a worker thread so a slow search never blocks the
      * DSH host event loop. Off by default so direct embedders and tests stay
@@ -123,6 +127,8 @@ export declare class ContentIndex {
     private dbIdentity;
     /** Session id → indexed session log path, for session-scoped content search. */
     private readonly sessionPaths;
+    /** Archived session ids, excluded from queries unless asked for. */
+    private archivedSessions;
     private readonly pending;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
@@ -254,7 +260,12 @@ export declare class ContentIndex {
     private readSessionText;
     /** Index one already-decoded session log; the caller owns row replacement. */
     private indexSessionText;
-    /** Session logs to consider, newest first, minus archived ones by default. */
+    /**
+     * Session logs to consider, newest first. Archived logs are indexed too:
+     * they are excluded from queries (see {@link searchDetailed}) unless the
+     * caller or the configuration asks for them, so toggling archived search
+     * needs no rebuild.
+     */
     private sessionCandidates;
     sessionRoots(): string[];
     /**

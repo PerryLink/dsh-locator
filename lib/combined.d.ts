@@ -49,6 +49,8 @@ export interface CombinedRequest {
     sessionId: string | null;
     /** Restrict name/content hits to one configured root (panel root picker). */
     rootPrefix: string | null;
+    /** Include archived sessions in the content group (panel checkbox). */
+    includeArchived: boolean;
     /** How much counting work the groups may spend. */
     count: ContentCountMode;
     countLimit: number;

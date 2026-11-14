@@ -100,7 +100,9 @@ describe('ContentIndex', () => {
       skipped.start()
       await settle(skipped)
       expect((await skipped.search('LIVEMARK', 5)).length).toBeGreaterThan(0)
+      // Archived logs are indexed either way but hidden from ordinary queries.
       expect((await skipped.search('ARCHIVEMARK', 5)).length).toBe(0)
+      expect((await skipped.search('ARCHIVEMARK', 5, { includeArchived: true })).hits.length).toBeGreaterThan(0)
 
       const included = new ContentIndex(runtime, { ...base, stateDir: archState, includeArchived: true })
       cleanups.push(() => included.close())
@@ -1318,6 +1320,40 @@ describe('content database self-healing', () => {
     expect(scoped.hits.map(hit => hit.kind)).toEqual(['session'])
     const allRoots = await content.search('ALLROOTS-MARKER', 10, { sessionPath: sessionFile, fileHitsAllRoots: true })
     expect(allRoots.hits.map(hit => hit.kind).sort()).toEqual(['file', 'session'])
+  })
+
+
+  it('indexes tool results only when contentIndexToolResults is on', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-tools-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-tools-sessions-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const dir = join(sessions, '--workspace--', 'session-tools')
+    mkdirSync(dir, { recursive: true })
+    const lines = [
+      JSON.stringify({ type: 'user/message', data: { id: 'u-tools', seq: 1, content: [{ type: 'text', text: 'please run the tool' }] } }),
+      JSON.stringify({ type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-1', name: 'shell', arguments: '{}' } }),
+      JSON.stringify({ type: 'tool/result', data: { turn: 1, step: 1, message: { role: 'tool', toolCallId: 'call-1', content: [{ type: 'text', text: 'TOOLRESULT-MARKER output body' }] } } }),
+    ].join('\n')
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(lines)))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const off = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => off.close())
+    off.start()
+    await settle(off)
+    expect((await off.search('TOOLRESULT-MARKER', 5)).length).toBe(0)
+    expect(off.status().toolResultsIndex).toBe(false)
+    off.close()
+    // Flipping the flag on reuses the database: only session rows are rebuilt.
+    const on = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10, includeToolResults: true })
+    cleanups.push(() => on.close())
+    on.start()
+    await settle(on)
+    expect(on.status().toolResultsIndex).toBe(true)
+    const hits = await on.search('TOOLRESULT-MARKER', 5)
+    expect(hits.length).toBe(1)
+    expect(hits[0]?.kind).toBe('session')
+    expect(hits[0]?.messageId).toBe('call-1')
+    expect(hits[0]?.title).toBe('shell')
   })
 
 })

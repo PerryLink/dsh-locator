@@ -113,6 +113,8 @@ export interface ContentState {
   fullIndex?: boolean
   /** Assistant reasoning/thinking blocks are included in session docs. */
   reasoningIndex?: boolean
+  /** Tool-result text is indexed as its own session documents. */
+  toolResultsIndex?: boolean
 }
 
 export interface ContentOptions {
@@ -133,6 +135,8 @@ export interface ContentOptions {
   maxSessions: number
   /** Index assistant reasoning blocks as part of the message body. */
   includeReasoning?: boolean
+  /** Index `tool/result` text as its own session document (opt-in). */
+  includeToolResults?: boolean
   /**
    * Run content queries in a worker thread so a slow search never blocks the
    * DSH host event loop. Off by default so direct embedders and tests stay
@@ -178,6 +182,8 @@ export class ContentIndex {
   private dbIdentity: { dev: number; ino: number } | null = null
   /** Session id → indexed session log path, for session-scoped content search. */
   private readonly sessionPaths = new Map<string, string>()
+  /** Archived session ids, excluded from queries unless asked for. */
+  private archivedSessions = new Set<string>()
   private readonly pending = new Map<number, (result: ContentSearchResult) => void>()
 
   constructor(private readonly rt: LocatorRuntime, private readonly options: ContentOptions) {}
@@ -192,6 +198,7 @@ export class ContentIndex {
       ...(progress === null ? {} : { progress: { ...progress } }),
       fullIndex: this.options.maxTotalBytes === 0 && this.options.maxFiles === 0,
       reasoningIndex: this.options.includeReasoning === true,
+      toolResultsIndex: this.options.includeToolResults === true,
     }
   }
 
@@ -347,10 +354,12 @@ export class ContentIndex {
       // later off) rebuilds sessions so old rows cannot keep stale thinking.
       const storedReasoning = this.readFlag('reasoning')
       const wantReasoning = this.options.includeReasoning === true ? 1 : 0
-      // Changing reasoning participation only invalidates session rows. Keep
-      // the file index instead of dropping/rebuilding 185k files.
+      const storedToolResults = this.readFlag('toolResults') ?? 0
+      const wantToolResults = this.options.includeToolResults === true ? 1 : 0
+      // Changing reasoning/tool-result participation only invalidates session
+      // rows. Keep the file index instead of dropping/rebuilding 185k files.
       this.totalBytes = this.readTotalBytes()
-      if ((storedReasoning ?? 0) !== wantReasoning) {
+      if ((storedReasoning ?? 0) !== wantReasoning || storedToolResults !== wantToolResults) {
         this.clearSessions()
         await this.indexSessions(generation)
         if (generation !== this.generation) return
@@ -730,6 +739,7 @@ export class ContentIndex {
     this.writeTotalBytes()
     this.writeFlag('complete', 1)
     this.writeFlag('reasoning', this.options.includeReasoning === true ? 1 : 0)
+    this.writeFlag('toolResults', this.options.includeToolResults === true ? 1 : 0)
     this.refreshSessionPaths()
     this.reopenWorker()
   }
@@ -993,6 +1003,7 @@ export class ContentIndex {
     if (generation !== this.generation) return false
     const sessionId = basename(dirname(file.path))
     this.sessionPaths.set(sessionId, file.path)
+    const callNames = new Map<string, string>()
     let title = ''
     let parsed = 0
     for (const line of text.split('\n')) {
@@ -1004,24 +1015,60 @@ export class ContentIndex {
       let event: { type?: string; data?: Record<string, unknown> }
       try { event = JSON.parse(line) } catch { continue }
       const extracted = messageText(event, this.options.includeReasoning === true)
-      if (extracted === undefined) continue
-      if (title === '') title = extracted.titleText.replace(/\s+/g, ' ').slice(0, 90)
-      const body = extracted.text.slice(0, SESSION_BODY_BYTES)
-      const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, nodeKey: extracted.nodeKey, mtime: file.mtime }
-      if (!this.addDoc(row)) return false
+      if (extracted !== undefined) {
+        if (title === '') title = extracted.titleText.replace(/\s+/g, ' ').slice(0, 90)
+        const body = extracted.text.slice(0, SESSION_BODY_BYTES)
+        const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, nodeKey: extracted.nodeKey, mtime: file.mtime }
+        if (!this.addDoc(row)) return false
+        continue
+      }
+      if (this.options.includeToolResults === true) {
+        // Tool results are their own documents: they can be long, and pairing
+        // them with the assistant message would let a huge result evict the
+        // answer from the 8KB body cap. The title carries the tool name from
+        // the matching tool/call event.
+        if (event.type === 'tool/call') {
+          const callId = String((event.data ?? {}).callId ?? '')
+          const name = (event.data ?? {}).name
+          if (callId !== '' && typeof name === 'string' && name !== '') callNames.set(callId, name)
+          continue
+        }
+        if (event.type !== 'tool/result') continue
+        const data = event.data ?? {}
+        const message = (data.message ?? {}) as Record<string, unknown>
+        const callId = String(message.toolCallId ?? '')
+        const content = message.content
+        if (!Array.isArray(content)) continue
+        const body = content
+          .filter((block): block is { type: string; text: string } =>
+            typeof block === 'object' && block !== null
+              && (block as { type?: unknown }).type === 'text'
+              && typeof (block as { text?: unknown }).text === 'string')
+          .map(block => block.text).join('\n').trim().slice(0, SESSION_BODY_BYTES)
+        if (body === '') continue
+        const id = callId !== '' ? callId : `tool-seq-${String(data.seq ?? parsed)}`
+        const toolName = callNames.get(callId) ?? 'tool result'
+        const row: DocRow = { key: `session:${sessionId}:tool-${id}`, body, kind: 'session', path: file.path, title: toolName, sessionId, messageId: id, nodeKey: null, mtime: file.mtime }
+        if (!this.addDoc(row)) return false
+      }
     }
     return true
   }
 
-  /** Session logs to consider, newest first, minus archived ones by default. */
+  /**
+   * Session logs to consider, newest first. Archived logs are indexed too:
+   * they are excluded from queries (see {@link searchDetailed}) unless the
+   * caller or the configuration asks for them, so toggling archived search
+   * needs no rebuild.
+   */
   private async sessionCandidates(): Promise<Array<{ path: string; mtime: number }>> {
     const files = await sessionFiles(this.sessionRoots())
     const archived = this.options.includeArchived === true ? new Set<string>() : await archivedSessionIds()
+    this.archivedSessions = archived
     const max = this.options.maxSessions > 0 ? this.options.maxSessions : Number.POSITIVE_INFINITY
     const out: Array<{ path: string; mtime: number }> = []
     for (const file of files) {
       if (out.length >= max) break
-      if (archived.has(basename(dirname(file.path)))) continue
       out.push(file)
     }
     return out
@@ -1058,9 +1105,10 @@ export class ContentIndex {
   }
 
   private async searchDetailed(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult> {
-    let resolved = this.resolveSession(options)
+    const resolvedOptions = this.resolveSession(options)
     const extraWarnings: string[] = []
-    if (resolved === null) {
+    let resolved: ContentSearchOptions
+    if (resolvedOptions === null) {
       // The caller's session is not indexed yet (active sessions are indexed
       // only after they settle). `locator_find` workspace scope asks for file
       // hits to keep working in that window instead of returning nothing.
@@ -1069,10 +1117,16 @@ export class ContentIndex {
       delete fallback.sessionId
       resolved = fallback
       extraWarnings.push('unknown-session')
+    } else {
+      resolved = resolvedOptions
     }
     const withWarnings = (result: ContentSearchResult): ContentSearchResult => extraWarnings.length === 0
       ? result
       : { ...result, warnings: [...new Set([...extraWarnings, ...result.warnings])] }
+    const includeArchived = options.includeArchived === true || this.options.includeArchived === true
+    if (!includeArchived && this.archivedSessions.size > 0) {
+      resolved = { ...resolved, excludeArchivedSessions: [...this.archivedSessions] }
+    }
     if (this.db === null) return withWarnings(emptySearchResult())
     if (!this.databaseIsCurrent()) {
       this.recoverExternal()

@@ -365,6 +365,12 @@ describe('combined search', () => {
     expect(response.files?.hits.map(hit => hit.path)).toEqual(['/data/b.md'])
     expect(response.dirs?.hits.map(hit => hit.path)).toEqual(['/data/sub'])
     expect(contentOptions[0]?.pathPrefix).toBe('/data')
+    const archived = await runCombinedSearch(deps({
+      contentSearch: async (_query, _limit, options) => { contentOptions.push(options); return contentResult([]) },
+      contentStatus: () => state(),
+    }), readCombinedRequest({ query: 'note', includeArchived: true }, 100))
+    expect(archived.content).toBeDefined()
+    expect(contentOptions[contentOptions.length - 1]?.includeArchived).toBe(true)
     // A prefix outside every configured root is ignored instead of narrowing.
     const outside = await runCombinedSearch(deps({
       roots,

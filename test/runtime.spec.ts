@@ -24,6 +24,7 @@ function config(overrides: Partial<Config> = {}): Config {
     contentMaxFiles: 0,
     contentFullIndex: false,
     contentIndexReasoning: false,
+      contentIndexToolResults: false,
     contentMaxSessions: 0,
     contentSessionDirs: [],
     contentExcludes: [],

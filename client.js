@@ -241,6 +241,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         contentFullIndex: 'full-index', contentReasoningIndex: 'reasoning-indexed',
         panelFilter: 'Filter loaded results…', filterEmpty: 'No loaded result matches this filter', panelLoadMore: 'Load more', panelHistory: 'Recent searches', panelHistoryClear: 'Clear',
         rootFilter: 'Root', allRoots: 'All roots', exportTitle: 'Export results', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exported', exportFailed: 'Export failed',
+        includeArchived: "Archived sessions", contentToolResultsIndex: "tool-results-indexed",
       },
       zh: {
         scopeContent: '内容', scopeFiles: '文件', scopeDirs: '目录',
@@ -292,6 +293,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         contentFullIndex: '全量内容', contentReasoningIndex: '含思考内容',
         panelFilter: '过滤当前结果…', filterEmpty: '已加载结果中没有符合过滤条件的内容', panelLoadMore: '加载更多', panelHistory: '最近搜索', panelHistoryClear: '清空',
         rootFilter: '根目录', allRoots: '全部根目录', exportTitle: '导出结果', exportCsv: 'CSV', exportJson: 'JSON', exportDone: '已导出', exportFailed: '导出失败',
+        includeArchived: "包含归档会话", contentToolResultsIndex: "含工具结果",
       },
       es: {
         scopeContent: 'Contenido', scopeFiles: 'Archivos', scopeDirs: 'Carpetas',
@@ -343,6 +345,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         contentFullIndex: 'índice completo', contentReasoningIndex: 'razonamiento indexado',
         panelFilter: 'Filtrar resultados cargados…', filterEmpty: 'Ningún resultado cargado coincide con el filtro', panelLoadMore: 'Cargar más', panelHistory: 'Búsquedas recientes', panelHistoryClear: 'Borrar',
         rootFilter: 'Raíz', allRoots: 'Todas las raíces', exportTitle: 'Exportar resultados', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exportado', exportFailed: 'Error al exportar',
+        includeArchived: "Sesiones archivadas", contentToolResultsIndex: "resultados de herramientas",
       },
       pt: {
         scopeContent: 'Conteúdo', scopeFiles: 'Arquivos', scopeDirs: 'Pastas',
@@ -394,6 +397,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         contentFullIndex: 'índice completo', contentReasoningIndex: 'raciocínio indexado',
         panelFilter: 'Filtrar resultados carregados…', filterEmpty: 'Nenhum resultado carregado corresponde ao filtro', panelLoadMore: 'Carregar mais', panelHistory: 'Buscas recentes', panelHistoryClear: 'Limpar',
         rootFilter: 'Raiz', allRoots: 'Todas as raízes', exportTitle: 'Exportar resultados', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exportado', exportFailed: 'Falha ao exportar',
+        includeArchived: "Sessões arquivadas", contentToolResultsIndex: "resultados de ferramentas",
       },
       hi: {
         scopeContent: 'सामग्री', scopeFiles: 'फ़ाइलें', scopeDirs: 'फ़ोल्डर',
@@ -445,6 +449,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         contentFullIndex: 'पूर्ण इंडेक्स', contentReasoningIndex: 'reasoning इंडेक्स',
         panelFilter: 'लोड किए गए परिणाम छाँटें…', filterEmpty: 'लोड किए गए परिणामों में फ़िल्टर से मेल नहीं', panelLoadMore: 'और लोड करें', panelHistory: 'हाल की खोजें', panelHistoryClear: 'साफ़ करें',
         rootFilter: 'रूट', allRoots: 'सभी रूट', exportTitle: 'परिणाम निर्यात करें', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'निर्यात हुआ', exportFailed: 'निर्यात विफल',
+        includeArchived: "संग्रहीत सत्र", contentToolResultsIndex: "टूल परिणाम इंडेक्स",
       },
       ja: {
         scopeContent: "内容",
@@ -570,6 +575,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportJson: "JSON",
         exportDone: "エクスポートしました",
         exportFailed: "エクスポートに失敗しました",
+        includeArchived: "アーカイブ済みセッション", contentToolResultsIndex: "ツール結果インデックス",
       },
       fr: {
         scopeContent: "Contenu",
@@ -695,6 +701,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportJson: "JSON",
         exportDone: "Exporté",
         exportFailed: "Échec de l’export",
+        includeArchived: "Sessions archivées", contentToolResultsIndex: "résultats d’outils indexés",
       },
       de: {
         scopeContent: "Inhalt",
@@ -820,6 +827,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportJson: "JSON",
         exportDone: "Exportiert",
         exportFailed: "Export fehlgeschlagen",
+        includeArchived: "Archivierte Sitzungen", contentToolResultsIndex: "Tool-Ergebnisse indiziert",
       },
       ru: {
         scopeContent: "Содержимое",
@@ -945,6 +953,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportJson: "JSON",
         exportDone: "Экспортировано",
         exportFailed: "Не удалось экспортировать",
+        includeArchived: "Архивные сессии", contentToolResultsIndex: "результаты инструментов",
       },
     }
     const LANG = (() => {
@@ -2333,6 +2342,7 @@ self.onmessage = event => {
       const [wholeWord, setWholeWord] = useState(prefs.wholeWord === true)
       const [sessionOnly, setSessionOnly] = useState(false)
       const [rootFilter, setRootFilter] = useState('')
+      const [includeArchived, setIncludeArchived] = useState(false)
       const [selected, setSelected] = useState(0)
       const [toast, setToast] = useState('')
       const [refreshTick, setRefreshTick] = useState(0)
@@ -2458,6 +2468,7 @@ self.onmessage = event => {
             wholeWord,
             sessionId: sessionOnly ? activeSessionId : '',
             root: rootFilter,
+            includeArchived,
             count: matchMode === 'regex' ? 'none' : 'exact',
           }, controller.signal).then(data => {
             if (controller.signal.aborted) return
@@ -2593,7 +2604,8 @@ self.onmessage = event => {
 
       const openFile = useCallback(hit => {
         if (!hit || hit.dir || loading) return
-        post('/dsh-locator/open', { path: hit.path }).then(() => notify(t('opened'))).catch(() => copy(hit))
+        const line = typeof hit.line === 'number' ? hit.line : undefined
+        post('/dsh-locator/open', { path: hit.path, line }).then(() => notify(t('opened'))).catch(() => copy(hit))
       }, [copy, loading, notify])
 
       const activate = useCallback(hit => {
@@ -2729,6 +2741,7 @@ self.onmessage = event => {
             wholeWord,
             sessionId: sessionOnly ? activeSessionId : '',
             root: rootFilter,
+            includeArchived,
             count: matchMode === 'regex' ? 'none' : 'exact',
           })
           setGroups(previous => {
@@ -2980,6 +2993,9 @@ self.onmessage = event => {
                 ))
             : null,
           h('span', { className: 'grow' }),
+          h('label', { className: 'dsh-locator-check', title: t('includeArchived') },
+            h('input', { type: 'checkbox', checked: includeArchived, onChange: () => setIncludeArchived(value => !value) }),
+            t('includeArchived')),
           h('label', { className: 'dsh-locator-check' + (activeSessionId === '' ? ' disabled' : ''),
             title: activeSessionId === '' ? t('findNoSession') : t('panelSessionHint') },
             h('input', { type: 'checkbox', checked: sessionOnly, disabled: activeSessionId === '',
@@ -3025,7 +3041,8 @@ self.onmessage = event => {
                   ? ' · ' + t('watchDegraded')
                   : '')
                   + (status.content && status.content.fullIndex === true ? ' · ' + t('contentFullIndex') : '')
-                  + (status.content && status.content.reasoningIndex === true ? ' · ' + t('contentReasoningIndex') : '')),
+                  + (status.content && status.content.reasoningIndex === true ? ' · ' + t('contentReasoningIndex') : '')
+                  + (status.content && status.content.toolResultsIndex === true ? ' · ' + t('contentToolResultsIndex') : '')),
         ),
         history.length > 0
           ? h('div', { className: 'dsh-locator-history' },

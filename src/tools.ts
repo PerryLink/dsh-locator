@@ -312,6 +312,7 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex) {
             truncated?: boolean
             fullIndex?: boolean
             reasoningIndex?: boolean
+            toolResultsIndex?: boolean
             progress?: { phase?: string; scanned?: number; indexed?: number; total?: number; path?: string; startedAt?: number }
             warnings?: string[]
           }
@@ -332,7 +333,7 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex) {
         ]
         if (v.refreshFallback === true) lines.push('  fallback: periodic rebuild is active (native watcher incomplete)')
         if (v.content?.enabled === true) {
-          lines.push(`  content: ${String(v.content.files ?? 0)} files / ${String(v.content.messages ?? 0)} messages${v.content.fullIndex === true ? ' · full-index' : ''}${v.content.reasoningIndex === true ? ' · reasoning-indexed' : ''}${v.content.truncated === true ? ' · truncated' : ''}`)
+          lines.push(`  content: ${String(v.content.files ?? 0)} files / ${String(v.content.messages ?? 0)} messages${v.content.fullIndex === true ? ' · full-index' : ''}${v.content.reasoningIndex === true ? ' · reasoning-indexed' : ''}${v.content.toolResultsIndex === true ? ' · tool-results-indexed' : ''}${v.content.truncated === true ? ' · truncated' : ''}`)
           const progress = v.content.progress
           if (progress !== undefined) {
             const total = typeof progress.total === 'number' ? ` / ${String(progress.total)}` : ''

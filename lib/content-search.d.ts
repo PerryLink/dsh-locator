@@ -68,6 +68,10 @@ export interface ContentSearchOptions {
     sessionUnavailable?: 'empty' | 'files-only';
     /** Drop session documents entirely (the unknown-session fallback). */
     excludeSessions?: boolean;
+    /** Include archived sessions in this query (panel checkbox or config). */
+    includeArchived?: boolean;
+    /** Internal: archived session ids to drop from the query. */
+    excludeArchivedSessions?: string[];
     /**
      * Keep file documents from every indexed root while session documents stay
      * scoped to `sessionPath`. Used by `locator_find` workspace scope when the

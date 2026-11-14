@@ -155,7 +155,7 @@ How the content index behaves:
 - **Lazy by default.** Nothing is built at plugin start; the first content search (`locator_find` or the panel's Content scope) starts the build in the background, and `contentLazy: false` restores the eager build. The first query reports `building: true` instead of an empty result with no hint.
 - **Restart reuses the database.** An existing database is refreshed incrementally; a full build (session logs first, then file bodies) runs only when the database is missing, has a stale schema, was left unfinished by an interrupted build, or cannot be opened.
 - **Incremental refresh** every `contentRefreshMs` (5 minutes by default) re-reads only files and sessions whose mtime changed; `0` disables it.
-- **Archived and active sessions.** Archived sessions are skipped unless `contentIncludeArchived: true`; a session log that is still being written is indexed after it has been quiet for `contentActiveSessionDelayMs` (2 minutes), so the current log is not decompressed on every refresh. Deleted sessions leave the index when their files disappear.
+- **Archived and active sessions.** Archived sessions are **always indexed** but hidden from ordinary results; tick “Archived sessions” in the panel or set `contentIncludeArchived: true` to search them (no rebuild needed). A session log that is still being written is indexed after it has been quiet for `contentActiveSessionDelayMs` (2 minutes), so the current log is not decompressed on every refresh. Deleted sessions leave the index when their files disappear.
 - **Budget and truncation.** Defaults: 1 MB per text file, 200,000 files, 1 GB of body bytes, the 100 most recent sessions. Once the byte budget is reached, files later in scan order are skipped; `locator_find` reports `content budget reached` and the HTTP state carries `truncated: true`. Raise `contentMaxTotalBytes` or narrow `contentExcludes`.
 - **Dependency trees are not read.** `node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, … are skipped by `contentExcludes` by default — otherwise library code would exhaust the budget before your own documents; the name index still covers them.
 
@@ -246,7 +246,8 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentMaxFiles` | `200000` | Text files indexed per build; `0` means unlimited. |
 | `contentMaxSessions` | `100` | Most recent session logs indexed; `0` means all. |
 | `contentRefreshMs` | `300000` | Incremental content refresh cadence; `0` disables it. |
-| `contentIncludeArchived` | `false` | Index archived sessions as well. |
+| `contentIncludeArchived` | `false` | Include archived sessions in ordinary searches (archived logs are indexed either way; the panel can include them per query). |
+| `contentIndexToolResults` | `false` | Index `tool/result` text as its own session documents (toggling rebuilds session documents only). |
 | `contentActiveSessionDelayMs` | `120000` | Only index a session log after it has been quiet this long. |
 | `contentSessionDirs` | `[]` | Extra session directories; empty means `$DSH_HOME/sessions`. |
 | `contentExcludes` | dependency/toolchain names | Path segments or substrings the content index skips; the name index still covers them. |
@@ -402,11 +403,15 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
-## 0.12.0 upgrade notes
+## 0.12.1 upgrade notes
 
 - Panel: a **root filter** when several roots are configured (files, dirs and content hits narrow to the selected root; the route re-checks that the prefix lives under a configured root); **CSV/JSON export** of the currently loaded/filtered results; the `Ctrl+F` find bar remembers **recent queries** through native input suggestions.
 - Client strings now cover **ja/fr/de/ru** (nine languages total, all following the host `<html lang>`).
 - CI adds a **non-blocking macOS Node smoke job**: a missing macOS runner no longer blocks the release gate (as it did in 0.10.x).
+
+- Archived sessions are now always indexed but hidden from ordinary results; tick “Archived sessions” in the panel or set `contentIncludeArchived: true` to search them (no rebuild needed).
+- New optional `contentIndexToolResults`: index `tool/result` text as its own session documents (title = tool name, message id = call id); off by default, toggling rebuilds session documents only.
+- **Line-level open** for file hits: `/open` accepts `line`; VS Code-family editors (`code`/`cursor`/`codium`/`windsurf`/`code-insiders`) and Sublime are launched with a goto argument, `DSH_LOCATOR_EDITOR` overrides detection, and other setups fall back to a plain open (the response's `line` says whether the jump was honored).
 
 ## 0.11.8 fixes
 

@@ -47,6 +47,9 @@ export declare const CONTENT_STATE_SCHEMA: {
         readonly reasoningIndex: {
             readonly type: "boolean";
         };
+        readonly toolResultsIndex: {
+            readonly type: "boolean";
+        };
         readonly progress: {
             readonly type: "object";
             readonly additionalProperties: false;

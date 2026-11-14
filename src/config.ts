@@ -48,6 +48,12 @@ export interface Config {
    */
   contentIndexReasoning: boolean
   /**
+   * Index tool results (`tool/result` events) as session documents too. Off by
+   * default: results can be large and often duplicate file bodies. Enabling it
+   * rebuilds session documents only; the file index is kept.
+   */
+  contentIndexToolResults: boolean
+  /**
    * One switch for full content search: overrides both body and file caps to
    * unlimited. Off by default because a full index costs gigabytes of disk and
    * a long first build; set this instead of hand-writing two zero values.
@@ -55,7 +61,11 @@ export interface Config {
   contentFullIndex: boolean
   /** Most recent session logs indexed; 0 means all. */
   contentMaxSessions: number
-  /** Index archived sessions too; the default leaves them out. */
+  /**
+   * Search archived sessions by default. Archived logs are indexed either way
+   * (so a panel checkbox can include them per query); the default false keeps
+   * them out of ordinary results.
+   */
   contentIncludeArchived: boolean
   /**
    * Session logs modified more recently than this are skipped until they have
@@ -121,6 +131,7 @@ export const Config: Schema<Config> = Schema.object({
   contentRefreshMs: Schema.number().default(300_000),
   contentMaxFiles: Schema.number().default(200_000),
   contentIndexReasoning: Schema.boolean().default(false),
+  contentIndexToolResults: Schema.boolean().default(false),
   contentFullIndex: Schema.boolean().default(false),
   contentMaxSessions: Schema.number().default(100),
   contentIncludeArchived: Schema.boolean().default(false),

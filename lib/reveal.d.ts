@@ -85,4 +85,29 @@ export declare function revealInFileManager(target: string): Promise<void>;
  * rejected {@link executableFileRejection} first.
  */
 export declare function openWithDefaultApp(target: string): Promise<void>;
+/**
+ * Arguments that make one editor open `target` at `line`. VS Code-family
+ * editors take `--goto path:line`; Sublime takes the combined argument; any
+ * other command opens the file only, so the caller can report that the line
+ * jump was not honored.
+ * @param editor - executable name or absolute path.
+ * @param target - absolute file path.
+ * @param line - 1-based line number.
+ * @returns argv tail for the editor process.
+ */
+export declare function editorLaunchArgs(editor: string, target: string, line: number): string[];
+/**
+ * Validate the optional line number of an `/open` request.
+ * @param value - raw body value.
+ * @returns the line, or null when it is absent/invalid.
+ */
+export declare function parseLineNumber(value: unknown): number | null;
+/**
+ * Open a file, jumping to `line` when a known editor is available. Falls back
+ * to the platform opener (file only) when no goto-capable editor is installed.
+ * @param target - already authorized absolute path.
+ * @param line - 1-based line number.
+ * @returns `line` when the editor jump was requested, `file` for a plain open.
+ */
+export declare function openAtLine(target: string, line: number): Promise<'line' | 'file'>;
 //# sourceMappingURL=reveal.d.ts.map

@@ -77,6 +77,8 @@ export interface CombinedRequest {
   sessionId: string | null
   /** Restrict name/content hits to one configured root (panel root picker). */
   rootPrefix: string | null
+  /** Include archived sessions in the content group (panel checkbox). */
+  includeArchived: boolean
   /** How much counting work the groups may spend. */
   count: ContentCountMode
   countLimit: number
@@ -181,6 +183,7 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
     wholeWord: body.wholeWord === true,
     sessionId: typeof body.sessionId === 'string' && body.sessionId.trim() !== '' ? body.sessionId : null,
     rootPrefix: typeof body.root === 'string' && body.root.trim() !== '' ? body.root.trim() : null,
+    includeArchived: body.includeArchived === true,
     count: countMode(body.count),
     countLimit: clamp(body.countLimit, 1, 5000, 1000),
   }
@@ -368,6 +371,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     offset: request.contentOffset,
     ...(request.sessionId === null ? {} : { sessionId: request.sessionId }),
     ...(request.rootPrefix === null ? {} : { pathPrefix: request.rootPrefix }),
+    ...(request.includeArchived ? { includeArchived: true } : {}),
   }
   try {
     deps.ensure?.()

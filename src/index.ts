@@ -87,6 +87,7 @@ export function apply(ctx: Context, config: Config): void {
         maxTotalBytes: contentLimits(config).maxTotalBytes,
         maxFiles: contentLimits(config).maxFiles,
         includeReasoning: config.contentIndexReasoning,
+        includeToolResults: config.contentIndexToolResults,
         maxSessions: config.contentMaxSessions,
       })
     : undefined

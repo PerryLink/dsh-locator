@@ -154,7 +154,7 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 - **惰性启动**：插件启动时什么都不建；第一次搜内容（`locator_find` 或面板的“内容”范围）才开始后台构建，`contentLazy: false` 可恢复启动即建。第一次查询会立刻返回 `building: true`，不会让你干等或误以为没结果。
 - **重启复用**：有内容库时只做一次增量刷新，不重读全部正文；只有库不存在、结构版本不兼容、上次构建没完成或损坏时才全量重建（先会话、后文件正文）。
 - **增量刷新**：默认每 5 分钟检查一次，只重读 mtime 变化的文件/会话；`contentRefreshMs` 可调，0 关闭。
-- **归档与活动会话**：已归档会话默认不索引（`contentIncludeArchived: true` 才索引）；正在写入的会话等它安静 `contentActiveSessionDelayMs`（默认 2 分钟）后再索引，不会每轮刷新重解压整份日志；已删除的会话随文件消失自动退出索引。
+- **归档与活动会话**：已归档会话**始终索引**，但普通搜索结果里默认隐藏；面板勾选“包含归档会话”或 `contentIncludeArchived: true` 即可搜索它们（切换无需重建）。正在写入的会话等它安静 `contentActiveSessionDelayMs`（默认 2 分钟）后再索引，不会每轮刷新重解压整份日志；已删除的会话随文件消失自动退出索引。
 - **预算与截断**：默认单文件最多 1MB、文件数最多 20 万、内容总量最多 1GB、最近 100 个会话。撞到总额上限时按扫描顺序保留先到的文件，`locator_find` 的输出会提示 `content budget reached`，HTTP 状态里是 `truncated: true`；调大 `contentMaxTotalBytes` 或收窄 `contentExcludes` 即可。
 - **依赖目录不读正文**：`node_modules`、`.cargo`、`.bun`、`.pnpm`、`site-packages`、`toolchain` 等默认被 `contentExcludes` 跳过，否则预算会先被库代码吃满；文件名索引不受影响。
 
@@ -241,7 +241,8 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentMaxFiles` | 200000 | 最多索引多少个文件；0 表示不限制。 |
 | `contentMaxSessions` | 100 | 最多索引最近多少个会话；0 表示全部。 |
 | `contentRefreshMs` | 300000 | 内容增量刷新周期；0 关闭自动刷新。 |
-| `contentIncludeArchived` | `false` | 是否索引已归档的会话。 |
+| `contentIncludeArchived` | `false` | 是否在普通搜索中包含已归档会话（归档会话始终索引，面板可逐次勾选）。 |
+| `contentIndexToolResults` | `false` | 是否把 `tool/result` 文本作为独立会话文档入索引（切换只重建会话）。 |
 | `contentActiveSessionDelayMs` | 120000 | 会话日志安静多久后才索引。 |
 | `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
 | `contentExcludes` | 依赖/工具链目录 | 内容索引跳过的路径片段/子串；名称索引不受影响。 |
@@ -364,11 +365,15 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
-## 0.12.0 更新
+## 0.12.1 更新
 
 - 面板：多 root 时新增**根目录筛选**（文件/目录/内容命中都按所选 root 过滤，服务端会校验该前缀确实在已配置 root 之下）；新增 **CSV/JSON 导出**当前已加载/过滤结果；`Ctrl+F` 查找条记住**最近查询**（浏览器原生输入建议）。
 - 客户端新增 **ja/fr/de/ru** 文案（共 9 种语言，全部跟随宿主 `<html lang>`）。
 - CI 增加**非阻塞 macOS Node smoke**：拿不到 macOS runner 也不影响发布门禁（0.10.x 曾被它阻塞）。
+
+- 已归档会话现在始终索引但默认不参与搜索结果；面板勾选“包含归档会话”或 `contentIncludeArchived: true` 可按需搜索（切换无需重建）。
+- 新增可选 `contentIndexToolResults`：把 `tool/result` 文本作为独立会话文档入索引（标题为工具名、消息 id 为 call id）；默认关闭，切换只重建会话。
+- 文件命中支持**行级打开**：`/open` 接受 `line`；检测 VS Code 系（`code`/`cursor`/`codium`/`windsurf`/`code-insiders`）与 Sublime 并传入跳行参数，`DSH_LOCATOR_EDITOR` 可覆盖；其它环境退回普通打开，响应里的 `line` 表示是否成功跳行。
 
 ## 0.11.8 修复
 

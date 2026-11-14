@@ -75,6 +75,10 @@ export interface ContentSearchOptions {
   sessionUnavailable?: 'empty' | 'files-only'
   /** Drop session documents entirely (the unknown-session fallback). */
   excludeSessions?: boolean
+  /** Include archived sessions in this query (panel checkbox or config). */
+  includeArchived?: boolean
+  /** Internal: archived session ids to drop from the query. */
+  excludeArchivedSessions?: string[]
   /**
    * Keep file documents from every indexed root while session documents stay
    * scoped to `sessionPath`. Used by `locator_find` workspace scope when the
@@ -440,8 +444,9 @@ function buildPlan(terms: readonly string[], options: {
   pathPrefix: string | null
   excludeSessions: boolean
   fileHitsAllRoots: boolean
+  archivedExcluded: readonly string[]
 }): QueryPlan | null {
-  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots } = options
+  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded } = options
   if (terms.length === 0) return null
   const suffix: string[] = []
   const suffixParams: Array<string | number> = []
@@ -467,6 +472,12 @@ function buildPlan(terms: readonly string[], options: {
     suffixParams.push(escapeLike(pathPrefix) + '%')
   }
   if (excludeSessions) suffix.push(" AND kind = 'file'")
+  if (archivedExcluded.length > 0) {
+    // Archived session logs are indexed but hidden by default; file documents
+    // have no session id and must stay visible.
+    suffix.push(` AND (kind = 'file' OR session_id IS NULL OR session_id NOT IN (${archivedExcluded.map(() => '?').join(', ')}))`)
+    suffixParams.push(...archivedExcluded)
+  }
   const sessionClause = suffix.join('')
 
   if (phrase) {
@@ -730,6 +741,7 @@ export function searchContent(
     pathPrefix,
     excludeSessions: options.excludeSessions === true,
     fileHitsAllRoots: options.fileHitsAllRoots === true,
+    archivedExcluded: options.excludeArchivedSessions ?? [],
   })
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 

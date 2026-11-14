@@ -155,7 +155,7 @@ Comportamiento del índice de contenido:
 - **Perezoso por defecto.** Al iniciar el plugin no se construye nada; la primera búsqueda de contenido (`locator_find` o el modo contenido del panel) arranca la construcción en segundo plano, y `contentLazy: false` recupera la construcción al arranque. La primera consulta informa `building: true` en lugar de devolver un resultado vacío sin explicación.
 - **Reinicio con reutilización.** Si existe la base, se actualiza de forma incremental; la construcción completa (primero logs de sesión y luego cuerpos de archivo) solo ocurre si falta la base, el esquema es antiguo, la construcción anterior quedó a medias o la base no se puede abrir.
 - **Actualización incremental** cada `contentRefreshMs` (5 minutos por defecto), releyendo solo archivos y sesiones cuya mtime cambió; `0` la desactiva.
-- **Sesiones archivadas y activas.** Las archivadas se omiten salvo `contentIncludeArchived: true`; un log que se sigue escribiendo se indexa tras `contentActiveSessionDelayMs` (2 minutos) de calma, para no descomprimirlo en cada actualización. Las sesiones borradas salen del índice cuando desaparecen sus archivos.
+- **Sesiones archivadas y activas.** Las archivadas **siempre se indexan** pero quedan ocultas de los resultados normales; marca «Sesiones archivadas» en el panel o usa `contentIncludeArchived: true` para buscarlas (sin reconstruir). Un log que se sigue escribiendo se indexa tras `contentActiveSessionDelayMs` (2 minutos) de calma. Las sesiones borradas salen del índice cuando desaparecen sus archivos.
 - **Presupuesto y truncado.** Valores por defecto: 1 MB por archivo de texto, 200.000 archivos, 1 GB de cuerpos y las 100 sesiones más recientes. Al alcanzar el presupuesto se omiten los archivos que llegan después en el orden de escaneo; `locator_find` informa `content budget reached` y el estado HTTP lleva `truncated: true`. Sube `contentMaxTotalBytes` o reduce `contentExcludes`.
 - **Los árboles de dependencias no se leen.** `node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, … se omiten por defecto con `contentExcludes`; de lo contrario el código de librerías agotaría el presupuesto antes que tus documentos. El índice de nombres sí los cubre.
 
@@ -245,7 +245,8 @@ Cada campo es un campo de configuración de Schemastery; sobrescribe la entrada 
 | `contentMaxFiles` | `200000` | Archivos de texto indexados por construcción; `0` = sin límite. |
 | `contentMaxSessions` | `100` | Logs de sesión más recientes indexados; `0` = todos. |
 | `contentRefreshMs` | `300000` | Cadencia de actualización incremental del contenido; `0` la desactiva. |
-| `contentIncludeArchived` | `false` | Indexar también las sesiones archivadas. |
+| `contentIncludeArchived` | `false` | Incluir sesiones archivadas en las búsquedas normales (se indexan igualmente; el panel puede incluirlas por consulta). |
+| `contentIndexToolResults` | `false` | Indexar el texto de `tool/result` como documentos de sesión propios (cambiarlo solo reconstruye sesiones). |
 | `contentActiveSessionDelayMs` | `120000` | Indexar un log de sesión solo tras este tiempo de calma. |
 | `contentSessionDirs` | `[]` | Directorios de sesión adicionales; vacío = `$DSH_HOME/sessions`. |
 | `contentExcludes` | nombres de dependencias/toolchains | Segmentos o subcadenas de ruta que omite el índice de contenido; el de nombres sí los cubre. |
@@ -401,11 +402,15 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
-## Notas de actualización 0.12.0
+## Notas de actualización 0.12.1
 
 - Panel: **filtro por raíz** cuando hay varias raíces (archivos, carpetas y contenido se limitan a la raíz elegida; la ruta revalida que el prefijo esté bajo una raíz configurada); **exportación CSV/JSON** de los resultados cargados/filtrados; la barra `Ctrl+F` recuerda **búsquedas recientes** con sugerencias nativas del navegador.
 - Textos de cliente en **ja/fr/de/ru** (nueve idiomas en total, siguiendo el `<html lang>` del host).
 - CI añade un **job macOS Node smoke no bloqueante**: no tener runner ya no bloquea la puerta de release (como en 0.10.x).
+
+- Las sesiones archivadas ahora se indexan siempre pero quedan ocultas; marca «Sesiones archivadas» en el panel o usa `contentIncludeArchived: true` (sin reconstruir).
+- Nuevo `contentIndexToolResults`: indexa el texto de `tool/result` como documentos de sesión propios (título = herramienta, id = call id); desactivado por defecto, cambiarlo solo reconstruye sesiones.
+- **Apertura a nivel de línea** para aciertos de archivo: `/open` acepta `line`; los editores de la familia VS Code y Sublime reciben un argumento goto, `DSH_LOCATOR_EDITOR` lo sobrescribe y otros entornos abren el archivo sin línea (el campo `line` de la respuesta indica si funcionó).
 
 ## Correcciones 0.11.8
 

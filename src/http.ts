@@ -30,7 +30,9 @@ import type { ContentSearchOptions } from './content-search.ts'
 import { readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
 import {
   executableFileRejection,
+  openAtLine,
   openWithDefaultApp,
+  parseLineNumber,
   resolveWithinRoots,
   revealInFileManager,
 } from './reveal.ts'
@@ -424,8 +426,13 @@ async function openPath(rt: LocatorRuntime, raw: Record<string, unknown>): Promi
     }
     const openedRefusal = executableFileRejection(final.path, opened.mode)
     if (openedRefusal !== undefined) return { ok: false, error: openedRefusal }
-    await openWithDefaultApp(final.path)
-    return { ok: true }
+    const line = parseLineNumber(raw.line)
+    if (line === null) {
+      await openWithDefaultApp(final.path)
+      return { ok: true, line: false }
+    }
+    const mode = await openAtLine(final.path, line)
+    return { ok: true, line: mode === 'line' }
   } catch (error) {
     return { ok: false, error: messageOf(error) }
   } finally {

@@ -1,11 +1,14 @@
 # Changelog
 
-## 0.12.0 — 2026-11-14
+## 0.12.1 — 2026-11-14
 
-* Panel: **root filter** for multi-root installs (files, dirs and content hits narrow to the selected root; the route re-authorizes the requested prefix against the configured roots), **CSV/JSON export** of the currently loaded/filtered rows, and **recent-query suggestions** in the `Ctrl+F` find bar (native datalist, stored in localStorage).
-* Client languages: **ja/fr/de/ru** added (nine languages total; every pack carries the same 123 keys, so a missing key only falls back per string).
+* Panel: **root filter** for multi-root installs (files, dirs and content hits narrow to the selected root; the route re-authorizes the requested prefix against the configured roots), **CSV/JSON export** of the currently loaded/filtered rows, **recent-query suggestions** in the `Ctrl+F` find bar, and an **archived-sessions** checkbox that includes archived logs for one query.
+* Client languages: **ja/fr/de/ru** added (nine languages total, all following the host `<html lang>`; every pack carries the same 125 keys and only falls back per missing string).
+* Archived sessions are now always indexed (so the panel can reveal them per query, or with `contentIncludeArchived: true`) but stay out of ordinary results; toggling archived search needs no rebuild.
+* Optional **tool-result index**: `contentIndexToolResults: true` indexes `tool/result` text as its own session documents (title = tool name, message id = call id). Off by default; toggling it rebuilds session documents only.
+* **Line-level open**: `/open` accepts `line`; VS Code-family editors (`code`, `cursor`, `codium`, `windsurf`, `code-insiders`) and Sublime are launched with a goto argument, `DSH_LOCATOR_EDITOR` overrides the detection, and other setups fall back to a plain open (the response reports whether the jump was honored).
 * CI: non-blocking **macOS Node smoke** job (`continue-on-error`), so a missing/cancelled hosted runner cannot block a release; the required gate stays Linux/Windows plus the real macOS engine build.
-* `143 tests`; six engine binaries rebuilt at 0.12.0.
+* `146 tests`; six engine binaries rebuilt at 0.12.1.
 
 ## 0.11.8 — 2026-11-14
 
