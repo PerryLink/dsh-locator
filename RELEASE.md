@@ -169,3 +169,11 @@ The DSH Discover tab ships no index source. To make the plugin appear there,
 submit it to an index the user adds, for example the canonical
 `awesome-dsh-plugin` registry (one entry per plugin, `dsh.bundle` + `dsh.client`
 required). That is an external PR, not part of `npm publish`.
+
+## npm staged publishing (2026-11)
+
+npm may accept `npm publish` but keep the version in a **staging queue** that only becomes installable after a maintainer approves it with interactive 2FA (staged publishing is generally available; automation tokens that bypass 2FA can no longer publish directly). Symptoms: the publish step prints `+ dsh-locator@x.y.z`, the registry returns 404 for that version, and a retry fails with `E409 Cannot publish over previously staged version`.
+
+- Approve from the npm website (package page → staged versions) or interactively with `npm stage list` + `npm stage approve <id>`.
+- After approval, re-run the failed `publish` job: the workflow treats an already published version whose `gitHead` equals the release SHA as a no-op and finishes green.
+- The release gate (tag, green CI, six rebuilt engines, verify, tests, tarball) runs **before** publishing, so a staged version is already fully verified.

@@ -297,21 +297,35 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
+          SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           set -euo pipefail
-          if npm view "dsh-locator@${VERSION}" version >/dev/null 2>&1; then
-            echo "::error::dsh-locator@${VERSION} already exists on npm; bump package.json version first"
+          if existing="$(npm view "dsh-locator@${VERSION}" version 2>/dev/null)"; then
+            # Retrying a release after a staged publish was approved must be a
+            # no-op, not a red run: it is only safe when the published version
+            # points at the exact release SHA.
+            githead="$(npm view "dsh-locator@${VERSION}" gitHead 2>/dev/null || true)"
+            if [ "${githead}" = "${SHA}" ]; then
+              echo "dsh-locator@${VERSION} is already published from ${SHA}; skipping publish"
+              echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::dsh-locator@${VERSION} already exists on npm from '${githead:-<unknown>}' (release SHA ${SHA}); bump package.json version first"
             exit 1
           fi
           echo "dsh-locator@${VERSION} is not published yet"
       - name: Publish with provenance
-        if: ${{ inputs.publish }}
+        if: ${{ inputs.publish && env.SKIP_PUBLISH != '1' }}
         # Requires npm trusted publishing or the NPM_TOKEN repository secret.
+        # npm may place the version in the staging queue instead of publishing
+        # directly: a maintainer with 2FA must approve it before it becomes
+        # installable (see RELEASE.md).
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Assert the published tarball points back at this SHA
-        if: ${{ inputs.publish }}
+        if: ${{ inputs.publish && env.SKIP_PUBLISH != '1' }}
+        shell: bash
         shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -319,7 +333,7 @@ jobs:
         run: |
           set -euo pipefail
           published=""
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 12); do
             published="$(npm view "dsh-locator@${VERSION}" gitHead 2>/dev/null || true)"
             if [ "${published}" = "${SHA}" ]; then
               echo "npm gitHead ${published} matches the release SHA"
@@ -328,7 +342,11 @@ jobs:
             echo "attempt ${attempt}: registry gitHead is '${published:-<not visible yet>}', retrying"
             sleep 10
           done
-          echo "::error::npm gitHead for dsh-locator@${VERSION} is '${published:-<missing>}' but the release SHA is ${SHA}"
+          # npm's staged publishing flow reports a successful publish while the
+          # version waits in the staging queue; it becomes visible only after a
+          # maintainer approves it with 2FA. Say so instead of implying a build
+          # failure, and let the rerun-after-approval path above finish cleanly.
+          echo "::error::dsh-locator@${VERSION} is not publicly visible yet. npm staged publishing requires a maintainer to approve it with 2FA (CLI: 'npm stage list' then 'npm stage approve <id>', or the package page on npmjs.com). Re-run this job after approval: the guard above treats an already published matching SHA as a no-op."
           exit 1
       - name: Dry run complete (npm publish skipped)
         if: ${{ !inputs.publish }}
