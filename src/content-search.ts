@@ -59,11 +59,22 @@ export interface ContentSearchOptions {
   /** Skip this many ranked matches before the page (panel load-more). */
   offset?: number
   /**
-   * Keep only file/session documents whose stored path lives under this
-   * directory prefix (the locator_find `scope: workspace` filter). Session
-   * documents are unaffected: they are scoped by `sessionPath`/`sessionId`.
+   * Keep only file documents whose stored path lives under this directory
+   * prefix (the locator_find `scope: workspace` filter). Combined with
+   * `sessionPath` the two filters are composed by document kind: session
+   * documents come from that session log, file documents from that prefix.
    */
   pathPrefix?: string | null
+  /**
+   * What to do when `sessionId` names a session that is not indexed yet:
+   * return nothing (default, used by the panel's session scope) or keep
+   * searching file documents without the session filter (`files-only`, used by
+   * `locator_find` workspace scope so file hits stay searchable before the
+   * active session is indexed).
+   */
+  sessionUnavailable?: 'empty' | 'files-only'
+  /** Drop session documents entirely (the unknown-session fallback). */
+  excludeSessions?: boolean
   /** Override for the whole-word scan caps; production uses the defaults. */
   scanBudget?: ContentScanBudget
 }
@@ -420,21 +431,29 @@ function buildPlan(terms: readonly string[], options: {
   phrase: boolean
   sessionPath: string | null
   pathPrefix: string | null
+  excludeSessions: boolean
 }): QueryPlan | null {
-  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix } = options
+  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix, excludeSessions } = options
   if (terms.length === 0) return null
-  // Only files live inside the workspace prefix. Session rows belong to the
-  // session scope and are filtered by sessionPath/sessionId instead.
   const suffix: string[] = []
   const suffixParams: Array<string | number> = []
-  if (sessionPath !== null) {
+  if (sessionPath !== null && pathPrefix !== null) {
+    // Workspace scope has two halves: session rows from the caller's session
+    // log, file rows under the caller's cwd. They must be composed by kind —
+    // ANDing the two path filters matched no row at all (0.11.0–0.11.6 bug),
+    // so file bodies were never searchable in workspace scope.
+    suffix.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR (kind = 'file' AND rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\')))")
+    suffixParams.push(sessionPath, escapeLike(pathPrefix) + '%')
+  } else if (sessionPath !== null) {
+    // Pure session scope (panel "this conversation", sessionId-only requests).
     suffix.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
     suffixParams.push(sessionPath)
-  }
-  if (pathPrefix !== null) {
+  } else if (pathPrefix !== null) {
+    // File scope without a session: session rows stay available as before.
     suffix.push(" AND (kind = 'session' OR rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\'))")
     suffixParams.push(escapeLike(pathPrefix) + '%')
   }
+  if (excludeSessions) suffix.push(" AND kind = 'file'")
   const sessionClause = suffix.join('')
 
   if (phrase) {
@@ -689,17 +708,22 @@ export function searchContent(
   }
   if (check.terms.length === 0) return { hits: [], count: emptyCount(countMode), warnings }
 
+  const pathPrefix = normalizePathPrefix(options.pathPrefix)
   const plan = buildPlan(check.terms, {
     caseSensitive: options.caseSensitive === true,
     wholeWord: options.wholeWord === true,
     phrase: check.phrase,
     sessionPath: options.sessionPath ?? null,
-    pathPrefix: normalizePathPrefix(options.pathPrefix),
+    pathPrefix,
+    excludeSessions: options.excludeSessions === true,
   })
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 
   if (plan.wholeWord) {
-    const scanned = scanWholeWord(db, plan, capped, Math.max(0, Math.trunc(options.offset ?? 0)), countMode, countLimit, options.sessionPath != null, resolveScanBudget(options.scanBudget))
+    // Only a pure session scope may count without a bound; a workspace/file
+    // prefix still scans a potentially large corpus, so keep counts bounded.
+    const sessionScoped = options.sessionPath != null && pathPrefix === null && options.excludeSessions !== true
+    const scanned = scanWholeWord(db, plan, capped, Math.max(0, Math.trunc(options.offset ?? 0)), countMode, countLimit, sessionScoped, resolveScanBudget(options.scanBudget))
     for (const warning of scanned.warnings) warnings.push(warning)
     const hits = buildHits(db, plan, scanned.rowids, new Map())
     return { hits, count: scanned.count, warnings: [...new Set(warnings)] }

@@ -52,11 +52,22 @@ export interface ContentSearchOptions {
     /** Skip this many ranked matches before the page (panel load-more). */
     offset?: number;
     /**
-     * Keep only file/session documents whose stored path lives under this
-     * directory prefix (the locator_find `scope: workspace` filter). Session
-     * documents are unaffected: they are scoped by `sessionPath`/`sessionId`.
+     * Keep only file documents whose stored path lives under this directory
+     * prefix (the locator_find `scope: workspace` filter). Combined with
+     * `sessionPath` the two filters are composed by document kind: session
+     * documents come from that session log, file documents from that prefix.
      */
     pathPrefix?: string | null;
+    /**
+     * What to do when `sessionId` names a session that is not indexed yet:
+     * return nothing (default, used by the panel's session scope) or keep
+     * searching file documents without the session filter (`files-only`, used by
+     * `locator_find` workspace scope so file hits stay searchable before the
+     * active session is indexed).
+     */
+    sessionUnavailable?: 'empty' | 'files-only';
+    /** Drop session documents entirely (the unknown-session fallback). */
+    excludeSessions?: boolean;
     /** Override for the whole-word scan caps; production uses the defaults. */
     scanBudget?: ContentScanBudget;
 }

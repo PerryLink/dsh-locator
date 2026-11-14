@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.7 — 2026-11-14
+
+* Fix `locator_find` workspace scope returning no file hits: the session filter and the caller-cwd path filter were **ANDed on the same row**, which can never match (a row cannot be both a session log and a cwd file). They are now composed by document kind — session rows from the caller's session log, file rows under the caller's cwd — so workspace-scope content search finds file bodies again.
+* Before the active session settles and is indexed, workspace scope now searches file bodies without the session filter and reports an `unknown-session` warning instead of returning zero hits for every query.
+* `141 tests`; six engine binaries rebuilt at 0.11.7.
+
 ## 0.11.6 — 2026-11-14
 
 * Fix `locator_find` being rejected by host output validation: the declared `state` schema was missing `fullIndex` and `reasoningIndex` (both on `ContentState` since 0.11.3) and the new `progress` field, so every call failed with `invalid output` instead of returning hits. `locator_status` now also returns the content index state (`content`); its schema always declared that object but the implementation never filled it.

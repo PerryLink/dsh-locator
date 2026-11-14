@@ -1058,20 +1058,33 @@ export class ContentIndex {
   }
 
   private async searchDetailed(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult> {
-    const resolved = this.resolveSession(options)
-    if (resolved === null) return emptySearchResult(['unknown-session'])
-    if (this.db === null) return emptySearchResult()
+    let resolved = this.resolveSession(options)
+    const extraWarnings: string[] = []
+    if (resolved === null) {
+      // The caller's session is not indexed yet (active sessions are indexed
+      // only after they settle). `locator_find` workspace scope asks for file
+      // hits to keep working in that window instead of returning nothing.
+      if (options.sessionUnavailable !== 'files-only') return emptySearchResult(['unknown-session'])
+      const fallback: ContentSearchOptions = { ...options, sessionPath: null, excludeSessions: true }
+      delete fallback.sessionId
+      resolved = fallback
+      extraWarnings.push('unknown-session')
+    }
+    const withWarnings = (result: ContentSearchResult): ContentSearchResult => extraWarnings.length === 0
+      ? result
+      : { ...result, warnings: [...new Set([...extraWarnings, ...result.warnings])] }
+    if (this.db === null) return withWarnings(emptySearchResult())
     if (!this.databaseIsCurrent()) {
       this.recoverExternal()
-      return emptySearchResult()
+      return withWarnings(emptySearchResult())
     }
     // Direct embedders run in-process by design (searchWorker is off).
-    if (this.options.searchWorker !== true) return this.searchSync(query, limit, resolved, false)
+    if (this.options.searchWorker !== true) return withWarnings(this.searchSync(query, limit, resolved, false))
     if (!this.ensureWorker()) {
       // The worker could not be created at all: the one allowed sync path.
-      return this.searchSync(query, limit, resolved, true)
+      return withWarnings(this.searchSync(query, limit, resolved, true))
     }
-    return await this.searchInWorker(query, limit, resolved)
+    return withWarnings(await this.searchInWorker(query, limit, resolved))
   }
 
   /** Run one query on the worker; timeout/protocol errors are final results. */

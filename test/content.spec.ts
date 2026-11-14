@@ -1246,4 +1246,51 @@ describe('content database self-healing', () => {
     expect(content.status().progress).toBeUndefined()
   })
 
+
+  it('composes session and workspace filters by document kind', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-ws-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-ws-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-ws-sessions-'))
+    cleanups.push(
+      () => rmSync(root, { recursive: true, force: true }),
+      () => rmSync(state, { recursive: true, force: true }),
+      () => rmSync(sessions, { recursive: true, force: true }),
+    )
+    const filePath = join(root, 'notes.md')
+    writeFileSync(filePath, 'WORKSPACE-MARKER file body')
+    const sessionDir = join(sessions, '--workspace--', 'session-ws')
+    mkdirSync(sessionDir, { recursive: true })
+    const sessionFile = join(sessionDir, 'session.v4.jsonl.zstd')
+    writeFileSync(sessionFile, zstdCompressSync(Buffer.from(JSON.stringify({ type: 'user/message', data: { id: 'm-ws', seq: 1, content: [{ type: 'text', text: 'WORKSPACE-MARKER session body' }] } }))))
+    const runtime = { dump: async () => ({ entries: [{ path: filePath, name: 'notes.md', size: 24, mtime: Date.now(), ext: 'md', dir: false }], next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    // Workspace scope: session rows from this log AND file rows under this cwd.
+    const both = await content.search('WORKSPACE-MARKER', 10, { sessionPath: sessionFile, pathPrefix: root })
+    expect(both.hits.map(hit => hit.kind).sort()).toEqual(['file', 'session'])
+    expect(both.warnings).toEqual([])
+  })
+
+  it('falls back to file hits when the caller session is not indexed yet', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-ws2-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-ws2-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const filePath = join(root, 'early.md')
+    writeFileSync(filePath, 'EARLY-MARKER body')
+    const runtime = { dump: async () => ({ entries: [{ path: filePath, name: 'early.md', size: 16, mtime: Date.now(), ext: 'md', dir: false }], next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const filesOnly = await content.search('EARLY-MARKER', 10, { sessionId: 'not-indexed-yet', sessionUnavailable: 'files-only' })
+    expect(filesOnly.hits.map(hit => hit.kind)).toEqual(['file'])
+    expect(filesOnly.warnings).toContain('unknown-session')
+    // The panel's session scope keeps the strict behaviour.
+    const strict = await content.search('EARLY-MARKER', 10, { sessionId: 'not-indexed-yet' })
+    expect(strict.hits).toEqual([])
+    expect(strict.warnings).toContain('unknown-session')
+  })
+
 })

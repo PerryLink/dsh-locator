@@ -158,6 +158,9 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
       // indexed files are searchable; omit the path filter in that case.
       const cwdIsIndexed = callerCwd !== undefined && roots.some(root => withinRoots(callerCwd, [root]))
       const options: ContentSearchOptions = {
+        // Before the active session settles the session id is not indexed yet;
+        // workspace scope must still search file bodies in that window.
+        ...(scope === 'workspace' ? { sessionUnavailable: 'files-only' as const } : {}),
         ...(args.matchMode === undefined ? {} : { matchMode: args.matchMode }),
         ...(args.caseSensitive === undefined ? {} : { caseSensitive: args.caseSensitive }),
         ...(args.wholeWord === undefined ? {} : { wholeWord: args.wholeWord }),

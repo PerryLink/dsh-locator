@@ -402,6 +402,10 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.11.7 fixes
+
+- Fix `locator_find` workspace scope returning no file hits: the session filter and the caller-cwd path filter were ANDed on the same row, which can never match; they are now composed by document kind (session rows from the caller's session log, file rows under the caller's cwd). While the active session is not indexed yet, workspace scope searches file bodies with an `unknown-session` warning instead of returning nothing.
+
 ## 0.11.6 fixes
 
 - Fix `locator_find` failing host output validation: its declared `state` schema was missing `fullIndex`/`reasoningIndex` (present since 0.11.3) and `progress`, so every call ended in `invalid output`; `locator_status` now also returns the content index state (`content`). Both tools share one state schema so a new field cannot silently break one of them.
