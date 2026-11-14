@@ -21,6 +21,33 @@ import type {
 } from './content-search.ts'
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts'
 
+/** Strip trailing separators from a root so prefix checks are unambiguous. */
+function trimRoot(value: string): string {
+  return value.replace(/[\\/]+$/, '')
+}
+
+/** True when `path` is the prefix itself or a descendant of it. */
+function pathUnderPrefix(path: string, prefix: string): boolean {
+  const root = trimRoot(prefix)
+  const candidate = trimRoot(path)
+  return candidate === root || candidate.startsWith(root + '/') || candidate.startsWith(root + '\\')
+}
+
+/**
+ * Accept a requested root prefix only when it lives under a configured root;
+ * the panel sends one of `status.roots`, but the route is still a trust
+ * boundary, so an arbitrary path must not narrow (or fake) the search.
+ * @param prefix - requested prefix from the request body.
+ * @param roots - configured roots.
+ * @returns the trimmed prefix, or null when it is not authorized.
+ */
+export function authorizedRootPrefix(prefix: string | null, roots: readonly string[]): string | null {
+  if (prefix === null || prefix === '') return null
+  if (roots.length === 0) return trimRoot(prefix)
+  for (const root of roots) if (pathUnderPrefix(prefix, root)) return trimRoot(prefix)
+  return null
+}
+
 /** Which groups a combined request asked for; every scope is on by default. */
 export interface CombinedScopes {
   content: boolean
@@ -48,6 +75,8 @@ export interface CombinedRequest {
   wholeWord: boolean
   /** Restrict the content group to one session (null means every document). */
   sessionId: string | null
+  /** Restrict name/content hits to one configured root (panel root picker). */
+  rootPrefix: string | null
   /** How much counting work the groups may spend. */
   count: ContentCountMode
   countLimit: number
@@ -107,6 +136,8 @@ export interface CombinedDeps {
   contentStatus?: () => ContentState
   ensure?: () => void
   maxResults: number
+  /** Configured roots; a requested root prefix must live under one of them. */
+  roots?: string[]
 }
 
 /**
@@ -149,6 +180,7 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
     caseSensitive: body.caseSensitive === true,
     wholeWord: body.wholeWord === true,
     sessionId: typeof body.sessionId === 'string' && body.sessionId.trim() !== '' ? body.sessionId : null,
+    rootPrefix: typeof body.root === 'string' && body.root.trim() !== '' ? body.root.trim() : null,
     count: countMode(body.count),
     countLimit: clamp(body.countLimit, 1, 5000, 1000),
   }
@@ -190,8 +222,11 @@ export function dedupeNameHits(
  * @param request - normalized request.
  * @returns grouped result in content → files → dirs order.
  */
-export async function runCombinedSearch(deps: CombinedDeps, request: CombinedRequest): Promise<CombinedResponse> {
+export async function runCombinedSearch(deps: CombinedDeps, input: CombinedRequest): Promise<CombinedResponse> {
   const started = Date.now()
+  const request = input.rootPrefix === null
+    ? input
+    : { ...input, rootPrefix: authorizedRootPrefix(input.rootPrefix, deps.roots ?? []) }
   const { scopes, query } = request
   const contentEnabled = deps.contentSearch !== undefined
   const wantsContent = scopes.content && contentEnabled
@@ -268,13 +303,19 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
       filesOnly: files,
       dirsOnly: !files,
     })
+    const prefix = request.rootPrefix
+    const hits = prefix === null ? result.hits : result.hits.filter(hit => pathUnderPrefix(hit.path, prefix))
+    const narrowed = prefix !== null && hits.length !== result.hits.length
     return {
-      hits: result.hits,
-      returned: result.hits.length,
-      total: result.total,
-      truncated: result.truncated,
+      hits,
+      returned: hits.length,
+      total: prefix === null ? result.total : hits.length,
+      truncated: result.truncated || narrowed,
       deduped: 0,
-      count: { value: result.total, kind: 'exact' },
+      // The engine total covers every root; a narrowed page cannot claim an exact
+      // total for the selected root, so the count becomes "unknown" (the UI shows
+      // the returned rows).
+      count: prefix === null ? { value: result.total, kind: 'exact' } : { value: hits.length, kind: 'unknown' },
       tookMs: result.tookNs / 1e6,
       ...(warnings.length === 0 ? {} : { warnings: [...new Set(warnings)] }),
     }
@@ -326,6 +367,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     countLimit: request.countLimit,
     offset: request.contentOffset,
     ...(request.sessionId === null ? {} : { sessionId: request.sessionId }),
+    ...(request.rootPrefix === null ? {} : { pathPrefix: request.rootPrefix }),
   }
   try {
     deps.ensure?.()

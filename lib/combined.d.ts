@@ -12,6 +12,15 @@
 import type { ContentHit, ContentProgress, ContentState } from './content.ts';
 import type { ContentCount, ContentCountMode, ContentMatchMode, ContentSearchOptions, ContentSearchResult } from './content-search.ts';
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts';
+/**
+ * Accept a requested root prefix only when it lives under a configured root;
+ * the panel sends one of `status.roots`, but the route is still a trust
+ * boundary, so an arbitrary path must not narrow (or fake) the search.
+ * @param prefix - requested prefix from the request body.
+ * @param roots - configured roots.
+ * @returns the trimmed prefix, or null when it is not authorized.
+ */
+export declare function authorizedRootPrefix(prefix: string | null, roots: readonly string[]): string | null;
 /** Which groups a combined request asked for; every scope is on by default. */
 export interface CombinedScopes {
     content: boolean;
@@ -38,6 +47,8 @@ export interface CombinedRequest {
     wholeWord: boolean;
     /** Restrict the content group to one session (null means every document). */
     sessionId: string | null;
+    /** Restrict name/content hits to one configured root (panel root picker). */
+    rootPrefix: string | null;
     /** How much counting work the groups may spend. */
     count: ContentCountMode;
     countLimit: number;
@@ -93,6 +104,8 @@ export interface CombinedDeps {
     contentStatus?: () => ContentState;
     ensure?: () => void;
     maxResults: number;
+    /** Configured roots; a requested root prefix must live under one of them. */
+    roots?: string[];
 }
 /**
  * Read the three scope flags from a request body. Anything that is not an
@@ -131,5 +144,5 @@ export declare function dedupeNameHits(contentHits: readonly ContentHit[], nameH
  * @param request - normalized request.
  * @returns grouped result in content → files → dirs order.
  */
-export declare function runCombinedSearch(deps: CombinedDeps, request: CombinedRequest): Promise<CombinedResponse>;
+export declare function runCombinedSearch(deps: CombinedDeps, input: CombinedRequest): Promise<CombinedResponse>;
 //# sourceMappingURL=combined.d.ts.map

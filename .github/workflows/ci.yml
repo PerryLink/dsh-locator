@@ -203,6 +203,31 @@ jobs:
           process.exit(failures === 0 ? 0 : 1);
           '
 
+  # Optional macOS Node smoke test. Hosted macOS runners are unreliable: in
+  # 0.10.x the required macOS Node job was repeatedly cancelled before it ever
+  # started and blocked releases. This job is therefore non-blocking
+  # (`continue-on-error`): it probes macOS with Node 24 when a runner shows up,
+  # but a missing/cancelled runner never turns the workflow red. The required
+  # gate stays Linux/Windows plus the real macOS engine (cgo/FSEvents) build.
+  node-macos-smoke:
+    name: node 24 (macOS smoke, non-blocking)
+    continue-on-error: true
+    timeout-minutes: 20
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm exec vitest run
+
   go:
     name: go (${{ matrix.os }})
     strategy:

@@ -326,6 +326,7 @@ async function combined(
   const deps: CombinedDeps = {
     search: async args => await rt.search(args),
     maxResults: rt.config.maxResults,
+    roots: rt.roots,
     ...(content === undefined ? {} : {
       contentSearch: async (query: string, limit: number, options: ContentSearchOptions) =>
         await content.search(query, limit, options),
@@ -334,9 +335,14 @@ async function combined(
     }),
   }
   const request = readCombinedRequest(raw, rt.config.maxResults)
+  if (request.rootPrefix !== null) {
+    const resolved = resolveWithinRoots(request.rootPrefix, rt.roots)
+    request.rootPrefix = resolved === undefined ? null : resolved.path
+  }
   const result = await runCombinedSearch(deps, request)
   return {
     query: request.query,
+    rootPrefix: request.rootPrefix,
     matchMode: request.matchMode,
     caseSensitive: request.caseSensitive,
     wholeWord: request.wholeWord,

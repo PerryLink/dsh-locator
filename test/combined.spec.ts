@@ -347,4 +347,30 @@ describe('combined search', () => {
     expect(idle.content).toMatchObject({ building: true, progress })
   })
 
+
+  it('restricts hits to an authorized root prefix', async () => {
+    const roots = ['/home/user', '/data']
+    const contentOptions: ContentSearchOptions[] = []
+    const response = await runCombinedSearch(deps({
+      roots,
+      search: async args => result(args.filesOnly
+        ? [fileHit('/home/user/a.md'), fileHit('/data/b.md')]
+        : [dirHit('/data/sub'), dirHit('/home/user/docs')]),
+      contentSearch: async (_query, _limit, options) => {
+        contentOptions.push(options)
+        return contentResult([contentHit('file', '/data/c.md')])
+      },
+      contentStatus: () => state(),
+    }), readCombinedRequest({ query: 'note', root: '/data' }, 100))
+    expect(response.files?.hits.map(hit => hit.path)).toEqual(['/data/b.md'])
+    expect(response.dirs?.hits.map(hit => hit.path)).toEqual(['/data/sub'])
+    expect(contentOptions[0]?.pathPrefix).toBe('/data')
+    // A prefix outside every configured root is ignored instead of narrowing.
+    const outside = await runCombinedSearch(deps({
+      roots,
+      search: async () => result([fileHit('/home/user/a.md')]),
+    }), readCombinedRequest({ query: 'note', root: '/etc' }, 100))
+    expect(outside.files?.hits.map(hit => hit.path)).toEqual(['/home/user/a.md'])
+  })
+
 })

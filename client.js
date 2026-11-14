@@ -240,6 +240,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         copyAll: 'Copy paths', copiedAll: 'Copied {n} paths',
         contentFullIndex: 'full-index', contentReasoningIndex: 'reasoning-indexed',
         panelFilter: 'Filter loaded results…', filterEmpty: 'No loaded result matches this filter', panelLoadMore: 'Load more', panelHistory: 'Recent searches', panelHistoryClear: 'Clear',
+        rootFilter: 'Root', allRoots: 'All roots', exportTitle: 'Export results', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exported', exportFailed: 'Export failed',
       },
       zh: {
         scopeContent: '内容', scopeFiles: '文件', scopeDirs: '目录',
@@ -290,6 +291,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         copyAll: '复制路径', copiedAll: '已复制 {n} 条路径',
         contentFullIndex: '全量内容', contentReasoningIndex: '含思考内容',
         panelFilter: '过滤当前结果…', filterEmpty: '已加载结果中没有符合过滤条件的内容', panelLoadMore: '加载更多', panelHistory: '最近搜索', panelHistoryClear: '清空',
+        rootFilter: '根目录', allRoots: '全部根目录', exportTitle: '导出结果', exportCsv: 'CSV', exportJson: 'JSON', exportDone: '已导出', exportFailed: '导出失败',
       },
       es: {
         scopeContent: 'Contenido', scopeFiles: 'Archivos', scopeDirs: 'Carpetas',
@@ -340,6 +342,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         copyAll: 'Copiar rutas', copiedAll: 'Se copiaron {n} rutas',
         contentFullIndex: 'índice completo', contentReasoningIndex: 'razonamiento indexado',
         panelFilter: 'Filtrar resultados cargados…', filterEmpty: 'Ningún resultado cargado coincide con el filtro', panelLoadMore: 'Cargar más', panelHistory: 'Búsquedas recientes', panelHistoryClear: 'Borrar',
+        rootFilter: 'Raíz', allRoots: 'Todas las raíces', exportTitle: 'Exportar resultados', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exportado', exportFailed: 'Error al exportar',
       },
       pt: {
         scopeContent: 'Conteúdo', scopeFiles: 'Arquivos', scopeDirs: 'Pastas',
@@ -390,6 +393,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         copyAll: 'Copiar caminhos', copiedAll: '{n} caminhos copiados',
         contentFullIndex: 'índice completo', contentReasoningIndex: 'raciocínio indexado',
         panelFilter: 'Filtrar resultados carregados…', filterEmpty: 'Nenhum resultado carregado corresponde ao filtro', panelLoadMore: 'Carregar mais', panelHistory: 'Buscas recentes', panelHistoryClear: 'Limpar',
+        rootFilter: 'Raiz', allRoots: 'Todas as raízes', exportTitle: 'Exportar resultados', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exportado', exportFailed: 'Falha ao exportar',
       },
       hi: {
         scopeContent: 'सामग्री', scopeFiles: 'फ़ाइलें', scopeDirs: 'फ़ोल्डर',
@@ -440,6 +444,507 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         copyAll: 'पथ कॉपी करें', copiedAll: '{n} पथ कॉपी हुए',
         contentFullIndex: 'पूर्ण इंडेक्स', contentReasoningIndex: 'reasoning इंडेक्स',
         panelFilter: 'लोड किए गए परिणाम छाँटें…', filterEmpty: 'लोड किए गए परिणामों में फ़िल्टर से मेल नहीं', panelLoadMore: 'और लोड करें', panelHistory: 'हाल की खोजें', panelHistoryClear: 'साफ़ करें',
+        rootFilter: 'रूट', allRoots: 'सभी रूट', exportTitle: 'परिणाम निर्यात करें', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'निर्यात हुआ', exportFailed: 'निर्यात विफल',
+      },
+      ja: {
+        scopeContent: "内容",
+        scopeFiles: "ファイル",
+        scopeDirs: "フォルダ",
+        placeholder: "名前・パス・本文・セッションを検索… 例：ext:pdf size:>10mb dm:thisweek path:src",
+        searchLabel: "ファイルを検索",
+        dialog: "ローカルファイル検索",
+        closeTitle: "閉じる (Esc)",
+        closeLabel: "閉じる",
+        sortLabel: "並べ替え",
+        sortMtime: "更新日時",
+        sortName: "名前",
+        sortSize: "サイズ",
+        sortPath: "パス",
+        asc: "昇順",
+        descOrder: "降順",
+        groupContent: "内容",
+        groupFiles: "ファイル",
+        groupDirs: "フォルダ",
+        relevance: "関連度順",
+        contentBuilding: "インデックス作成中… {files} ファイル / {messages} メッセージ",
+        contentProgressFiles: "インデックス作成中… {scanned}/{total} ファイル",
+        contentProgressSessions: "インデックス作成中… {scanned}/{total} セッション",
+        contentShort: "本文とセッションを検索するには 3 文字以上入力してください (短い検索は Ctrl+F)",
+        contentDisabled: "コンテンツインデックスは無効です (contentIndex: false)",
+        contentCapped: "先頭 {n} 件",
+        showing: "先頭 {n} 件",
+        deduped: "{n} 件の名前ヒットをコンテンツに統合",
+        loading: "検索中…",
+        emptyQuery: "ファイル名・パス・本文・セッションを検索するには入力してください",
+        emptyResults: "一致なし · 範囲を減らすか別のキーワードを試してください",
+        emptyScopes: "範囲を 1 つ以上選択してください (内容・ファイル・フォルダ)",
+        errorPrefix: "検索に失敗しました：",
+        retry: "再試行",
+        indexing: "インデックス作成中、結果が不完全な場合があります",
+        statusLoading: "インデックス状態を読み込み中…",
+        status: "インデックス {entries} 件 · {mode} · ルート {roots} 件",
+        live: "リアルタイム",
+        snapshot: "スナップショット",
+        usn: "USN",
+        copiedPath: "パスをコピーしました",
+        revealed: "ファイルマネージャーで表示しました",
+        opened: "開きました",
+        inserted: "@file を挿入しました",
+        insertFailed: "挿入に失敗しました。@file をコピーしました",
+        jumped: "セッションを開きました",
+        jumpFailed: "セッションは開きましたが、一致箇所を特定できませんでした",
+        footer: "↑↓ 選択 · Enter 開く/ジャンプ · Ctrl+Shift+C パスをコピー · Ctrl+O 開く · Alt+1–3 範囲 · Esc 閉じる",
+        results: "内容 {content} · ファイル {files} · フォルダ {dirs} · {ms} ms",
+        launcher: "ローカルファイル検索 (Ctrl+Shift+F)",
+        justNow: "たった今",
+        minutesAgo: "{n} 分前",
+        hoursAgo: "{n} 時間前",
+        phraseNotFound: "会話内に一致が見つかりません (まだ読み込まれていない可能性があります)",
+        findOpen: "会話内を検索",
+        findTitle: "会話内を検索",
+        findAria: "会話内を検索",
+        findPlaceholder: "会話内を検索…",
+        findPlaceholderSelection: "選択範囲内を検索…",
+        findPrev: "前の一致 (Shift+F3)",
+        findNext: "次の一致 (F3)",
+        findClose: "閉じる (Esc)",
+        findCase: "大文字と小文字を区別",
+        findWhole: "単語単位で検索",
+        findWrap: "折り返し",
+        findReverse: "逆方向に検索",
+        findMode: "モード",
+        modeNormal: "通常",
+        modeExtended: "拡張",
+        modeRegex: "正規表現",
+        findScope: "選択範囲内",
+        findScopeChip: "選択範囲 {n} 文字",
+        findSessionChip: "この会話",
+        findNoMatch: "一致なし",
+        findEmpty: "この会話内を検索するには入力してください",
+        findInvalidRegex: "正規表現が無効です：{message}",
+        findInvalidEscape: "拡張エスケープが無効です：{token}",
+        findTimeout: "正規表現がタイムアウトしました。式を簡略化してください",
+        findRegexUnavailable: "ここでは正規表現検索を利用できません (worker がブロックされています)",
+        findWrappedTop: "先頭に戻りました",
+        findWrappedBottom: "末尾に戻りました",
+        findNoWrapEnd: "最後の一致に到達しました (折り返しオフ)",
+        findNoWrapStart: "最初の一致に到達しました (折り返しオフ)",
+        findOlder: "以前のメッセージを読み込んで再試行",
+        findLoadingOlder: "以前のメッセージを読み込み中…",
+        findLoadedOnly: "読み込み済みの範囲のみ · 以前の履歴は未読み込み",
+        findCapped: "上限あり",
+        findCopied: "一致箇所をコピーしました",
+        findSelectionLost: "選択範囲が無効になりました。会話全体を検索します",
+        findNoSession: "先に会話を開いてください",
+        findOptions: "オプション",
+        findExtendedHelp: "拡張：\\n \\r \\t \\0 \\xHH \\\\",
+        panelTotal: "選択 {index}/{total}",
+        panelRangeAll: "インデックス全体",
+        panelRangeSession: "この会話",
+        panelSessionHint: "この範囲はインデックス済みのセッションメッセージのみ検索します。会話内のライブ検索は Ctrl+F を使ってください",
+        panelRegexPaused: "正規表現モード中はコンテンツ範囲を一時停止",
+        panelCountBounded: "≥ {n}",
+        panelCountExact: "{n}",
+        contentWarning: "インデックス警告：{list}",
+        contentBudget: "コンテンツインデックスの上限に達しました。一部のファイルはインデックスされていません",
+        contentTooShort: "コンテンツ検索には 3 文字以上必要です (短い検索は Ctrl+F)",
+        contentTimeout: "コンテンツ検索がタイムアウトしました。キーワードまたは範囲を絞ってください",
+        contentBadChars: "コンテンツ検索は NUL/制御文字に対応していません",
+        panelCaseShort: "Aa",
+        panelWholeShort: "単語",
+        panelModeLabel: "モード",
+        watchDegraded: "ファイル監視が低下中 · 定期更新で動作中",
+        copyAll: "パスをコピー",
+        copiedAll: "{n} 件のパスをコピーしました",
+        contentFullIndex: "full-index",
+        contentReasoningIndex: "reasoning-indexed",
+        panelFilter: "読み込み済みの結果を絞り込む…",
+        filterEmpty: "絞り込みに一致する読み込み済みの結果はありません",
+        panelLoadMore: "さらに読み込む",
+        panelHistory: "最近の検索",
+        panelHistoryClear: "クリア",
+        rootFilter: "ルート",
+        allRoots: "すべてのルート",
+        exportTitle: "結果をエクスポート",
+        exportCsv: "CSV",
+        exportJson: "JSON",
+        exportDone: "エクスポートしました",
+        exportFailed: "エクスポートに失敗しました",
+      },
+      fr: {
+        scopeContent: "Contenu",
+        scopeFiles: "Fichiers",
+        scopeDirs: "Dossiers",
+        placeholder: "Recherchez noms, chemins, contenus ou sessions… p. ex. ext:pdf size:>10mb dm:thisweek path:src",
+        searchLabel: "Rechercher des fichiers",
+        dialog: "Recherche de fichiers locale",
+        closeTitle: "Fermer (Échap)",
+        closeLabel: "Fermer",
+        sortLabel: "Trier",
+        sortMtime: "Modification",
+        sortName: "Nom",
+        sortSize: "Taille",
+        sortPath: "Chemin",
+        asc: "Croissant",
+        descOrder: "Décroissant",
+        groupContent: "Contenu",
+        groupFiles: "Fichiers",
+        groupDirs: "Dossiers",
+        relevance: "par pertinence",
+        contentBuilding: "indexation… {files} fichiers / {messages} messages",
+        contentProgressFiles: "indexation… {scanned}/{total} fichiers",
+        contentProgressSessions: "indexation… {scanned}/{total} sessions",
+        contentShort: "Saisissez au moins 3 caractères pour chercher dans les contenus et les sessions (Ctrl+F gère les requêtes plus courtes)",
+        contentDisabled: "L’index de contenu est désactivé (contentIndex: false)",
+        contentCapped: "{n} premiers",
+        showing: "{n} premiers",
+        deduped: "{n} correspondances de noms fusionnées dans le contenu",
+        loading: "Recherche…",
+        emptyQuery: "Saisissez pour rechercher des noms, chemins, contenus et sessions",
+        emptyResults: "Aucun résultat · essayez moins de portées ou un autre mot-clé",
+        emptyScopes: "Sélectionnez au moins une portée (Contenu, Fichiers, Dossiers)",
+        errorPrefix: "Échec de la recherche : ",
+        retry: "Réessayer",
+        indexing: "indexation en cours, résultats peut-être incomplets",
+        statusLoading: "Lecture de l’état de l’index…",
+        status: "Index : {entries} entrées · {mode} · {roots} racines",
+        live: "en direct",
+        snapshot: "instantané",
+        usn: "USN",
+        copiedPath: "Chemin copié",
+        revealed: "Révélé dans le gestionnaire de fichiers",
+        opened: "Ouvert",
+        inserted: "@file inséré",
+        insertFailed: "Échec de l’insertion ; @file copié",
+        jumped: "Session ouverte",
+        jumpFailed: "Session ouverte, mais correspondance introuvable",
+        footer: "↑↓ sélectionner · Entrée ouvrir/aller à · Ctrl+Shift+C copier le chemin · Ctrl+O ouvrir · Alt+1–3 portées · Échap fermer",
+        results: "contenu {content} · fichiers {files} · dossiers {dirs} · {ms} ms",
+        launcher: "Recherche de fichiers locale (Ctrl+Shift+F)",
+        justNow: "à l’instant",
+        minutesAgo: "il y a {n} min",
+        hoursAgo: "il y a {n} h",
+        phraseNotFound: "Aucune correspondance dans la conversation (pas encore chargée ?)",
+        findOpen: "Rechercher dans la conversation",
+        findTitle: "Rechercher dans la conversation",
+        findAria: "Rechercher dans la conversation",
+        findPlaceholder: "Rechercher dans la conversation…",
+        findPlaceholderSelection: "Rechercher dans la sélection…",
+        findPrev: "Correspondance précédente (Shift+F3)",
+        findNext: "Correspondance suivante (F3)",
+        findClose: "Fermer (Échap)",
+        findCase: "Respecter la casse",
+        findWhole: "Mot entier",
+        findWrap: "Boucler",
+        findReverse: "Rechercher en arrière",
+        findMode: "Mode",
+        modeNormal: "Normal",
+        modeExtended: "Étendu",
+        modeRegex: "Regex",
+        findScope: "Dans la sélection",
+        findScopeChip: "sélection {n} car.",
+        findSessionChip: "cette conversation",
+        findNoMatch: "Aucune correspondance",
+        findEmpty: "Saisissez pour rechercher dans la conversation",
+        findInvalidRegex: "Expression régulière invalide : {message}",
+        findInvalidEscape: "Séquence d’échappement étendue invalide : {token}",
+        findTimeout: "Délai d’exécution de la regex dépassé ; simplifiez l’expression",
+        findRegexUnavailable: "Recherche par regex indisponible ici (worker bloqué)",
+        findWrappedTop: "Retour en haut",
+        findWrappedBottom: "Retour en bas",
+        findNoWrapEnd: "Dernière correspondance atteinte (boucle désactivée)",
+        findNoWrapStart: "Première correspondance atteinte (boucle désactivée)",
+        findOlder: "Chargez les messages plus anciens et réessayez",
+        findLoadingOlder: "Chargement des messages plus anciens…",
+        findLoadedOnly: "fenêtre chargée uniquement · historique antérieur non chargé",
+        findCapped: "limité",
+        findCopied: "Correspondance copiée",
+        findSelectionLost: "Sélection expirée ; recherche dans toute la conversation",
+        findNoSession: "Ouvrez d’abord une conversation",
+        findOptions: "Options",
+        findExtendedHelp: "Étendu : \\n \\r \\t \\0 \\xHH \\\\",
+        panelTotal: "sélectionné {index}/{total}",
+        panelRangeAll: "Tout l’index",
+        panelRangeSession: "Cette conversation",
+        panelSessionHint: "Cette portée ne cherche que dans les messages de session indexés ; appuyez sur Ctrl+F pour une recherche en direct dans la conversation",
+        panelRegexPaused: "Portée contenu suspendue en mode regex",
+        panelCountBounded: "≥ {n}",
+        panelCountExact: "{n}",
+        contentWarning: "Avertissement d’index : {list}",
+        contentBudget: "Budget de l’index de contenu atteint ; certains fichiers ne sont pas indexés",
+        contentTooShort: "Le contenu nécessite au moins 3 caractères (utilisez Ctrl+F pour les recherches plus courtes)",
+        contentTimeout: "Délai de recherche de contenu dépassé ; affinez la requête ou la portée",
+        contentBadChars: "La recherche de contenu ne prend pas en charge les caractères NUL/de contrôle",
+        panelCaseShort: "Aa",
+        panelWholeShort: "Mot",
+        panelModeLabel: "Mode",
+        watchDegraded: "surveillance dégradée ; actualisation périodique active",
+        copyAll: "Copier les chemins",
+        copiedAll: "{n} chemins copiés",
+        contentFullIndex: "full-index",
+        contentReasoningIndex: "reasoning-indexed",
+        panelFilter: "Filtrer les résultats chargés…",
+        filterEmpty: "Aucun résultat chargé ne correspond à ce filtre",
+        panelLoadMore: "Charger plus",
+        panelHistory: "Recherches récentes",
+        panelHistoryClear: "Effacer",
+        rootFilter: "Racine",
+        allRoots: "Toutes les racines",
+        exportTitle: "Exporter les résultats",
+        exportCsv: "CSV",
+        exportJson: "JSON",
+        exportDone: "Exporté",
+        exportFailed: "Échec de l’export",
+      },
+      de: {
+        scopeContent: "Inhalt",
+        scopeFiles: "Dateien",
+        scopeDirs: "Ordner",
+        placeholder: "Namen, Pfade, Texte oder Sitzungen suchen… z. B. ext:pdf size:>10mb dm:thisweek path:src",
+        searchLabel: "Dateien suchen",
+        dialog: "Lokale Dateisuche",
+        closeTitle: "Schließen (Esc)",
+        closeLabel: "Schließen",
+        sortLabel: "Sortieren",
+        sortMtime: "Geändert",
+        sortName: "Name",
+        sortSize: "Größe",
+        sortPath: "Pfad",
+        asc: "Aufsteigend",
+        descOrder: "Absteigend",
+        groupContent: "Inhalt",
+        groupFiles: "Dateien",
+        groupDirs: "Ordner",
+        relevance: "nach Relevanz",
+        contentBuilding: "Indexierung läuft… {files} Dateien / {messages} Nachrichten",
+        contentProgressFiles: "Indexierung läuft… {scanned}/{total} Dateien",
+        contentProgressSessions: "Indexierung läuft… {scanned}/{total} Sitzungen",
+        contentShort: "Mindestens 3 Zeichen eingeben, um Texte und Sitzungen zu durchsuchen (Ctrl+F für kürzere Suchbegriffe)",
+        contentDisabled: "Inhaltsindex ist deaktiviert (contentIndex: false)",
+        contentCapped: "erste {n}",
+        showing: "erste {n}",
+        deduped: "{n} Namensreffer in Inhalt zusammengeführt",
+        loading: "Suche…",
+        emptyQuery: "Tippen, um Dateinamen, Pfade, Texte und Sitzungen zu durchsuchen",
+        emptyResults: "Keine Treffer · weniger Bereiche oder anderen Suchbegriff versuchen",
+        emptyScopes: "Mindestens einen Bereich auswählen (Inhalt, Dateien, Ordner)",
+        errorPrefix: "Suche fehlgeschlagen: ",
+        retry: "Erneut versuchen",
+        indexing: "Indexierung läuft, Ergebnisse evtl. unvollständig",
+        statusLoading: "Indexstatus wird gelesen…",
+        status: "Index {entries} Einträge · {mode} · {roots} Stammverzeichnisse",
+        live: "live",
+        snapshot: "Snapshot",
+        usn: "USN",
+        copiedPath: "Pfad kopiert",
+        revealed: "Im Dateimanager angezeigt",
+        opened: "Geöffnet",
+        inserted: "@file eingefügt",
+        insertFailed: "Einfügen fehlgeschlagen; @file kopiert",
+        jumped: "Sitzung geöffnet",
+        jumpFailed: "Sitzung geöffnet, Treffer aber nicht gefunden",
+        footer: "↑↓ auswählen · Enter öffnen/springen · Ctrl+Shift+C Pfad kopieren · Ctrl+O öffnen · Alt+1–3 Bereiche · Esc schließen",
+        results: "Inhalt {content} · Dateien {files} · Ordner {dirs} · {ms} ms",
+        launcher: "Lokale Dateisuche (Ctrl+Shift+F)",
+        justNow: "gerade eben",
+        minutesAgo: "vor {n} Min.",
+        hoursAgo: "vor {n} Std.",
+        phraseNotFound: "Kein Treffer in der Unterhaltung (evtl. noch nicht geladen)",
+        findOpen: "In Unterhaltung suchen",
+        findTitle: "In Unterhaltung suchen",
+        findAria: "In Unterhaltung suchen",
+        findPlaceholder: "In Unterhaltung suchen…",
+        findPlaceholderSelection: "In Auswahl suchen…",
+        findPrev: "Vorheriger Treffer (Shift+F3)",
+        findNext: "Nächster Treffer (F3)",
+        findClose: "Schließen (Esc)",
+        findCase: "Groß-/Kleinschreibung beachten",
+        findWhole: "Ganzes Wort",
+        findWrap: "Umlaufend suchen",
+        findReverse: "Rückwärts suchen",
+        findMode: "Modus",
+        modeNormal: "Normal",
+        modeExtended: "Erweitert",
+        modeRegex: "Regex",
+        findScope: "In Auswahl",
+        findScopeChip: "Auswahl {n} Zeichen",
+        findSessionChip: "diese Unterhaltung",
+        findNoMatch: "Keine Treffer",
+        findEmpty: "Tippen, um in dieser Unterhaltung zu suchen",
+        findInvalidRegex: "Ungültiger regulärer Ausdruck: {message}",
+        findInvalidEscape: "Ungültige Extended-Escape-Sequenz: {token}",
+        findTimeout: "Zeitüberschreitung bei Regex; Ausdruck vereinfachen",
+        findRegexUnavailable: "Regex-Suche ist hier nicht verfügbar (Worker blockiert)",
+        findWrappedTop: "Am Anfang fortgesetzt",
+        findWrappedBottom: "Am Ende fortgesetzt",
+        findNoWrapEnd: "Letzter Treffer erreicht (Umlauf aus)",
+        findNoWrapStart: "Erster Treffer erreicht (Umlauf aus)",
+        findOlder: "Frühere Nachrichten laden und erneut versuchen",
+        findLoadingOlder: "Frühere Nachrichten werden geladen…",
+        findLoadedOnly: "nur geladener Bereich · frühere Historie nicht geladen",
+        findCapped: "begrenzt",
+        findCopied: "Treffer kopiert",
+        findSelectionLost: "Auswahl abgelaufen; gesamte Unterhaltung wird durchsucht",
+        findNoSession: "Zuerst eine Unterhaltung öffnen",
+        findOptions: "Optionen",
+        findExtendedHelp: "Erweitert: \\n \\r \\t \\0 \\xHH \\\\",
+        panelTotal: "ausgewählt {index}/{total}",
+        panelRangeAll: "Gesamter Index",
+        panelRangeSession: "Diese Unterhaltung",
+        panelSessionHint: "Dieser Bereich durchsucht nur indizierte Sitzungsnachrichten; Ctrl+F für die Live-Suche in der Unterhaltung",
+        panelRegexPaused: "Inhaltssuche im Regex-Modus pausiert",
+        panelCountBounded: "≥ {n}",
+        panelCountExact: "{n}",
+        contentWarning: "Indexwarnung: {list}",
+        contentBudget: "Budget des Inhaltsindex erreicht; einige Dateien sind nicht indiziert",
+        contentTooShort: "Inhalt braucht mindestens 3 Zeichen (Ctrl+F für kürzere Suchen)",
+        contentTimeout: "Zeitüberschreitung bei der Inhaltssuche; Suchanfrage oder Bereich einschränken",
+        contentBadChars: "Inhaltssuche unterstützt keine NUL-/Steuerzeichen",
+        panelCaseShort: "Aa",
+        panelWholeShort: "Wort",
+        panelModeLabel: "Modus",
+        watchDegraded: "Watcher eingeschränkt; regelmäßige Aktualisierung aktiv",
+        copyAll: "Pfade kopieren",
+        copiedAll: "{n} Pfade kopiert",
+        contentFullIndex: "full-index",
+        contentReasoningIndex: "reasoning-indexed",
+        panelFilter: "Geladene Ergebnisse filtern…",
+        filterEmpty: "Kein geladenes Ergebnis entspricht diesem Filter",
+        panelLoadMore: "Mehr laden",
+        panelHistory: "Letzte Suchen",
+        panelHistoryClear: "Löschen",
+        rootFilter: "Stammverzeichnis",
+        allRoots: "Alle Stammverzeichnisse",
+        exportTitle: "Ergebnisse exportieren",
+        exportCsv: "CSV",
+        exportJson: "JSON",
+        exportDone: "Exportiert",
+        exportFailed: "Export fehlgeschlagen",
+      },
+      ru: {
+        scopeContent: "Содержимое",
+        scopeFiles: "Файлы",
+        scopeDirs: "Папки",
+        placeholder: "Поиск по именам, путям, содержимому или сессиям… напр. ext:pdf size:>10mb dm:thisweek path:src",
+        searchLabel: "Поиск файлов",
+        dialog: "Локальный поиск файлов",
+        closeTitle: "Закрыть (Esc)",
+        closeLabel: "Закрыть",
+        sortLabel: "Сортировка",
+        sortMtime: "По изменению",
+        sortName: "По имени",
+        sortSize: "По размеру",
+        sortPath: "По пути",
+        asc: "По возрастанию",
+        descOrder: "По убыванию",
+        groupContent: "Содержимое",
+        groupFiles: "Файлы",
+        groupDirs: "Папки",
+        relevance: "по релевантности",
+        contentBuilding: "индексация… {files} файлов / {messages} сообщений",
+        contentProgressFiles: "индексация… {scanned}/{total} файлов",
+        contentProgressSessions: "индексация… {scanned}/{total} сессий",
+        contentShort: "Введите не менее 3 символов для поиска по содержимому и сессиям (для коротких запросов используйте Ctrl+F)",
+        contentDisabled: "Индекс содержимого отключён (contentIndex: false)",
+        contentCapped: "первые {n}",
+        showing: "первые {n}",
+        deduped: "{n} совпадений по именам объединено с содержимым",
+        loading: "Поиск…",
+        emptyQuery: "Введите запрос для поиска по именам файлов, путям, содержимому и сессиям",
+        emptyResults: "Нет совпадений · сократите области поиска или смените запрос",
+        emptyScopes: "Выберите хотя бы одну область (Содержимое, Файлы, Папки)",
+        errorPrefix: "Ошибка поиска: ",
+        retry: "Повторить",
+        indexing: "идёт индексация, результаты могут быть неполными",
+        statusLoading: "Чтение состояния индекса…",
+        status: "Индекс: {entries} записей · {mode} · корней: {roots}",
+        live: "в реальном времени",
+        snapshot: "снимок",
+        usn: "USN",
+        copiedPath: "Путь скопирован",
+        revealed: "Показано в файловом менеджере",
+        opened: "Открыто",
+        inserted: "Вставлено @file",
+        insertFailed: "Вставка не удалась; @file скопирован",
+        jumped: "Сессия открыта",
+        jumpFailed: "Сессия открыта, но совпадение не найдено",
+        footer: "↑↓ выбрать · Enter открыть/перейти · Ctrl+Shift+C копировать путь · Ctrl+O открыть · Alt+1–3 области · Esc закрыть",
+        results: "содержимое {content} · файлы {files} · папки {dirs} · {ms} мс",
+        launcher: "Локальный поиск файлов (Ctrl+Shift+F)",
+        justNow: "только что",
+        minutesAgo: "{n} мин назад",
+        hoursAgo: "{n} ч назад",
+        phraseNotFound: "В беседе нет совпадений (возможно, она ещё не загружена)",
+        findOpen: "Найти в беседе",
+        findTitle: "Найти в беседе",
+        findAria: "Найти в беседе",
+        findPlaceholder: "Найти в беседе…",
+        findPlaceholderSelection: "Найти в выделении…",
+        findPrev: "Предыдущее совпадение (Shift+F3)",
+        findNext: "Следующее совпадение (F3)",
+        findClose: "Закрыть (Esc)",
+        findCase: "С учётом регистра",
+        findWhole: "Слово целиком",
+        findWrap: "Переход по кругу",
+        findReverse: "Обратный поиск",
+        findMode: "Режим",
+        modeNormal: "Обычный",
+        modeExtended: "Расширенный",
+        modeRegex: "Regex",
+        findScope: "В выделении",
+        findScopeChip: "выделено {n} симв.",
+        findSessionChip: "эта беседа",
+        findNoMatch: "Нет совпадений",
+        findEmpty: "Введите текст для поиска в этой беседе",
+        findInvalidRegex: "Некорректное регулярное выражение: {message}",
+        findInvalidEscape: "Некорректный escape в расширенном режиме: {token}",
+        findTimeout: "Время ожидания regex истекло; упростите выражение",
+        findRegexUnavailable: "Поиск по regex здесь недоступен (worker заблокирован)",
+        findWrappedTop: "Переход к началу",
+        findWrappedBottom: "Переход к концу",
+        findNoWrapEnd: "Достигнуто последнее совпадение (переход по кругу выключен)",
+        findNoWrapStart: "Достигнуто первое совпадение (переход по кругу выключен)",
+        findOlder: "Загрузите более ранние сообщения и повторите",
+        findLoadingOlder: "Загрузка более ранних сообщений…",
+        findLoadedOnly: "только загруженное окно · ранняя история не загружена",
+        findCapped: "ограничено",
+        findCopied: "Совпадение скопировано",
+        findSelectionLost: "Выделение сброшено; поиск по всей беседе",
+        findNoSession: "Сначала откройте беседу",
+        findOptions: "Параметры",
+        findExtendedHelp: "Расширенный: \\n \\r \\t \\0 \\xHH \\\\",
+        panelTotal: "выбрано {index}/{total}",
+        panelRangeAll: "Весь индекс",
+        panelRangeSession: "Эта беседа",
+        panelSessionHint: "Эта область ищет только проиндексированные сообщения сессий; для поиска в текущей беседе нажмите Ctrl+F",
+        panelRegexPaused: "В режиме regex поиск по содержимому приостановлен",
+        panelCountBounded: "≥ {n}",
+        panelCountExact: "{n}",
+        contentWarning: "Предупреждение индекса: {list}",
+        contentBudget: "Достигнут лимит индекса содержимого; часть файлов не проиндексирована",
+        contentTooShort: "Для поиска по содержимому нужно не менее 3 символов (для коротких запросов используйте Ctrl+F)",
+        contentTimeout: "Время ожидания поиска по содержимому истекло; сузьте запрос или область",
+        contentBadChars: "Поиск по содержимому не поддерживает NUL и управляющие символы",
+        panelCaseShort: "Aa",
+        panelWholeShort: "Слово",
+        panelModeLabel: "Режим",
+        watchDegraded: "watcher работает в ограниченном режиме; включено периодическое обновление",
+        copyAll: "Копировать пути",
+        copiedAll: "Скопировано путей: {n}",
+        contentFullIndex: "full-index",
+        contentReasoningIndex: "reasoning-indexed",
+        panelFilter: "Фильтр загруженных результатов…",
+        filterEmpty: "Ни один загруженный результат не соответствует фильтру",
+        panelLoadMore: "Загрузить ещё",
+        panelHistory: "Недавние запросы",
+        panelHistoryClear: "Очистить",
+        rootFilter: "Корень",
+        allRoots: "Все корни",
+        exportTitle: "Экспорт результатов",
+        exportCsv: "CSV",
+        exportJson: "JSON",
+        exportDone: "Экспортировано",
+        exportFailed: "Не удалось экспортировать",
       },
     }
     const LANG = (() => {
@@ -451,6 +956,10 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
       if (tag.startsWith('es')) return 'es'
       if (tag.startsWith('pt')) return 'pt'
       if (tag.startsWith('hi')) return 'hi'
+      if (tag.startsWith('ja')) return 'ja'
+      if (tag.startsWith('fr')) return 'fr'
+      if (tag.startsWith('de')) return 'de'
+      if (tag.startsWith('ru')) return 'ru'
       return 'en'
     })()
     const TEXT = STRINGS[LANG]
@@ -1376,7 +1885,23 @@ self.onmessage = event => {
       const loadOlderTimerRef = useRef(0)
       const returnFocusRef = useRef(null)
       const [anchor, setAnchor] = useState(null)
+      const [queryHistory, setQueryHistory] = useState(readFindHistory)
       const composingRef = useRef(false)
+
+      useEffect(() => {
+        if (!state.open) return undefined
+        const text = state.query.trim()
+        if (text.length < 2) return undefined
+        const timer = setTimeout(() => {
+          setQueryHistory(previous => {
+            if (previous[0] === text) return previous
+            const next = [text, ...previous.filter(value => value !== text)].slice(0, 20)
+            writeFindHistory(next)
+            return next
+          })
+        }, 1200)
+        return () => clearTimeout(timer)
+      }, [state.open, state.query])
 
       const applyHighlight = useCallback((index) => {
         const matches = matchesRef.current
@@ -1699,6 +2224,7 @@ self.onmessage = event => {
             placeholder: state.scope === 'selection' ? t('findPlaceholderSelection') : t('findPlaceholder'),
             'aria-label': t('findAria'),
             'aria-invalid': state.error !== '' ? 'true' : undefined,
+            list: 'dsh-locator-find-history',
             spellCheck: false,
             autoComplete: 'off',
             onInput,
@@ -1757,6 +2283,9 @@ self.onmessage = event => {
           h('kbd', null, 'Shift+Enter'), h('span', null, '↑'),
           h('kbd', null, 'Esc'),
         ),
+        queryHistory.length > 0
+          ? h('datalist', { id: 'dsh-locator-find-history' }, queryHistory.map(value => h('option', { key: value, value })))
+          : null,
       )
     }
 
@@ -1769,6 +2298,17 @@ self.onmessage = event => {
     }
     function writePanelHistory(list) {
       try { localStorage.setItem(PANEL_HISTORY_KEY, JSON.stringify(list.slice(0, 10))) } catch { /* ignore */ }
+    }
+
+    const FIND_HISTORY_KEY = 'dsh-locator-find-history-v1'
+    function readFindHistory() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(FIND_HISTORY_KEY) || '[]')
+        return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string').slice(0, 20) : []
+      } catch { return [] }
+    }
+    function writeFindHistory(list) {
+      try { localStorage.setItem(FIND_HISTORY_KEY, JSON.stringify(list.slice(0, 20))) } catch { /* ignore */ }
     }
 
     function Panel() {
@@ -1792,6 +2332,7 @@ self.onmessage = event => {
       const [caseSensitive, setCaseSensitive] = useState(prefs.caseSensitive === true)
       const [wholeWord, setWholeWord] = useState(prefs.wholeWord === true)
       const [sessionOnly, setSessionOnly] = useState(false)
+      const [rootFilter, setRootFilter] = useState('')
       const [selected, setSelected] = useState(0)
       const [toast, setToast] = useState('')
       const [refreshTick, setRefreshTick] = useState(0)
@@ -1916,6 +2457,7 @@ self.onmessage = event => {
             caseSensitive,
             wholeWord,
             sessionId: sessionOnly ? activeSessionId : '',
+            root: rootFilter,
             count: matchMode === 'regex' ? 'none' : 'exact',
           }, controller.signal).then(data => {
             if (controller.signal.aborted) return
@@ -1997,6 +2539,51 @@ self.onmessage = event => {
         const paths = rows.map(entry => entry.hit.path).filter(path => typeof path === 'string' && path !== '')
         if (paths.length === 0) return
         copyText(paths.join('\n')).then(() => notify(t('copiedAll', { n: paths.length }))).catch(() => {})
+      }, [notify, rows])
+
+      const exportRows = useCallback(format => {
+        if (rows.length === 0) return
+        const records = rows.map(({ group, hit }) => ({
+          group,
+          kind: typeof hit.kind === 'string' ? hit.kind : group,
+          path: typeof hit.path === 'string' ? hit.path : '',
+          name: typeof hit.name === 'string' ? hit.name : (typeof hit.title === 'string' ? hit.title : ''),
+          size: typeof hit.size === 'number' ? hit.size : null,
+          mtime: typeof hit.mtime === 'number' ? hit.mtime : null,
+          line: typeof hit.line === 'number' ? hit.line : null,
+          sessionId: typeof hit.sessionId === 'string' ? hit.sessionId : null,
+          messageId: typeof hit.messageId === 'string' ? hit.messageId : null,
+          snippet: typeof hit.snippet === 'string' ? hit.snippet : '',
+        }))
+        let text, mime, extension
+        if (format === 'json') {
+          text = JSON.stringify(records, null, 2)
+          mime = 'application/json'
+          extension = 'json'
+        } else {
+          const columns = ['group', 'kind', 'path', 'name', 'size', 'mtime', 'line', 'sessionId', 'messageId', 'snippet']
+          const cell = value => {
+            const string = value === null || value === undefined ? '' : String(value)
+            return /[",\r\n]/.test(string) ? '"' + string.replace(/"/g, '""') + '"' : string
+          }
+          text = [columns.join(','), ...records.map(record => columns.map(column => cell(record[column])).join(','))].join('\r\n')
+          mime = 'text/csv'
+          extension = 'csv'
+        }
+        try {
+          const blob = new Blob([text], { type: mime + ';charset=utf-8' })
+          const url = URL.createObjectURL(blob)
+          const link = document.createElement('a')
+          link.href = url
+          link.download = 'dsh-locator-results-' + Date.now() + '.' + extension
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setTimeout(() => URL.revokeObjectURL(url), 1000)
+          notify(t('exportDone'))
+        } catch {
+          notify(t('exportFailed'))
+        }
       }, [notify, rows])
 
       const reveal = useCallback(hit => {
@@ -2141,6 +2728,7 @@ self.onmessage = event => {
             caseSensitive,
             wholeWord,
             sessionId: sessionOnly ? activeSessionId : '',
+            root: rootFilter,
             count: matchMode === 'regex' ? 'none' : 'exact',
           })
           setGroups(previous => {
@@ -2379,6 +2967,18 @@ self.onmessage = event => {
           scopeBox('content', t('scopeContent'), contentCountText),
           scopeBox('files', t('scopeFiles'), filesCountText),
           scopeBox('dirs', t('scopeDirs'), dirsCountText),
+          status !== null && Array.isArray(status.roots) && status.roots.length > 1
+            ? h('label', { className: 'dsh-locator-check', title: t('rootFilter') }, t('rootFilter'),
+                h('select', {
+                  className: 'dsh-locator-sort',
+                  value: rootFilter,
+                  'aria-label': t('rootFilter'),
+                  onChange: event => { setRootFilter(event.target.value); setSelected(0) },
+                },
+                  h('option', { value: '' }, t('allRoots')),
+                  status.roots.map(root => h('option', { key: root, value: root, title: root }, String(root).split(/[\\/]/).filter(Boolean).pop() || root)),
+                ))
+            : null,
           h('span', { className: 'grow' }),
           h('label', { className: 'dsh-locator-check' + (activeSessionId === '' ? ' disabled' : ''),
             title: activeSessionId === '' ? t('findNoSession') : t('panelSessionHint') },
@@ -2477,6 +3077,12 @@ self.onmessage = event => {
           h('span', { className: 'grow' }),
           rows.length > 0
             ? h('button', { className: 'dsh-locator-dirbtn', onClick: copyAll, title: t('copyAll') }, t('copyAll'))
+            : null,
+          rows.length > 0
+            ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => exportRows('csv'), title: t('exportTitle') }, t('exportCsv'))
+            : null,
+          rows.length > 0
+            ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => exportRows('json'), title: t('exportTitle') }, t('exportJson'))
             : null,
           canLoadMore
             ? h('button', { className: 'dsh-locator-dirbtn', disabled: loadingMore, onClick: loadMore }, loadingMore ? t('loading') : t('panelLoadMore'))

@@ -171,7 +171,7 @@ Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no pé da barra lateral. 
 - **Opções de busca**: a barra de ferramentas oferece modo (Normal / Estendido / Regex), `Aa` para diferenciar maiúsculas, palavra inteira e o escopo da conversa atual. Modo, maiúsculas e palavra inteira valem para nomes de arquivos e pastas; o conteúdo aceita Normal/Estendido/maiúsculas/palavra inteira, e **no modo Regex o escopo de conteúdo pausa** (nomes ainda aceitam regex), para que nenhuma tecla digitada no painel varra o corpus inteiro.
 - **Escopo da conversa atual**: consulta apenas as mensagens já indexadas dessa sessão (uma sessão ativa leva cerca de 2 minutos para entrar no índice); os escopos de arquivos e pastas ficam desabilitados, mas mantêm a marcação. Para navegar ocorrência por ocorrência ao vivo, use a busca na conversa com `Ctrl+F`, logo abaixo.
 - Consultas de conteúdo exigem pelo menos dois caracteres; consultas vazias ou de um caractere não iniciam a construção. Durante a construção o grupo de conteúdo mostra o progresso e os nomes respondem na hora; os escopos e as opções de busca são lembrados.
-- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` movem, `F3`/`Shift+F3` percorrem os resultados em ciclo, `Enter` ativa e `Esc` fecha; o diálogo prende o foco e o restaura ao fechar. O texto segue `navigator.language` (zh/en/es/pt/hi).
+- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` movem, `F3`/`Shift+F3` percorrem os resultados em ciclo, `Enter` ativa e `Esc` fecha; o diálogo prende o foco e o restaura ao fechar. O texto segue `navigator.language` (zh/en/es/pt/hi/ja/fr/de/ru).
 
 ## Busca na conversa (Ctrl+F)
 
@@ -401,6 +401,12 @@ DeepSeek Harness
 ## Memória
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
+
+## Notas de atualização 0.12.0
+
+- Painel: **filtro por raiz** quando há várias raízes (arquivos, pastas e conteúdo ficam limitados à raiz escolhida; a rota revalida que o prefixo está sob uma raiz configurada); **exportação CSV/JSON** dos resultados carregados/filtrados; a barra `Ctrl+F` lembra **buscas recentes** com sugestões nativas do navegador.
+- Textos do cliente em **ja/fr/de/ru** (nove idiomas no total, seguindo o `<html lang>` do host).
+- CI ganha um **job macOS Node smoke não bloqueante**: não obter runner não bloqueia mais o gate de release (como em 0.10.x).
 
 ## Correções 0.11.8
 

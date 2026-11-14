@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0 — 2026-11-14
+
+* Panel: **root filter** for multi-root installs (files, dirs and content hits narrow to the selected root; the route re-authorizes the requested prefix against the configured roots), **CSV/JSON export** of the currently loaded/filtered rows, and **recent-query suggestions** in the `Ctrl+F` find bar (native datalist, stored in localStorage).
+* Client languages: **ja/fr/de/ru** added (nine languages total; every pack carries the same 123 keys, so a missing key only falls back per string).
+* CI: non-blocking **macOS Node smoke** job (`continue-on-error`), so a missing/cancelled hosted runner cannot block a release; the required gate stays Linux/Windows plus the real macOS engine build.
+* `143 tests`; six engine binaries rebuilt at 0.12.0.
+
 ## 0.11.8 — 2026-11-14
 
 * Fix `locator_find` workspace scope when the caller cwd is outside every indexed root: it silently returned only the current session's messages even though there is no workspace file subset to restrict to. File bodies are now searched across the indexed roots while session hits stay limited to the caller session.

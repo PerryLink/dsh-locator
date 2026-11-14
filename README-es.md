@@ -171,7 +171,7 @@ Pulsa `Ctrl+Shift+F` en la GUI web, o haz clic en la lupa del pie de la barra la
 - **Opciones de búsqueda**: la barra de herramientas ofrece el modo (Normal / Extendido / Regex), `Aa` para distinguir mayúsculas y minúsculas, palabra completa y el ámbito de la conversación actual. El modo y las opciones de mayúsculas/palabra completa se aplican a nombres de archivos y carpetas; el contenido admite Normal/Extendido, mayúsculas y palabra completa, pero **en modo regex el grupo de contenido se pausa** y muestra un aviso (los nombres sí admiten regex), de modo que ninguna pulsación del panel recorre toda la biblioteca.
 - **Ámbito de la conversación actual**: solo busca los mensajes ya indexados de esa sesión (una sesión activa tarda unos 2 minutos en quedar indexada), y los ámbitos de archivos y carpetas se desactivan, pero conservan la marca de verificación. Para recorrer coincidencias en vivo usa la barra de `Ctrl+F` que se describe más abajo.
 - Las consultas de contenido requieren al menos dos caracteres; las consultas vacías o de un carácter no inician la construcción. Mientras construye, el grupo de contenido muestra el progreso y los nombres responden al momento; los ámbitos y las opciones de búsqueda se recuerdan.
-- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` mueven, `F3`/`Shift+F3` recorren las filas de resultados en ciclo, `Enter` activa y `Esc` cierra; el diálogo atrapa el foco y lo restaura al cerrar. El texto sigue `navigator.language` (zh/en/es/pt/hi).
+- Teclado: `↑`/`↓`, `Home`/`End`, `PageUp`/`PageDown` mueven, `F3`/`Shift+F3` recorren las filas de resultados en ciclo, `Enter` activa y `Esc` cierra; el diálogo atrapa el foco y lo restaura al cerrar. El texto sigue `navigator.language` (zh/en/es/pt/hi/ja/fr/de/ru).
 
 ## Buscar en la conversación (Ctrl+F)
 
@@ -400,6 +400,12 @@ DeepSeek Harness
 ## Memoria
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
+
+## Notas de actualización 0.12.0
+
+- Panel: **filtro por raíz** cuando hay varias raíces (archivos, carpetas y contenido se limitan a la raíz elegida; la ruta revalida que el prefijo esté bajo una raíz configurada); **exportación CSV/JSON** de los resultados cargados/filtrados; la barra `Ctrl+F` recuerda **búsquedas recientes** con sugerencias nativas del navegador.
+- Textos de cliente en **ja/fr/de/ru** (nueve idiomas en total, siguiendo el `<html lang>` del host).
+- CI añade un **job macOS Node smoke no bloqueante**: no tener runner ya no bloquea la puerta de release (como en 0.10.x).
 
 ## Correcciones 0.11.8
 
