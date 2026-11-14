@@ -1214,6 +1214,12 @@ export class ContentIndex {
   authorizedSessionIds(callerCwd: string | undefined, callerSessionId: string | undefined): Set<string> {
     const allowed = new Set<string>()
     if (callerSessionId !== undefined && callerSessionId !== '') allowed.add(callerSessionId)
+    // Ref resolution (locator_resolve/cite) can run before any content search
+    // started the lazy build. Open the existing database path map first so the
+    // workspace rule does not degrade to "own session only" on a cold start.
+    if (this.db === null && this.sessionCwds.size === 0) {
+      try { this.open(false) } catch { /* incompatible/foreign DB keeps own-session only */ }
+    }
     if (callerCwd === undefined || callerCwd === '') return allowed
     for (const [sessionId, cwd] of this.sessionCwds) {
       if (cwd === callerCwd) allowed.add(sessionId)
