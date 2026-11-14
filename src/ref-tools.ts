@@ -6,11 +6,13 @@
  * @module dsh-locator/ref-tools
  */
 
-import { closeSync, openSync, readSync, statSync } from 'node:fs'
-import { basename } from 'node:path'
+import { createHash } from 'node:crypto'
+import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentIndex } from './content.ts'
-import { decodeSessionRef, freshnessFor, normalizeUrl, parseRef, sha256File, urlRef, type RefProvenance } from './refs.ts'
+import { decodeSessionRef, freshnessFor, normalizeUrl, parseRef, sha256File, urlRef, type ParsedRef, type RefFreshness, type RefProvenance } from './refs.ts'
 import type { LocatorRuntime } from './runtime.ts'
 import { resolveWithinRoots } from './reveal.ts'
 
@@ -35,7 +37,7 @@ const RESOLVE_OUTPUT = {
   properties: {
     ok: { type: 'boolean', required: true },
     ref: { type: 'string' },
-    kind: { type: 'string', enum: ['file', 'session', 'url'] },
+    kind: { type: 'string', enum: ['file', 'session', 'url', 'session-event', 'spill', 'attachment'] },
     hash: { type: 'string' },
     size: { type: 'integer' },
     title: { type: 'string' },
@@ -88,7 +90,7 @@ const CITE_OUTPUT = {
         additionalProperties: false,
         properties: {
           ref: { type: 'string' },
-          kind: { type: 'string', enum: ['file', 'session', 'url'] },
+          kind: { type: 'string', enum: ['file', 'session', 'url', 'session-event', 'spill', 'attachment'] },
           label: { type: 'string' },
           markdown: { type: 'string' },
           mention: { type: 'string' },
@@ -98,6 +100,47 @@ const CITE_OUTPUT = {
     error: { type: 'string' },
   },
 } as const
+
+/** Root of the local attachment store (matches @deepseek-ai/attachment-local). */
+function attachmentsRoot(): string {
+  const home = process.env.DSH_HOME
+  return join(home === undefined || home === '' ? join(homedir(), '.dsh') : home, 'attachments', 'v1')
+}
+
+/** File-host candidates for one attachment digest (images first, then files). */
+function attachmentCandidates(sha256: string): Array<{ path: string; kind: 'image' | 'file' }> {
+  const prefix = sha256.slice(0, 2)
+  const root = attachmentsRoot()
+  return [
+    { path: join(root, 'objects', prefix, sha256), kind: 'image' as const },
+    { path: join(root, 'file-objects', prefix, sha256), kind: 'file' as const },
+  ]
+}
+
+/** Authorized occurrences of one ref key shared by the new ref kinds. */
+function authorizedOccurrences(content: ContentIndex, refKey: string, callerCwd: string | undefined, callerSessionId: string | undefined): ReturnType<ContentIndex['refsFor']> {
+  const allowed = content.authorizedSessionIds(callerCwd, callerSessionId)
+  return content.refsFor(refKey).filter(row => allowed.has(row.sessionId))
+}
+
+/** One denied resolve result. */
+function deniedResult(parsed: ParsedRef, kind: 'session-event' | 'spill' | 'attachment'): {
+  ok: false
+  ref: string
+  kind: 'session-event' | 'spill' | 'attachment'
+  error: string
+  warnings: string[]
+  permissions: { read: 'denied'; visibility: 'session'; reason: string }
+} {
+  return {
+    ok: false,
+    ref: parsed.ref,
+    kind,
+    error: 'content-scope-denied',
+    warnings: ['ref-not-authorized'],
+    permissions: { read: 'denied', visibility: 'session', reason: 'no authorized session occurrence for this ref (caller cwd differs)' },
+  }
+}
 
 /** Build the locator_resolve tool. */
 export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex) {
@@ -212,6 +255,77 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex) {
           ...(excerpt === undefined ? {} : { excerpt }),
         }
       }
+      if (parsed.kind === 'session-event') {
+        if (content === undefined) return { ok: false as const, ref: parsed.ref, kind: 'session-event' as const, error: 'content-index-unavailable' }
+        const allowed = content.authorizedSessionIds(callerCwd, callerSessionId)
+        if (!allowed.has(parsed.sessionId)) return deniedResult(parsed, 'session-event')
+        const indexedAt = content.sessionIndexedMtime(parsed.sessionId)
+        const raw = mode === 'excerpt' ? await content.sessionEventBody(parsed.sessionId, parsed.seq, maxBytes * 2) : undefined
+        const excerpt = raw?.slice(0, maxBytes)
+        return {
+          ok: true as const,
+          ref: parsed.ref,
+          kind: 'session-event' as const,
+          title: `session ${parsed.sessionId.slice(0, 12)} event ${String(parsed.seq)}`,
+          ...(raw === undefined ? {} : { size: raw.length }),
+          provenance: { origin: 'session' as const, sessionId: parsed.sessionId, ...(indexedAt === undefined ? {} : { indexedAt }) },
+          freshness: freshnessFor(indexedAt, indexedAt, observedAt),
+          permissions: { read: 'allowed' as const, visibility: 'session' as const, reason: 'caller workspace authorization' },
+          ...(excerpt === undefined ? {} : { excerpt }),
+          warnings: raw === undefined ? ['event-log-unavailable'] : [],
+        }
+      }
+      if (parsed.kind === 'spill') {
+        if (content === undefined) return { ok: false as const, ref: parsed.ref, kind: 'spill' as const, error: 'content-index-unavailable' }
+        const occurrences = authorizedOccurrences(content, parsed.ref, callerCwd, callerSessionId)
+        if (occurrences.length === 0) return deniedResult(parsed, 'spill')
+        let resolvedPath: string | undefined
+        let size: number | undefined
+        try {
+          if (!statSync(parsed.path).isFile()) return { ok: true as const, ref: parsed.ref, kind: 'spill' as const, error: 'spill-not-a-file', freshness: { state: 'missing' as RefFreshness['state'], observedAt }, warnings: ['spill-not-a-file'] }
+          resolvedPath = realpathSync(parsed.path)
+          size = statSync(resolvedPath).size
+        } catch { resolvedPath = undefined }
+        const ownerId = occurrences[0]?.sessionId
+        const ownerHash = ownerId === undefined ? undefined : createHash('sha256').update(ownerId).digest('hex').slice(0, 12)
+        const dirName = resolvedPath === undefined ? '' : basename(dirname(resolvedPath))
+        const owned = ownerHash === undefined ? true : dirName === `session-${ownerHash}`
+        const excerpt = mode === 'excerpt' && resolvedPath !== undefined ? readHead(resolvedPath, maxBytes) : undefined
+        return {
+          ok: true as const,
+          ref: parsed.ref,
+          kind: 'spill' as const,
+          title: resolvedPath === undefined ? basename(parsed.path) : basename(resolvedPath),
+          ...(size === undefined ? {} : { size }),
+          provenance: { origin: 'tool' as const, ...(ownerId === undefined ? {} : { sessionId: ownerId }), ...(occurrences[0]?.messageId === undefined ? {} : { messageId: occurrences[0].messageId }) },
+          freshness: resolvedPath === undefined ? { state: 'missing' as const, observedAt } : { state: 'fresh' as const, observedAt, mtime: Math.trunc(statSync(resolvedPath).mtimeMs) },
+          permissions: { read: 'allowed' as const, visibility: 'session' as const, reason: 'authorized session occurrence' },
+          ...(excerpt === undefined ? {} : { excerpt }),
+          warnings: [
+            ...(resolvedPath === undefined ? ['spill-file-missing'] : []),
+            ...(owned ? [] : ['spill-owner-mismatch']),
+          ],
+        }
+      }
+      if (parsed.kind === 'attachment') {
+        if (content === undefined) return { ok: false as const, ref: parsed.ref, kind: 'attachment' as const, error: 'content-index-unavailable' }
+        const occurrences = authorizedOccurrences(content, parsed.ref, callerCwd, callerSessionId)
+        if (occurrences.length === 0) return deniedResult(parsed, 'attachment')
+        const found = attachmentCandidates(parsed.sha256).find(candidate => existsSync(candidate.path))
+        const excerpt = mode === 'excerpt' && found !== undefined && found.kind === 'file' ? readHead(found.path, maxBytes) : undefined
+        return {
+          ok: true as const,
+          ref: parsed.ref,
+          kind: 'attachment' as const,
+          title: occurrences[0]?.title ?? `attachment ${parsed.sha256.slice(0, 12)}`,
+          ...(found === undefined ? {} : { size: statSync(found.path).size }),
+          provenance: { origin: 'session' as const, ...(occurrences[0]?.sessionId === undefined ? {} : { sessionId: occurrences[0].sessionId }), ...(occurrences[0]?.messageId === undefined ? {} : { messageId: occurrences[0].messageId }) },
+          freshness: found === undefined ? { state: 'missing' as const, observedAt } : { state: 'fresh' as const, observedAt, mtime: Math.trunc(statSync(found.path).mtimeMs) },
+          permissions: { read: 'allowed' as const, visibility: 'session' as const, reason: 'authorized session occurrence' },
+          ...(excerpt === undefined ? {} : { excerpt }),
+          ...(found === undefined ? { warnings: ['attachment-missing'] } : {}),
+        }
+      }
       // URL refs are metadata only: resolving them does not fetch the network.
       const normalized = normalizeUrl(parsed.url)
       return {
@@ -253,7 +367,7 @@ export function makeCiteTool() {
       const format: 'markdown' | 'mention' | 'json' = args.format === 'mention' ? 'mention' : args.format === 'json' ? 'json' : 'markdown'
       const refs = Array.isArray(args.refs) ? args.refs.filter((ref): ref is string => typeof ref === 'string' && ref.trim() !== '').slice(0, 20) : []
       if (refs.length === 0) return { ok: false as const, format, citations: [], error: 'refs is empty' }
-      const citations: Array<{ ref: string; kind: 'file' | 'session' | 'url'; label: string; markdown: string; mention?: string }> = []
+      const citations: Array<{ ref: string; kind: 'file' | 'session' | 'url' | 'session-event' | 'spill' | 'attachment'; label: string; markdown: string; mention?: string }> = []
       for (const raw of refs) {
         const parsed = parseRef(raw.trim())
         if (parsed === undefined) return { ok: false as const, format, citations: [], error: `invalid-ref: ${raw.slice(0, 80)}` }
@@ -265,6 +379,21 @@ export function makeCiteTool() {
         if (parsed.kind === 'url') {
           const label = parsed.url
           citations.push({ ref: parsed.ref, kind: 'url', label, markdown: `[${label}](${parsed.ref})` })
+          continue
+        }
+        if (parsed.kind === 'session-event') {
+          const label = `session ${parsed.sessionId.slice(0, 12)} event ${String(parsed.seq)}`
+          citations.push({ ref: parsed.ref, kind: 'session-event', label, markdown: `[${label}](${parsed.ref})` })
+          continue
+        }
+        if (parsed.kind === 'spill') {
+          const label = basename(parsed.path)
+          citations.push({ ref: parsed.ref, kind: 'spill', label, markdown: `[${label}](${parsed.ref})` })
+          continue
+        }
+        if (parsed.kind === 'attachment') {
+          const label = `attachment ${parsed.sha256.slice(0, 12)}`
+          citations.push({ ref: parsed.ref, kind: 'attachment', label, markdown: `[${label}](${parsed.ref})` })
           continue
         }
         const label = `session ${parsed.sessionId.slice(0, 12)}`

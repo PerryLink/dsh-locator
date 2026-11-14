@@ -19,7 +19,22 @@ import type {
   ContentSearchOptions,
   ContentSearchResult,
 } from './content-search.ts'
+import { encodeSessionRef, fileRef } from './refs.ts'
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts'
+
+/** Attach the citable ref to one content hit (session URI or path snapshot). */
+function contentHitRef<T extends { kind: string; sessionId?: string; path?: string }>(hit: T): T {
+  if (hit.kind === 'session' && typeof hit.sessionId === 'string' && hit.sessionId !== '') {
+    return { ...hit, ref: encodeSessionRef(hit.sessionId) }
+  }
+  if (typeof hit.path === 'string' && hit.path !== '') return { ...hit, ref: fileRef({ path: hit.path }) }
+  return hit
+}
+
+/** Attach the citable ref to one name hit. */
+function nameHitRef(hit: SearchHit): SearchHit {
+  return hit.dir ? hit : { ...hit, ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }
+}
 
 /** Strip trailing separators from a root so prefix checks are unambiguous. */
 function trimRoot(value: string): string {
@@ -307,7 +322,8 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
       dirsOnly: !files,
     })
     const prefix = request.rootPrefix
-    const hits = prefix === null ? result.hits : result.hits.filter(hit => pathUnderPrefix(hit.path, prefix))
+    const selected = prefix === null ? result.hits : result.hits.filter(hit => pathUnderPrefix(hit.path, prefix))
+    const hits = selected.map(nameHitRef)
     const narrowed = prefix !== null && hits.length !== result.hits.length
     return {
       hits,
@@ -377,10 +393,11 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     deps.ensure?.()
     const result = await deps.contentSearch(request.query, request.contentLimit, options)
     const state = deps.contentStatus?.()
+    const hits = result.hits.map(contentHitRef)
     return {
-      hits: result.hits,
-      returned: result.hits.length,
-      capped: result.hits.length >= request.contentLimit,
+      hits,
+      returned: hits.length,
+      capped: hits.length >= request.contentLimit,
       count: result.count,
       warnings: result.warnings,
       building: state?.building ?? false,

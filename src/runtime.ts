@@ -17,6 +17,8 @@ export interface SearchHit {
   mtime: number
   ext: string
   dir: boolean
+  /** Citable evidence ref for this name hit (ref://file). */
+  ref?: string
 }
 
 /** One search result page. */

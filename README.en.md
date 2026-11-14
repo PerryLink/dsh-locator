@@ -404,6 +404,11 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.15.0 upgrade notes
+
+- **Wave 2 evidence refs**: an additive `refs`/`refs_meta` store in the content DB (no schema bump, no 6.6 GB rebuild) extracts **URLs** (`web_search`/`web_fetch` meta, no tool-result indexing needed), **spill locators** (result notice), **attachment digests** (message blocks) and one **session-event** ref (`ref://session-event?sid=…&seq=N`) per message in the same session-log pass. `locator_resolve`/`locator_cite` support them under the same workspace rule; spill paths are checked for existence, realpath and session-directory ownership, attachments against the local store.
+- The Web panel's combined hits now carry `ref` and result rows have a copy-ref chip (English strings; other locales fall back). Upgrading re-reads session logs once and leaves file documents untouched.
+
 ## 0.14.0 upgrade notes
 
 - **Capability adapter**: `capability_search` (find "who can do this" from a natural-language intent) and `capability_preflight` (visibility, argument-schema validation, approval/sandbox requirements and side effects) read the host's live tool registry (including MCP actions) and skill catalog. No duplicate discovery and no embedding model; snapshots refresh every 60 s.

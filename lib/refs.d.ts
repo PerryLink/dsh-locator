@@ -9,7 +9,7 @@
  * @module dsh-locator/refs
  */
 /** Kinds of addressable objects this release understands. */
-export type RefKind = 'file' | 'session' | 'url';
+export type RefKind = 'file' | 'session' | 'url' | 'session-event' | 'spill' | 'attachment';
 /** Where a hit/ref came from. */
 export interface RefProvenance {
     origin: 'index' | 'tool' | 'session' | 'web';
@@ -75,6 +75,30 @@ export interface FileRefInput {
  * @returns canonical `ref://file` URI.
  */
 export declare function fileRef(input: FileRefInput): string;
+/** Inputs for one addressable session event. */
+export interface SessionEventRefInput {
+    sessionId: string;
+    seq: number;
+}
+/**
+ * Build a ref for one session event. The canonical `dsh-session:` URI cannot
+ * carry a sequence, so event refs use the locator's own scheme.
+ * @param input - session id and event sequence.
+ * @returns canonical `ref://session-event` URI.
+ */
+export declare function sessionEventRef(input: SessionEventRefInput): string;
+/** Build a ref for one spill file (locator plus optional session ownership). */
+export declare function spillRef(input: {
+    path: string;
+    sessionId?: string;
+    seq?: number;
+}): string;
+/** Build a ref for one attachment (identity is the attachment digest). */
+export declare function attachmentRef(input: {
+    sha256: string;
+}): string;
+/** Decode a base64url JSON string id (session-event/spill `sid` parameter). */
+export declare function decodeSessionIdParam(value: string | null): string | undefined;
 /** One parsed ref. */
 export type ParsedRef = {
     kind: 'session';
@@ -90,6 +114,21 @@ export type ParsedRef = {
     ref: string;
     url: string;
     sha256?: string;
+} | {
+    kind: 'session-event';
+    ref: string;
+    sessionId: string;
+    seq: number;
+} | {
+    kind: 'spill';
+    ref: string;
+    path: string;
+    sessionId?: string;
+    seq?: number;
+} | {
+    kind: 'attachment';
+    ref: string;
+    sha256: string;
 };
 /**
  * Parse any ref this release understands.

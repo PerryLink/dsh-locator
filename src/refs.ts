@@ -14,7 +14,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 
 /** Kinds of addressable objects this release understands. */
-export type RefKind = 'file' | 'session' | 'url'
+export type RefKind = 'file' | 'session' | 'url' | 'session-event' | 'spill' | 'attachment'
 
 /** Where a hit/ref came from. */
 export interface RefProvenance {
@@ -106,11 +106,58 @@ export function fileRef(input: FileRefInput): string {
   return `ref://file?${params.toString()}`
 }
 
+/** Inputs for one addressable session event. */
+export interface SessionEventRefInput {
+  sessionId: string
+  seq: number
+}
+
+/**
+ * Build a ref for one session event. The canonical `dsh-session:` URI cannot
+ * carry a sequence, so event refs use the locator's own scheme.
+ * @param input - session id and event sequence.
+ * @returns canonical `ref://session-event` URI.
+ */
+export function sessionEventRef(input: SessionEventRefInput): string {
+  const params = new URLSearchParams()
+  params.set('sid', Buffer.from(JSON.stringify(input.sessionId), 'utf8').toString('base64url'))
+  params.set('seq', String(Math.trunc(input.seq)))
+  return `ref://session-event?${params.toString()}`
+}
+
+/** Build a ref for one spill file (locator plus optional session ownership). */
+export function spillRef(input: { path: string; sessionId?: string; seq?: number }): string {
+  const params = new URLSearchParams()
+  params.set('path', input.path)
+  if (typeof input.sessionId === 'string' && input.sessionId !== '') params.set('sid', Buffer.from(JSON.stringify(input.sessionId), 'utf8').toString('base64url'))
+  if (typeof input.seq === 'number') params.set('seq', String(Math.trunc(input.seq)))
+  return `ref://spill?${params.toString()}`
+}
+
+/** Build a ref for one attachment (identity is the attachment digest). */
+export function attachmentRef(input: { sha256: string }): string {
+  return `ref://attachment?sha256=${encodeURIComponent(input.sha256.toLowerCase())}`
+}
+
+/** Decode a base64url JSON string id (session-event/spill `sid` parameter). */
+export function decodeSessionIdParam(value: string | null): string | undefined {
+  if (value === null || value === '') return undefined
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    return typeof parsed === 'string' && parsed !== '' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** One parsed ref. */
 export type ParsedRef =
   | { kind: 'session'; ref: string; sessionId: string }
   | { kind: 'file'; ref: string; path: string; sha256?: string }
   | { kind: 'url'; ref: string; url: string; sha256?: string }
+  | { kind: 'session-event'; ref: string; sessionId: string; seq: number }
+  | { kind: 'spill'; ref: string; path: string; sessionId?: string; seq?: number }
+  | { kind: 'attachment'; ref: string; sha256: string }
 
 /**
  * Parse any ref this release understands.
@@ -138,6 +185,29 @@ export function parseRef(ref: string): ParsedRef | undefined {
     if (target === null || target === '') return undefined
     const sha256 = url.searchParams.get('sha256') ?? undefined
     return { kind: 'url', ref, url: target, ...(sha256 === undefined || sha256 === '' ? {} : { sha256 }) }
+  }
+  if (url.host === 'session-event') {
+    const sessionId = decodeSessionIdParam(url.searchParams.get('sid'))
+    const seq = Number(url.searchParams.get('seq') ?? '')
+    if (sessionId === undefined || !Number.isInteger(seq) || seq < 0) return undefined
+    return { kind: 'session-event', ref, sessionId, seq }
+  }
+  if (url.host === 'spill') {
+    const path = url.searchParams.get('path')
+    if (path === null || path === '') return undefined
+    const sessionId = decodeSessionIdParam(url.searchParams.get('sid'))
+    const seqRaw = url.searchParams.get('seq')
+    const seq = seqRaw === null ? undefined : Number(seqRaw)
+    return {
+      kind: 'spill', ref, path,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(seq === undefined || !Number.isInteger(seq) ? {} : { seq }),
+    }
+  }
+  if (url.host === 'attachment') {
+    const sha256 = (url.searchParams.get('sha256') ?? '').toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return undefined
+    return { kind: 'attachment', ref, sha256 }
   }
   return undefined
 }

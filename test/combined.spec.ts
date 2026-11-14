@@ -379,4 +379,23 @@ describe('combined search', () => {
     expect(outside.files?.hits.map(hit => hit.path)).toEqual(['/home/user/a.md'])
   })
 
+
+  it('attaches citable evidence refs to content and name hits', async () => {
+    const response = await runCombinedSearch(deps({
+      contentSearch: async () => contentResult([
+        contentHit('file', '/tmp/a.md'),
+        contentHit('session', '/tmp/sessions/s1/session.v4.jsonl.zstd'),
+      ]),
+      search: async args => args.dirsOnly === true ? result([dirHit('/tmp/d')]) : result([fileHit('/tmp/b.md')]),
+    }), readCombinedRequest({ query: 'note' }, 100))
+    const contentHits = response.content?.hits ?? []
+    expect(contentHits[0]?.ref).toMatch(/^ref:\/\/file\?path=%2Ftmp%2Fa\.md/)
+    expect(contentHits[1]?.ref).toMatch(/^dsh-session:/)
+    const fileHits = response.files?.hits ?? []
+    expect(fileHits[0]?.ref).toMatch(/^ref:\/\/file\?path=%2Ftmp%2Fb\.md/)
+    expect(fileHits[0]?.ref).toContain('size=10')
+    const dirHits = response.dirs?.hits ?? []
+    expect(dirHits[0]?.ref).toBeUndefined()
+  })
+
 })

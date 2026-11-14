@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.15.0 — 2026-11-14
+
+* **Wave 2 evidence refs**: `locator_find`/`locator_search` results now resolve URL, session-event, spill and attachment evidence too. Session logs are parsed once into an additive `refs`/`refs_meta` store in `content.db` (no `user_version` bump, no rebuild of the 6.6 GB file index): `web_search`/`web_fetch` URLs from tool-result `meta` (no `contentIndexToolResults` needed), spill locators from the result notice, attachment digests from message blocks, and one session-event ref (`ref://session-event?sid=…&seq=N`) per indexed message.
+* `locator_resolve` handles the new kinds with the same workspace authorization rule (session cwd equality); spill files are checked for existence, realpath and session-directory ownership, attachments against the local attachment store. `locator_cite` renders labels for them.
+* The Web panel's combined endpoint now attaches `ref` to file/directory/session hits and result rows get a copy-ref chip (English strings; other locales fall back).
+* Upgrading an existing index table only re-reads session logs once to fill refs; file documents and their byte counters are untouched.
+* `182 tests`; six engine binaries rebuilt at 0.15.0.
+
 ## 0.14.0 — 2026-11-14
 
 * **Capability adapter (Wave 3, part 1)**: new tools `capability_search(intent, kinds?, riskMax?, ...)` and `capability_preflight(capability, argsJson?)` index the **live** DSH registries — tool definitions (including `mcp__<server>__<tool>` entries) and the skill catalog — and add intent matching, inferred risk (read/write/exec plus approval/sandbox hints), argument-schema validation and side-effect reporting. It reads `ctx.tools.definitions()` / `ctx.skills.list()`; it does not duplicate discovery and has no embedding dependency.

@@ -24,10 +24,11 @@ import { promisify } from 'node:util'
 import { zstdDecompress } from 'node:zlib'
 import { scheduler } from 'node:timers/promises'
 import { DatabaseSync } from 'node:sqlite'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Worker } from 'node:worker_threads'
 import { searchContent, type ContentSearchOptions, type ContentSearchResult } from './content-search.ts'
+import { attachmentRef, normalizeUrl, sessionEventRef, spillRef, urlRef } from './refs.ts'
 import type { LocatorRuntime } from './runtime.ts'
 
 const SCHEMA_VERSION = 3
@@ -69,6 +70,8 @@ export interface ContentHit {
   nodeKey?: string
   /** 1-based line of the first match inside the stored body, for file hits. */
   line?: number
+  /** Citable evidence ref for this hit (session URI or ref://file). */
+  ref?: string
   score: number
 }
 
@@ -455,6 +458,7 @@ export class ContentIndex {
     this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT, node_key TEXT)')
     this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
     if (this.ensureSourcesCwdColumn()) this.needsSessionBackfill = true
+    if (this.ensureRefsTables()) this.needsSessionBackfill = true
     this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_path ON docs_meta(path)')
     if (fresh) {
       this.db.exec('DROP TABLE IF EXISTS content_meta')
@@ -650,6 +654,8 @@ export class ContentIndex {
     this.db!.exec("DELETE FROM docs WHERE rowid IN (SELECT rowid FROM docs_meta WHERE kind = 'session')")
     this.db!.exec("DELETE FROM docs_meta WHERE kind = 'session'")
     this.db!.exec('DELETE FROM sources')
+    this.db!.exec('DELETE FROM refs')
+    this.db!.exec('DELETE FROM refs_meta')
     this.totalBytes = Math.max(0, this.totalBytes - Number(row?.n ?? 0))
   }
 
@@ -820,6 +826,16 @@ export class ContentIndex {
   }
 
   private deletePath(path: string): void {
+    // Session logs own their refs: deleting the path removes its occurrences.
+    const sessionId = basename(dirname(path))
+    if (basename(path).startsWith('session.v4.')) {
+      try {
+        this.db!.prepare('DELETE FROM refs WHERE session_id = ?').run(sessionId)
+      } catch { /* older/foreign databases keep refs best-effort */ }
+    }
+    try {
+      this.db!.prepare('DELETE FROM refs_meta WHERE path = ?').run(path)
+    } catch { /* ignore */ }
     const rows = this.db!.prepare(`SELECT m.rowid AS rowid, length(d.body) AS n
       FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.path = ?`).all(path) as Array<{ rowid: number; n: number }>
     const delDoc = this.db!.prepare('DELETE FROM docs WHERE rowid = ?')
@@ -1028,7 +1044,10 @@ export class ContentIndex {
     let headerCwd: string | null = null
     let title = ''
     let parsed = 0
+    let lineIndex = -1
+    const evidence: EvidenceRefRow[] = []
     for (const line of text.split('\n')) {
+      lineIndex++
       if (!line) continue
       if ((++parsed & 0xff) === 0) {
         await this.breathe()
@@ -1036,6 +1055,12 @@ export class ContentIndex {
       }
       let event: { type?: string; data?: Record<string, unknown> }
       try { event = JSON.parse(line) } catch { continue }
+      // Data events are one line each after the header: their sequence is the
+      // physical line ordinal minus that header line.
+      const eventSeq = Math.max(0, lineIndex - 1)
+      const eventData = event.data ?? {}
+      const rawMessage = (eventData.message ?? {}) as Record<string, unknown>
+      const refMessageId = String(eventData.id ?? rawMessage.id ?? rawMessage.toolCallId ?? `event-${eventSeq}`)
       if (event.type === 'session') {
         // The first physical line is the session header (not a data envelope):
         // `{ type: 'session', id, cwd?, ... }`. It carries the immutable cwd that
@@ -1048,7 +1073,16 @@ export class ContentIndex {
         continue
       }
       const extracted = messageText(event, this.options.includeReasoning === true)
+      // Evidence refs are extracted in the same pass as documents; they do not
+      // depend on the tool-result indexing flag (URL/spill/attachment metadata
+      // lives in the event envelope, not in the FTS body).
+      evidence.push(...extractEvidenceRefs(event, sessionId, extracted?.id ?? refMessageId, eventSeq))
       if (extracted !== undefined) {
+        evidence.push({
+          refKey: sessionEventRef({ sessionId, seq: eventSeq }), kind: 'session-event', target: sessionId,
+          sha256: null, sessionId, messageId: extracted.id, seq: eventSeq, origin: 'session',
+          title: extracted.titleText.replace(/\s+/g, ' ').slice(0, 120) || null, bytes: null, meta: null,
+        })
         if (title === '') title = extracted.titleText.replace(/\s+/g, ' ').slice(0, 90)
         const body = extracted.text.slice(0, SESSION_BODY_BYTES)
         const row: DocRow = { key: `session:${sessionId}:${extracted.id}`, body, kind: 'session', path: file.path, title: title || sessionId, sessionId, messageId: extracted.id, nodeKey: extracted.nodeKey, mtime: file.mtime }
@@ -1085,6 +1119,7 @@ export class ContentIndex {
         if (!this.addDoc(row)) return { ok: false, cwd: headerCwd }
       }
     }
+    this.replaceSessionRefs(sessionId, file.path, file.mtime, evidence)
     return { ok: true, cwd: headerCwd }
   }
 
@@ -1105,6 +1140,48 @@ export class ContentIndex {
       out.push(file)
     }
     return out
+  }
+
+  /** Create the additive `refs`/`refs_meta` tables; true when they were missing. */
+  private ensureRefsTables(): boolean {
+    if (this.db === null) return false
+    try {
+      const names = new Set(
+        (this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('refs','refs_meta')").all() as Array<{ name?: string }>)
+          .map(row => row.name)
+          .filter((name): name is string => typeof name === 'string'),
+      )
+      if (names.has('refs') && names.has('refs_meta')) return false
+      this.db.exec(`CREATE TABLE IF NOT EXISTS refs (
+        ref_key TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, sha256 TEXT,
+        session_id TEXT NOT NULL, message_id TEXT NOT NULL, seq INTEGER,
+        origin TEXT NOT NULL, title TEXT, bytes INTEGER, meta TEXT,
+        log_mtime INTEGER, indexed_at INTEGER NOT NULL
+      )`)
+      this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS refs_occ ON refs(ref_key, session_id, message_id)')
+      this.db.exec('CREATE INDEX IF NOT EXISTS refs_key ON refs(ref_key)')
+      this.db.exec('CREATE INDEX IF NOT EXISTS refs_msg ON refs(session_id, message_id)')
+      this.db.exec('CREATE TABLE IF NOT EXISTS refs_meta (path TEXT PRIMARY KEY, log_mtime INTEGER, count INTEGER)')
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Replace one session log's ref occurrences after re-reading it. */
+  private replaceSessionRefs(sessionId: string, path: string, mtime: number, rows: EvidenceRefRow[]): void {
+    if (this.db === null) return
+    try {
+      this.db.prepare('DELETE FROM refs WHERE session_id = ?').run(sessionId)
+      const insert = this.db.prepare(`INSERT OR IGNORE INTO refs
+        (ref_key, kind, target, sha256, session_id, message_id, seq, origin, title, bytes, meta, log_mtime, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      const now = Date.now()
+      for (const row of rows) {
+        insert.run(row.refKey, row.kind, row.target, row.sha256, row.sessionId, row.messageId, row.seq, row.origin, row.title, row.bytes, row.meta, mtime, now)
+      }
+      this.db.prepare('INSERT OR REPLACE INTO refs_meta (path, log_mtime, count) VALUES (?, ?, ?)').run(path, mtime, rows.length)
+    } catch { /* refs are additive evidence; never fail a content build for them */ }
   }
 
   /** Add the additive `sources.cwd` column without bumping the schema version. */
@@ -1169,6 +1246,58 @@ export class ContentIndex {
     } catch {
       return undefined
     }
+  }
+
+  /** One stored evidence-ref occurrence. */
+  refsForMessage(sessionId: string, messageId: string): StoredRefRow[] {
+    if (this.db === null) return []
+    try {
+      return this.db.prepare(`SELECT ref_key AS refKey, kind, target, sha256, session_id AS sessionId,
+          message_id AS messageId, seq, origin, title, bytes, meta, log_mtime AS logMtime, indexed_at AS indexedAt
+        FROM refs WHERE session_id = ? AND message_id = ? ORDER BY seq, kind`).all(sessionId, messageId) as unknown as StoredRefRow[]
+    } catch { return [] }
+  }
+
+  /** All authorized-agnostic occurrences of one ref key (bounded). */
+  refsFor(refKey: string, limit = 50): StoredRefRow[] {
+    if (this.db === null) return []
+    try {
+      return this.db.prepare(`SELECT ref_key AS refKey, kind, target, sha256, session_id AS sessionId,
+          message_id AS messageId, seq, origin, title, bytes, meta, log_mtime AS logMtime, indexed_at AS indexedAt
+        FROM refs WHERE ref_key = ? ORDER BY indexed_at DESC LIMIT ?`).all(refKey, Math.max(1, Math.min(200, limit))) as unknown as StoredRefRow[]
+    } catch { return [] }
+  }
+
+  /** Occurrence counts for the status tool. */
+  refCount(): { refs: number; occurrences: number } {
+    if (this.db === null) return { refs: 0, occurrences: 0 }
+    try {
+      const row = this.db.prepare('SELECT COUNT(DISTINCT ref_key) AS refs, COUNT(*) AS occurrences FROM refs').get() as { refs?: number; occurrences?: number } | undefined
+      return { refs: Number(row?.refs ?? 0), occurrences: Number(row?.occurrences ?? 0) }
+    } catch { return { refs: 0, occurrences: 0 } }
+  }
+
+  /**
+   * Read one event by sequence from the local session log, for refs resolution.
+   * The header is the first physical line, so event `seq` is line `seq + 1`.
+   * @param sessionId - session id.
+   * @param seq - event sequence.
+   * @param maxChars - cap on the returned JSON line.
+   * @returns the raw event line, or undefined when the session/log is unavailable.
+   */
+  async sessionEventBody(sessionId: string, seq: number, maxChars = 16 * 1024): Promise<string | undefined> {
+    if (!Number.isInteger(seq) || seq < 0) return undefined
+    const path = this.sessionPaths.get(sessionId)
+    if (path === undefined) return undefined
+    try {
+      const info = await stat(path)
+      const read = await this.readSessionText({ path, mtime: info.mtimeMs })
+      if (!read.ok) return undefined
+      const lines = read.text.split('\n')
+      const line = lines[seq + 1]
+      if (line === undefined || line === '') return undefined
+      return line.slice(0, Math.max(128, maxChars))
+    } catch { return undefined }
   }
 
   /** The mtime recorded for one session log in `sources`. */
@@ -1366,6 +1495,141 @@ async function archivedSessionIds(): Promise<Set<string>> {
 /** Conversation node key format used by the host DOM (`${kind.length}:${kind}${id}`). */
 function conversationNodeKey(kind: string, id: string): string {
   return `${kind.length}:${kind}${id}`
+}
+
+/** One evidence ref occurrence extracted from a session log event. */
+export interface EvidenceRefRow {
+  refKey: string
+  kind: 'url' | 'session-event' | 'spill' | 'attachment'
+  target: string
+  sha256: string | null
+  sessionId: string
+  messageId: string
+  seq: number | null
+  origin: 'web_search' | 'web_fetch' | 'spill' | 'attachment' | 'session'
+  title: string | null
+  bytes: number | null
+  meta: string | null
+}
+
+/** One persisted evidence-ref occurrence as stored in `refs`. */
+export interface StoredRefRow {
+  refKey: string
+  kind: 'url' | 'session-event' | 'spill' | 'attachment'
+  target: string
+  sha256: string | null
+  sessionId: string
+  messageId: string
+  seq: number | null
+  origin: string
+  title: string | null
+  bytes: number | null
+  meta: string | null
+  logMtime: number | null
+  indexedAt: number
+}
+
+/** The normalized URL plus its identity hash. */
+function urlIdentity(raw: string): { ref: string; target: string; sha256: string } {
+  const ref = urlRef(raw)
+  const target = normalizeUrl(raw)
+  return { ref, target, sha256: createHash('sha256').update(target).digest('hex') }
+}
+
+/** Bounded JSON metadata column for one ref. */
+function refMeta(value: Record<string, unknown>): string {
+  const text = JSON.stringify(value)
+  return text.length > 400 ? `${text.slice(0, 397)}...` : text
+}
+
+/**
+ * Extract the non-session-event evidence refs carried by one session log event:
+ * `web_search`/`web_fetch` URLs (from `data.meta`), spill locators (from the
+ * tool-result text notice) and attachment digests (from user message blocks).
+ * Session-event refs are added by the caller for events that became documents.
+ * @param event - parsed session event line.
+ * @param sessionId - owning session.
+ * @param messageId - message/call id the occurrence belongs to.
+ * @param seq - event sequence (the line ordinal minus the header line).
+ * @returns ref rows ready for `refs` (deduplication happens at insert time).
+ */
+export function extractEvidenceRefs(
+  event: { type?: string; data?: Record<string, unknown> },
+  sessionId: string,
+  messageId: string,
+  seq: number,
+): EvidenceRefRow[] {
+  const out: EvidenceRefRow[] = []
+  const data = event.data ?? {}
+  if (event.type === 'tool/result') {
+    const message = (data.message ?? {}) as Record<string, unknown>
+    const meta = (data.meta ?? {}) as Record<string, unknown>
+    const sources = Array.isArray(meta.sources) ? meta.sources : []
+    for (const source of sources) {
+      if (typeof source !== 'object' || source === null) continue
+      const record = source as Record<string, unknown>
+      if (typeof record.url !== 'string' || record.url === '') continue
+      const identity = urlIdentity(record.url)
+      out.push({
+        refKey: identity.ref, kind: 'url', target: identity.target, sha256: identity.sha256,
+        sessionId, messageId, seq: null, origin: 'web_search',
+        title: typeof record.title === 'string' ? record.title.slice(0, 200) : null,
+        bytes: null,
+        meta: refMeta({ snippet: typeof record.snippet === 'string' ? record.snippet.slice(0, 200) : undefined, publishedAt: record.publishedAt }),
+      })
+    }
+    if (typeof meta.url === 'string' && meta.url !== '') {
+      const identity = urlIdentity(meta.url)
+      out.push({
+        refKey: identity.ref, kind: 'url', target: identity.target, sha256: identity.sha256,
+        sessionId, messageId, seq: null, origin: 'web_fetch',
+        title: typeof meta.title === 'string' ? meta.title.slice(0, 200) : null,
+        bytes: null,
+        meta: refMeta({ statusCode: meta.statusCode, truncated: meta.truncated }),
+      })
+    }
+    const content = message.content
+    if (Array.isArray(content)) {
+      const text = content
+        .filter((block): block is { type: string; text: string } =>
+          typeof block === 'object' && block !== null
+            && (block as { type?: unknown }).type === 'text'
+            && typeof (block as { text?: unknown }).text === 'string')
+        .map(block => block.text)
+        .join('\n')
+      const locator = /Full formatted result stored at:\s*(\S+?)\.?\s*Use read/.exec(text)?.[1]
+      if (locator !== undefined) {
+        const bytes = Number(/Omitted (\d+) bytes/.exec(text)?.[1] ?? '')
+        out.push({
+          refKey: spillRef({ path: locator, sessionId, seq }), kind: 'spill', target: locator, sha256: null,
+          sessionId, messageId, seq, origin: 'spill', title: null,
+          bytes: Number.isFinite(bytes) ? bytes : null,
+          meta: null,
+        })
+      }
+    }
+    return out
+  }
+  if (event.type === 'user/message' && Array.isArray(data.content)) {
+    for (const block of data.content) {
+      if (typeof block !== 'object' || block === null) continue
+      const record = block as Record<string, unknown>
+      if (record.type !== 'image' && record.type !== 'file') continue
+      const attachment = (record.attachment ?? {}) as Record<string, unknown>
+      const id = typeof attachment.attachmentId === 'string' ? attachment.attachmentId : ''
+      const match = /^sha256:([0-9a-f]{64})$/.exec(id)
+      if (match === null) continue
+      const sha256 = match[1]!
+      out.push({
+        refKey: attachmentRef({ sha256 }), kind: 'attachment', target: sha256, sha256,
+        sessionId, messageId, seq: null, origin: 'attachment',
+        title: typeof attachment.name === 'string' ? attachment.name.slice(0, 200) : (typeof attachment.mediaType === 'string' ? attachment.mediaType : null),
+        bytes: typeof attachment.bytes === 'number' ? attachment.bytes : null,
+        meta: refMeta({ mediaType: attachment.mediaType, width: attachment.width, height: attachment.height }),
+      })
+    }
+  }
+  return out
 }
 
 function messageText(event: { type?: string; data?: Record<string, unknown> }, includeReasoning = false): { text: string; titleText: string; id: string; nodeKey: string | null } | undefined {

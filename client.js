@@ -111,6 +111,7 @@ window.__ModuleLoader__.load({
 .dsh-locator-badge.chat{background:rgba(79,124,255,.16);color:var(--dsw-alias-brand-primary,#4f7cff)}
 .dsh-locator-snippet{grid-column:1/-1;margin-top:2px;font-size:12.5px;opacity:.85;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.4}
 .dsh-locator-path{grid-column:1/-1;font-size:11.5px;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.dsh-locator-refchip{margin-left:8px;padding:0 6px;border:1px solid rgba(120,125,135,.35);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:10px;line-height:16px;opacity:.75;cursor:pointer;direction:ltr}
 .dsh-locator-meta{font-size:11.5px;opacity:.65;white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right}
 .dsh-locator-hit{background:rgba(245,158,11,.32);border-radius:2px;color:inherit}
 .dsh-locator-empty{padding:36px 16px;text-align:center;opacity:.65;font-size:12.5px;white-space:pre-wrap}
@@ -209,6 +210,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         errorPrefix: 'Search failed: ', retry: 'Retry', indexing: 'indexing, results may be incomplete',
         statusLoading: 'Reading index status…', status: 'Index {entries} entries · {mode} · {roots} roots',
         live: 'live', snapshot: 'snapshot', usn: 'USN',
+        copyRef: 'Copy evidence ref', copiedRef: 'Ref copied',
         copiedPath: 'Path copied', revealed: 'Revealed in file manager', opened: 'Opened', inserted: 'Inserted @file',
         insertFailed: 'Insert failed; @file copied', jumped: 'Opened session', jumpFailed: 'Opened the session but could not locate the match',
         footer: '↑↓ select · Enter open/jump · Ctrl+Shift+C copy path · Ctrl+O open · Alt+1–3 scopes · Esc close',
@@ -2873,7 +2875,21 @@ self.onmessage = event => {
           isContent && hit.snippet
             ? h('div', { className: 'dsh-locator-snippet' }, highlight(hit.snippet, query))
             : null,
-          h('div', { className: 'dsh-locator-path' }, hit.path),
+          h('div', { className: 'dsh-locator-path' },
+            h('span', { className: 'dsh-locator-pathlabel' }, hit.path),
+            hit.ref
+              ? h('button', {
+                  className: 'dsh-locator-refchip',
+                  type: 'button',
+                  title: t('copyRef'),
+                  onMouseDown: event => event.preventDefault(),
+                  onClick: event => {
+                    event.stopPropagation()
+                    copyText(hit.ref).then(() => notify(t('copiedRef'))).catch(() => {})
+                  },
+                }, 'ref')
+              : null,
+          ),
         )
       }
 

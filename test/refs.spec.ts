@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  attachmentRef,
   decodeSessionRef,
   encodeSessionRef,
   fileRef,
@@ -10,7 +11,9 @@ import {
   freshnessFor,
   normalizeUrl,
   parseRef,
+  sessionEventRef,
   sha256File,
+  spillRef,
   urlRef,
 } from '../src/refs.ts'
 
@@ -77,5 +80,33 @@ describe('hashing and freshness', () => {
     expect(freshnessFor(100, 200, 1)).toMatchObject({ state: 'stale', mtime: 200 })
     expect(freshnessFor(100, undefined, 1)).toMatchObject({ state: 'missing' })
     expect(freshnessFor(undefined, undefined, 1)).toMatchObject({ state: 'unknown' })
+  })
+})
+
+describe('session-event, spill and attachment refs', () => {
+  it('round-trips session-event refs without breaking the canonical session URI', () => {
+    const ref = sessionEventRef({ sessionId: 'session-abc', seq: 42 })
+    expect(parseRef(ref)).toEqual({ kind: 'session-event', ref, sessionId: 'session-abc', seq: 42 })
+    expect(parseRef('dsh-session:abc#seq=4')).toBeUndefined()
+  })
+
+  it('round-trips spill refs with optional ownership', () => {
+    const bare = spillRef({ path: '/tmp/spill/x' })
+    expect(parseRef(bare)).toEqual({ kind: 'spill', ref: bare, path: '/tmp/spill/x' })
+    const owned = spillRef({ path: '/tmp/spill/y', sessionId: 's1', seq: 3 })
+    expect(parseRef(owned)).toMatchObject({ kind: 'spill', path: '/tmp/spill/y', sessionId: 's1', seq: 3 })
+  })
+
+  it('validates attachment digests', () => {
+    const sha = 'a'.repeat(64)
+    const ref = attachmentRef({ sha256: sha.toUpperCase() })
+    expect(parseRef(ref)).toEqual({ kind: 'attachment', ref, sha256: sha })
+    expect(parseRef('ref://attachment?sha256=not-a-digest')).toBeUndefined()
+  })
+
+  it('normalizes URL fragments for identity', () => {
+    const ref = urlRef('https://Example.com/a.pdf#page=3')
+    expect(ref).toContain(encodeURIComponent('https://example.com/a.pdf'))
+    expect(ref).not.toContain('page=3')
   })
 })

@@ -366,6 +366,11 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.15.0 更新
+
+- **Wave 2 证据 ref**：内容库新增 additive `refs`/`refs_meta`（不 bump schema、不重建 6.6GB），会话日志单遍提取 **URL**（`web_search`/`web_fetch` meta，无需打开 tool-results 索引）、**spill locator**（结果正文 notice）、**attachment digest**（消息块）与 **session-event**（`ref://session-event?sid=…&seq=N`）；`locator_resolve`/`locator_cite` 支持新类型（沿用 cwd 授权；spill 校验 session 目录归属，attachment 查本地 store）。
+- Web 面板 combined 命中补 `ref`，结果行新增复制 ref 的 chip（英文；其余语言回退）；升级旧库首次刷新只重读会话日志。
+
 ## 0.14.0 更新
 
 - **能力索引适配器**：新增 `capability_search`（自然语言找“谁能做这件事”）与 `capability_preflight`（能力是否可见、参数是否符合 schema、需要什么审批/沙箱、有哪些副作用）；数据来自宿主已有的 tool registry（含 MCP 工具）与 skill catalog，不重复发现、不用 embedding，60s 自动刷新。

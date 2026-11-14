@@ -29,6 +29,8 @@ export interface ContentHit {
     nodeKey?: string;
     /** 1-based line of the first match inside the stored body, for file hits. */
     line?: number;
+    /** Citable evidence ref for this hit (session URI or ref://file). */
+    ref?: string;
     score: number;
 }
 /** Which half of the content build a progress record belongs to. */
@@ -271,6 +273,10 @@ export declare class ContentIndex {
      * needs no rebuild.
      */
     private sessionCandidates;
+    /** Create the additive `refs`/`refs_meta` tables; true when they were missing. */
+    private ensureRefsTables;
+    /** Replace one session log's ref occurrences after re-reading it. */
+    private replaceSessionRefs;
     /** Add the additive `sources.cwd` column without bumping the schema version. */
     private ensureSourcesCwdColumn;
     /** The session header's cwd for one indexed session, when known. */
@@ -288,6 +294,24 @@ export declare class ContentIndex {
     indexedMtime(kind: 'file' | 'session', path: string, messageId?: string): number | undefined;
     /** The stored (≤8KB) body for one indexed session message. */
     sessionBody(sessionId: string, messageId: string): string | undefined;
+    /** One stored evidence-ref occurrence. */
+    refsForMessage(sessionId: string, messageId: string): StoredRefRow[];
+    /** All authorized-agnostic occurrences of one ref key (bounded). */
+    refsFor(refKey: string, limit?: number): StoredRefRow[];
+    /** Occurrence counts for the status tool. */
+    refCount(): {
+        refs: number;
+        occurrences: number;
+    };
+    /**
+     * Read one event by sequence from the local session log, for refs resolution.
+     * The header is the first physical line, so event `seq` is line `seq + 1`.
+     * @param sessionId - session id.
+     * @param seq - event sequence.
+     * @param maxChars - cap on the returned JSON line.
+     * @returns the raw event line, or undefined when the session/log is unavailable.
+     */
+    sessionEventBody(sessionId: string, seq: number, maxChars?: number): Promise<string | undefined>;
     /** The mtime recorded for one session log in `sources`. */
     sessionIndexedMtime(sessionId: string): number | undefined;
     sessionRoots(): string[];
@@ -323,4 +347,49 @@ export declare class ContentIndex {
      */
     private searchSync;
 }
+/** One evidence ref occurrence extracted from a session log event. */
+export interface EvidenceRefRow {
+    refKey: string;
+    kind: 'url' | 'session-event' | 'spill' | 'attachment';
+    target: string;
+    sha256: string | null;
+    sessionId: string;
+    messageId: string;
+    seq: number | null;
+    origin: 'web_search' | 'web_fetch' | 'spill' | 'attachment' | 'session';
+    title: string | null;
+    bytes: number | null;
+    meta: string | null;
+}
+/** One persisted evidence-ref occurrence as stored in `refs`. */
+export interface StoredRefRow {
+    refKey: string;
+    kind: 'url' | 'session-event' | 'spill' | 'attachment';
+    target: string;
+    sha256: string | null;
+    sessionId: string;
+    messageId: string;
+    seq: number | null;
+    origin: string;
+    title: string | null;
+    bytes: number | null;
+    meta: string | null;
+    logMtime: number | null;
+    indexedAt: number;
+}
+/**
+ * Extract the non-session-event evidence refs carried by one session log event:
+ * `web_search`/`web_fetch` URLs (from `data.meta`), spill locators (from the
+ * tool-result text notice) and attachment digests (from user message blocks).
+ * Session-event refs are added by the caller for events that became documents.
+ * @param event - parsed session event line.
+ * @param sessionId - owning session.
+ * @param messageId - message/call id the occurrence belongs to.
+ * @param seq - event sequence (the line ordinal minus the header line).
+ * @returns ref rows ready for `refs` (deduplication happens at insert time).
+ */
+export declare function extractEvidenceRefs(event: {
+    type?: string;
+    data?: Record<string, unknown>;
+}, sessionId: string, messageId: string, seq: number): EvidenceRefRow[];
 //# sourceMappingURL=content.d.ts.map

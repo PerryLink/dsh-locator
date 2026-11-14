@@ -1387,4 +1387,62 @@ describe('content database self-healing', () => {
     expect(filesOnly.hits).toHaveLength(0)
   })
 
+
+  it('extracts URL, spill, attachment and session-event evidence refs in the same pass', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-refs-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-refs-sessions-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const dir = join(sessions, '--work-a--', 'session-refs-a')
+    mkdirSync(dir, { recursive: true })
+    const sha = 'b'.repeat(64)
+    const spillPath = '/tmp/dsh-spill-test/session-refs-a/abcdef-notes.txt'
+    const lines = [
+      JSON.stringify({ type: 'session', version: 4, id: 'session-refs-a', createdAt: 1, cwd: '/work/a' }),
+      JSON.stringify({ type: 'user/message', data: { id: 'm-user', source: { kind: 'user' }, content: [
+        { type: 'text', text: 'look at this image' },
+        { type: 'image', attachment: { attachmentId: `sha256:${sha}`, mediaType: 'image/png', bytes: 12 } },
+      ] } }),
+      JSON.stringify({ type: 'assistant/message', data: { turn: 0, step: 0, message: { id: 'm-assistant', content: [{ type: 'text', text: 'the answer' }] } } }),
+      JSON.stringify({ type: 'tool/result', data: { seq: 3, message: { toolCallId: 'call-1', content: [
+        { type: 'text', text: `(Omitted 5000 bytes. Full formatted result stored at: ${spillPath}. Use read with offset/limit, or grep this path to search within it.)` },
+      ] }, meta: { sources: [{ url: 'https://example.com/a.pdf#page=3', title: 'Paper', snippet: 'abstract' }], truncated: false } } }),
+      JSON.stringify({ type: 'tool/result', data: { seq: 4, message: { toolCallId: 'call-2', content: [{ type: 'text', text: 'fetched' }] }, meta: { url: 'https://example.com/b', statusCode: 200, truncated: false } } }),
+    ].join('\n')
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(lines)))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const { attachmentRef, sessionEventRef, spillRef, urlRef } = await import('../src/refs.ts')
+    const urls = content.refsFor(urlRef('https://example.com/a.pdf#page=3'))
+    expect(urls).toHaveLength(1)
+    expect(urls[0]).toMatchObject({ kind: 'url', sessionId: 'session-refs-a', messageId: 'call-1', origin: 'web_search' })
+    expect(content.refsFor(urlRef('https://example.com/b'))).toHaveLength(1)
+    expect(content.refsFor(spillRef({ path: spillPath, sessionId: 'session-refs-a', seq: 2 }))).toHaveLength(1)
+    expect(content.refsFor(attachmentRef({ sha256: sha }))[0]).toMatchObject({ kind: 'attachment', origin: 'attachment', messageId: 'm-user' })
+    const event = content.refsFor(sessionEventRef({ sessionId: 'session-refs-a', seq: 1 }))
+    expect(event[0]).toMatchObject({ kind: 'session-event', messageId: 'm-assistant', seq: 1 })
+    expect(content.refsForMessage('session-refs-a', 'm-user').some(row => row.kind === 'attachment')).toBe(true)
+    const counts = content.refCount()
+    expect(counts.occurrences).toBeGreaterThanOrEqual(5)
+    // Additive upgrade: dropping the refs tables must make the next refresh
+    // re-read session logs only and repopulate refs without touching file rows.
+    const before = content.status()
+    content.close()
+    const raw = new DatabaseSync(join(state, 'content.db'))
+    raw.exec('DROP TABLE refs'); raw.exec('DROP TABLE refs_meta'); raw.close()
+    const reopened = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => reopened.close())
+    reopened.start()
+    await settle(reopened)
+    expect(reopened.status().files).toBe(before.files)
+    expect(reopened.refsFor(urlRef('https://example.com/a.pdf#page=3'))).toHaveLength(1)
+    const version = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    expect(Number((version.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version)).toBe(3)
+    version.close()
+    content.close()
+  })
+
+
 })
