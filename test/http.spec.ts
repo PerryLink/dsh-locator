@@ -359,3 +359,31 @@ describe('HTTP path routes stay inside the real roots', () => {
     expect(harness.routes.some(route => route.path === '/dsh-locator/content/rebuild')).toBe(false)
   })
 })
+
+describe('capability adapter route', () => {
+  it('serves panel capability search and preflight behind the same fence', async () => {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    const searches: Array<{ intent: string; limit?: number }> = []
+    const preflights: Array<{ capability: string; args?: Record<string, unknown> }> = []
+    registerHttp(harness.ctx, fakeRuntime(), undefined, undefined, {}, {
+      search: async (intent, limit) => {
+        searches.push({ intent, ...(limit === undefined ? {} : { limit }) })
+        return { ok: true, intent, total: 0, returned: 0, hits: [] }
+      },
+      preflight: async (capability, args) => {
+        preflights.push({ capability, ...(args === undefined ? {} : { args }) })
+        return { ok: true, next: { callable: true } }
+      },
+    })
+    const search = await callRoute(harness, '/dsh-locator/capabilities', fakeRequest({ intent: 'find files', limit: 3 }))
+    expect(search.json()).toMatchObject({ ok: true, intent: 'find files', hits: [] })
+    expect(searches).toEqual([{ intent: 'find files', limit: 3 }])
+    const preflight = await callRoute(harness, '/dsh-locator/capabilities', fakeRequest({ capability: 'tool:bash', args: { command: 'echo hi' } }))
+    expect(preflight.json()).toMatchObject({ ok: true, next: { callable: true } })
+    expect(preflights).toEqual([{ capability: 'tool:bash', args: { command: 'echo hi' } }])
+    // Without the adapter the route does not exist at all.
+    const bare = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(bare.ctx, fakeRuntime())
+    expect(bare.routes.some(route => route.path === '/dsh-locator/capabilities')).toBe(false)
+  })
+})

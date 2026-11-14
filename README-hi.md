@@ -404,6 +404,10 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
 
+## 0.16.0 अपग्रेड नोट्स
+
+- **Panel में capability view**: नया `POST /dsh-locator/capabilities` route (वही trust fence) जो `capability_search`/`capability_preflight` डेटा panel तक पहुँचाता है; panel में **Capabilities** tab: intent टाइप करें, kind/risk/approval वाले cards पाएं, चुनकर preflight देखें। अंग्रेज़ी टेक्स्ट; अन्य भाषाएँ fallback।
+
 ## 0.15.0 अपग्रेड नोट्स
 
 - **Wave 2 evidence refs**: content DB में additive `refs`/`refs_meta` (schema bump नहीं, 6.6 GB rebuild नहीं) जो **URLs** (`web_search`/`web_fetch` meta, tool-results indexing की ज़रूरत नहीं), **spill locators** (result notice), **attachment digests** और प्रति message एक **session-event** (`ref://session-event?sid=…&seq=N`) निकालता है। `locator_resolve`/`locator_cite` इन्हें उसी workspace नियम से support करते हैं; spill path की मौजूदगी, realpath और session directory ownership जाँची जाती है।

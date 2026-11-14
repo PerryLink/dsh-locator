@@ -211,6 +211,10 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         statusLoading: 'Reading index status…', status: 'Index {entries} entries · {mode} · {roots} roots',
         live: 'live', snapshot: 'snapshot', usn: 'USN',
         copyRef: 'Copy evidence ref', copiedRef: 'Ref copied',
+        capabilityTab: 'Capabilities', capabilityBack: 'Search', capabilitySearch: 'Find',
+        capabilityPlaceholder: 'Find a tool, MCP action or skill… e.g. search files, write a file, run a command',
+        capabilityHint: 'Type an intent to search the live tool and skill registries; select a result to preflight it.',
+        capabilityTotal: 'Matches: {n}', capabilityPreflight: 'Preflight',
         copiedPath: 'Path copied', revealed: 'Revealed in file manager', opened: 'Opened', inserted: 'Inserted @file',
         insertFailed: 'Insert failed; @file copied', jumped: 'Opened session', jumpFailed: 'Opened the session but could not locate the match',
         footer: '↑↓ select · Enter open/jump · Ctrl+Shift+C copy path · Ctrl+O open · Alt+1–3 scopes · Esc close',
@@ -2348,6 +2352,11 @@ self.onmessage = event => {
       const [selected, setSelected] = useState(0)
       const [toast, setToast] = useState('')
       const [refreshTick, setRefreshTick] = useState(0)
+      const [view, setView] = useState('search')
+      const [capIntent, setCapIntent] = useState('')
+      const [capBusy, setCapBusy] = useState(false)
+      const [capResult, setCapResult] = useState(null)
+      const [capDetail, setCapDetail] = useState(null)
       const inputRef = useRef(null)
       const panelRef = useRef(null)
       const abortRef = useRef(null)
@@ -2547,6 +2556,71 @@ self.onmessage = event => {
         if (!hit) return
         copyText(hit.path).then(() => notify(t('copiedPath'))).catch(() => {})
       }, [notify])
+
+      const runCapabilitySearch = useCallback(async () => {
+        const intent = capIntent.trim()
+        if (intent === '') return
+        setCapBusy(true)
+        setCapDetail(null)
+        try {
+          const data = await post('/dsh-locator/capabilities', { intent, limit: 8 })
+          setCapResult(data)
+        } catch (err) {
+          setCapResult({ ok: false, error: String((err && err.message) || err) })
+        } finally {
+          setCapBusy(false)
+        }
+      }, [capIntent])
+
+      const runCapabilityPreflight = useCallback(async card => {
+        try {
+          const data = await post('/dsh-locator/capabilities', { capability: card.id })
+          setCapDetail({ card, result: data })
+        } catch (err) {
+          setCapDetail({ card, result: { ok: false, error: String((err && err.message) || err) } })
+        }
+      }, [])
+
+      const renderCapabilityView = () => [
+        h('div', { className: 'dsh-locator-filterbar' },
+          h('input', {
+            className: 'dsh-locator-filter',
+            value: capIntent,
+            placeholder: t('capabilityPlaceholder'),
+            spellCheck: false,
+            'aria-label': t('capabilityPlaceholder'),
+            onChange: event => setCapIntent(event.target.value),
+            onKeyDown: event => { if (event.key === 'Enter') { event.preventDefault(); void runCapabilitySearch() } },
+          }),
+          h('button', { className: 'dsh-locator-dirbtn', disabled: capBusy, onClick: () => void runCapabilitySearch() },
+            capBusy ? t('loading') : t('capabilitySearch'))),
+        capResult === null
+          ? h('div', { className: 'dsh-locator-empty' }, t('capabilityHint'))
+          : capResult.ok === false
+            ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, String(capResult.error || 'request failed'))
+            : [
+                h('div', { className: 'dsh-locator-grouphead' },
+                  h('span', null, t('capabilityTotal', { n: capResult.total || 0 }))),
+                ...(capResult.hits || []).map(hit => h('div', {
+                  key: hit.card.id,
+                  className: 'dsh-locator-row dsh-locator-rowcontent',
+                  title: hit.card.id,
+                  onClick: () => void runCapabilityPreflight(hit.card),
+                },
+                  h('div', { className: 'dsh-locator-title' },
+                    h('span', { className: 'dsh-locator-badge' }, hit.card.kind),
+                    h('span', { className: 'dsh-locator-name' }, hit.card.name),
+                    h('span', { className: 'dsh-locator-meta', style: { marginLeft: 'auto' } },
+                      'risk:' + hit.card.risk.level + ' · approval:' + hit.card.permission.approval)),
+                  h('div', { className: 'dsh-locator-snippet' }, hit.card.summary))),
+                capDetail === null
+                  ? null
+                  : h('div', { className: 'dsh-locator-groupempty' },
+                      t('capabilityPreflight') + ' ' + capDetail.card.id + ' → ' + (capDetail.result && capDetail.result.ok === false
+                        ? String(capDetail.result.error)
+                        : 'callable=' + String(capDetail.result && capDetail.result.next && capDetail.result.next.callable))),
+              ],
+      ]
 
       const copyAll = useCallback(() => {
         const paths = rows.map(entry => entry.hit.path).filter(path => typeof path === 'string' && path !== '')
@@ -2990,6 +3064,11 @@ self.onmessage = event => {
           h('span', { className: 'dsh-locator-count', 'aria-hidden': 'true' },
             loading ? t('loading') : totalRows > 0 ? t('panelTotal', { index: selected + 1, total: totalRows }) : ''),
           h('span', { className: 'dsh-locator-kbd' }, 'Ctrl+Shift+F'),
+          h('button', {
+            className: 'dsh-locator-dirbtn',
+            title: t('capabilityTab'),
+            onClick: () => setView(previous => previous === 'capabilities' ? 'search' : 'capabilities'),
+          }, view === 'capabilities' ? t('capabilityBack') : t('capabilityTab')),
           h('button', { className: 'dsh-locator-close', onClick: close, title: t('closeTitle'), 'aria-label': t('closeLabel') }, '×'),
         ),
         h('div', { className: 'dsh-locator-bar' },
@@ -3084,7 +3163,9 @@ self.onmessage = event => {
         ),
         sessionOnly ? h('div', { className: 'dsh-locator-groupempty' }, t('panelSessionHint')) : null,
         h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },
-          error !== ''
+          view === 'capabilities'
+            ? renderCapabilityView()
+            : error !== ''
             ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, t('errorPrefix') + error,
                 h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry')))
             : null,

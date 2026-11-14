@@ -366,6 +366,10 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.16.0 更新
+
+- **面板能力视图**：新增 `POST /dsh-locator/capabilities`（与其它面板路由同一 trust fence），把 `capability_search`/`capability_preflight` 的数据接到面板；面板新增 **Capabilities** 标签：输入意图 → 能力卡列表（kind/risk/approval），选中可看 preflight（callable/schema/副作用）。英文文案，其余语言回退。
+
 ## 0.15.0 更新
 
 - **Wave 2 证据 ref**：内容库新增 additive `refs`/`refs_meta`（不 bump schema、不重建 6.6GB），会话日志单遍提取 **URL**（`web_search`/`web_fetch` meta，无需打开 tool-results 索引）、**spill locator**（结果正文 notice）、**attachment digest**（消息块）与 **session-event**（`ref://session-event?sid=…&seq=N`）；`locator_resolve`/`locator_cite` 支持新类型（沿用 cwd 授权；spill 校验 session 目录归属，attachment 查本地 store）。

@@ -83,7 +83,20 @@ class HttpError extends Error {
  * @param content - content index, when enabled.
  * @param ensure - lazy content boot hook.
  */
-export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void, options: { connectionOptional?: boolean } = {}): void {
+/** Optional capability adapter handlers for the panel's capability view. */
+export interface CapabilityHttpHandlers {
+  search: (intent: string, limit?: number) => Promise<unknown>
+  preflight: (capability: string, args?: Record<string, unknown>) => Promise<unknown>
+}
+
+export function registerHttp(
+  ctx: Context,
+  rt: LocatorRuntime,
+  content?: ContentIndex,
+  ensure?: () => void,
+  options: { connectionOptional?: boolean } = {},
+  capabilities?: CapabilityHttpHandlers,
+): void {
   const inject = (ctx as unknown as {
     inject?: (deps: string[], callback: (scoped: Context) => void) => unknown
   }).inject
@@ -121,6 +134,21 @@ export function registerHttp(ctx: Context, rt: LocatorRuntime, content?: Content
       })
     }
     route('/dsh-locator/open', async body => await openPath(rt, body))
+    if (capabilities !== undefined) {
+      // The panel's capability view reads the live tool/skill registries through
+      // this route; like every route it sits behind the same trust fence.
+      route('/dsh-locator/capabilities', async body => {
+        if (typeof body.capability === 'string' && body.capability !== '') {
+          const args = typeof body.args === 'object' && body.args !== null && !Array.isArray(body.args)
+            ? body.args as Record<string, unknown>
+            : undefined
+          return await capabilities.preflight(body.capability, args)
+        }
+        const intent = typeof body.intent === 'string' ? body.intent : ''
+        const limit = typeof body.limit === 'number' ? body.limit : undefined
+        return await capabilities.search(intent, limit)
+      })
+    }
   })
 }
 

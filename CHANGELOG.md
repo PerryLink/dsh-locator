@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.0 — 2026-11-14
+
+* **Capability view in the Web panel (Wave 3, part 2)**: new `POST /dsh-locator/capabilities` route (same trust fence as every other panel route) serves `capability_search` and `capability_preflight` data from the live tool/skill registries. The panel gains a **Capabilities** tab: type an intent, get ranked cards with kind/risk/approval, select one to see its preflight result (`callable`, schema validity, side effects). English strings; other locales fall back.
+* The HTTP handlers reuse the same `capabilities.ts` snapshot builder as the agent tools (no duplicate registry, no execution).
+* `183 tests`; six engine binaries rebuilt at 0.16.0.
+
 ## 0.15.0 — 2026-11-14
 
 * **Wave 2 evidence refs**: `locator_find`/`locator_search` results now resolve URL, session-event, spill and attachment evidence too. Session logs are parsed once into an additive `refs`/`refs_meta` store in `content.db` (no `user_version` bump, no rebuild of the 6.6 GB file index): `web_search`/`web_fetch` URLs from tool-result `meta` (no `contentIndexToolResults` needed), spill locators from the result notice, attachment digests from message blocks, and one session-event ref (`ref://session-event?sid=…&seq=N`) per indexed message.

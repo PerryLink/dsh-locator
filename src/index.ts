@@ -14,7 +14,7 @@ import { makeReindexTool } from './reindex.ts'
 import { registerHttp } from './http.ts'
 import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
-import { makeCapabilityTools, type CapabilitySources } from './capabilities.ts'
+import { makeCapabilityTools, preflightCapabilityCard, searchCapabilityCards, type CapabilitySources } from './capabilities.ts'
 import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
 import { makeRebuildTool, makeSearchTool, makeStatusTool } from './tools.ts'
 
@@ -184,5 +184,8 @@ export function apply(ctx: Context, config: Config): void {
 
   // The Web GUI panel is optional: profiles without a Web server keep the
   // tools and never mount an HTTP route.
-  registerHttp(ctx, rt, content, ensureContent, { connectionOptional: config.httpConnectionOptional })
+  registerHttp(ctx, rt, content, ensureContent, { connectionOptional: config.httpConnectionOptional }, {
+    search: async (intent, limit) => await searchCapabilityCards(capabilitySources, intent, limit === undefined ? {} : { limit }),
+    preflight: async (capability, args) => await preflightCapabilityCard(capabilitySources, capability, args),
+  })
 }

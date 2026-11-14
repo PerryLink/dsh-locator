@@ -355,6 +355,7 @@ describe('HTTP surface gating (no engine required)', () => {
     const mounted = mount({ requestRejection: () => undefined })
     try {
       expect(mounted.routes.sort()).toEqual([
+        '/dsh-locator/capabilities',
         '/dsh-locator/combined',
         '/dsh-locator/open',
         '/dsh-locator/reveal',

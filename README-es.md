@@ -403,6 +403,10 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
+## Notas de actualización 0.16.0
+
+- **Vista de capacidades en el panel**: nueva ruta `POST /dsh-locator/capabilities` (mismo trust fence) que expone `capability_search`/`capability_preflight` al panel, con una pestaña **Capabilities**: escribe una intención, obtén tarjetas con kind/risk/approval y selecciona una para ver su preflight. Textos en inglés; otros idiomas usan fallback.
+
 ## Notas de actualización 0.15.0
 
 - **Refs de evidencia Wave 2**: almacén additive `refs`/`refs_meta` en la base de contenido (sin cambiar el schema ni reconstruir 6,6 GB) que extrae **URLs** (meta de `web_search`/`web_fetch`, sin indexar tool-results), **spill locators** (aviso del resultado), **digests de adjuntos** y un **session-event** (`ref://session-event?sid=…&seq=N`) por mensaje. `locator_resolve`/`locator_cite` los soportan con la regla de workspace; spill se valida por existencia, realpath y pertenencia al directorio de sesión.

@@ -274,6 +274,45 @@ export function preflightCapability(
   }
 }
 
+/** JSON payload for the Web panel's capability search. */
+export interface CapabilitySearchPayload {
+  ok: boolean
+  intent: string
+  total: number
+  returned: number
+  hits: Array<{ card: Omit<CapabilityCard, 'input'>; score: number; why: string[] }>
+  warnings: string[]
+}
+
+/** Build one capability snapshot and rank cards for the Web panel. */
+export async function searchCapabilityCards(
+  sources: CapabilitySources,
+  intent: string,
+  options: { kinds?: readonly CapabilityCard['kind'][]; riskMax?: 'read' | 'write' | 'exec'; limit?: number; offset?: number } = {},
+): Promise<CapabilitySearchPayload> {
+  const snapshot = await buildCapabilitySnapshot(sources)
+  const result = searchCapabilities(snapshot.cards, intent, options)
+  return {
+    ok: true,
+    intent,
+    total: result.total,
+    returned: result.hits.length,
+    hits: result.hits.map(hit => ({ ...hit, card: publicCard(hit.card) })),
+    warnings: snapshot.warnings,
+  }
+}
+
+/** Preflight one capability for the Web panel (no execution). */
+export async function preflightCapabilityCard(
+  sources: CapabilitySources,
+  capability: string,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const snapshot = await buildCapabilitySnapshot(sources)
+  const result = preflightCapability(snapshot, capability, args, sources)
+  return result.card === undefined ? result : { ...result, card: publicCard(result.card) }
+}
+
 const CARD_SCHEMA = {
   type: 'object',
   additionalProperties: false,
