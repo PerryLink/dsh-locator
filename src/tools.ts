@@ -4,6 +4,8 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ContentIndex } from './content.ts'
+import { CONTENT_STATE_SCHEMA } from './find.ts'
 import type { LocatorRuntime, SearchHit } from './runtime.ts'
 import { resolveWithinRoots } from './reveal.ts'
 
@@ -60,26 +62,7 @@ const STATUS_OUTPUT = {
       additionalProperties: false,
       properties: {
         enabled: { type: 'boolean' },
-        building: { type: 'boolean' },
-        files: { type: 'integer' },
-        sessions: { type: 'integer' },
-        messages: { type: 'integer' },
-        truncated: { type: 'boolean' },
-        fullIndex: { type: 'boolean' },
-        reasoningIndex: { type: 'boolean' },
-        progress: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            phase: { type: 'string' },
-            scanned: { type: 'integer' },
-            indexed: { type: 'integer' },
-            total: { type: 'integer' },
-            path: { type: 'string' },
-            startedAt: { type: 'integer' },
-          },
-        },
-        warnings: { type: 'array', items: { type: 'string' } },
+        ...CONTENT_STATE_SCHEMA.properties,
       },
     },
     usn: { type: 'boolean' },
@@ -296,7 +279,7 @@ export function makeSearchTool(rt: LocatorRuntime) {
 }
 
 /** Build the locator_status tool. */
-export function makeStatusTool(rt: LocatorRuntime) {
+export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex) {
   return defineTool({
     name: 'locator_status',
     description: [
@@ -378,6 +361,7 @@ export function makeStatusTool(rt: LocatorRuntime) {
         scanning: status.scanning !== undefined,
         stateDir: engine?.stateDir ?? rt.stateDir,
         binary: rt.binary,
+        ...(content === undefined ? {} : { content: { enabled: true, ...content.status() } }),
         ...(status.warning === undefined ? {} : { warning: status.warning }),
         ...(status.error === undefined ? {} : { error: status.error }),
       }

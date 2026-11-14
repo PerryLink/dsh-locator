@@ -24,7 +24,13 @@ const HIT = {
   },
 } as const
 
-const STATE = {
+/**
+ * Content-index state shared by the `locator_find` and `locator_status` output
+ * schemas. Keep it in sync with `ContentState`: the host validates every tool
+ * result against the declared schema and rejects undeclared fields, so a state
+ * field missing here makes the whole tool call fail as "invalid output".
+ */
+export const CONTENT_STATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
@@ -36,6 +42,20 @@ const STATE = {
     updatedAt: { type: 'integer' },
     error: { type: 'string' },
     warnings: { type: 'array', items: { type: 'string' }, description: 'Non-fatal build problems, e.g. an unreadable session log.' },
+    fullIndex: { type: 'boolean' },
+    reasoningIndex: { type: 'boolean' },
+    progress: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        phase: { type: 'string' },
+        scanned: { type: 'integer' },
+        indexed: { type: 'integer' },
+        total: { type: 'integer' },
+        path: { type: 'string' },
+        startedAt: { type: 'integer' },
+      },
+    },
   },
 } as const
 
@@ -84,7 +104,7 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
             },
           },
           warnings: { type: 'array', items: { type: 'string' } },
-          state: STATE,
+          state: CONTENT_STATE_SCHEMA,
           error: { type: 'string' },
         },
       },

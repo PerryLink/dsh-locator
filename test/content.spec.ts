@@ -7,7 +7,9 @@ import type { Worker } from 'node:worker_threads'
 import { zstdCompressSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
 import { ContentIndex } from '../src/content.ts'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import type { ContentOptions, ContentProgress } from '../src/content.ts'
+import { CONTENT_STATE_SCHEMA } from '../src/find.ts'
 import type { LocatorRuntime, DumpPage } from '../src/runtime.ts'
 
 const cleanups: Array<() => void> = []
@@ -1198,9 +1200,13 @@ describe('content database self-healing', () => {
     cleanups.push(() => content.close())
     content.start()
     let seen: ContentProgress | undefined
+    let seenState: ReturnType<ContentIndex['status']> | undefined
     for (let i = 0; i < 2000 && content.status().building; i++) {
       const snapshot = content.status()
-      if (snapshot.progress !== undefined && snapshot.progress.phase === 'files' && snapshot.progress.scanned > 0) seen = snapshot.progress
+      if (snapshot.progress !== undefined && snapshot.progress.phase === 'files' && snapshot.progress.scanned > 0) {
+        seen = snapshot.progress
+        seenState = snapshot
+      }
       await new Promise(resolve => setImmediate(resolve))
     }
     expect(seen).toBeDefined()
@@ -1208,7 +1214,10 @@ describe('content database self-healing', () => {
     expect(seen?.scanned).toBeGreaterThan(0)
     expect(seen?.path).toBeTypeOf('string')
     expect(seen?.startedAt).toBeGreaterThan(0)
+    const schema = CONTENT_STATE_SCHEMA as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, seenState)).toEqual([])
     expect(content.status().progress).toBeUndefined()
+    expect(validateJsonSchemaValue(schema, content.status())).toEqual([])
   })
 
   it('reports the session phase while building session documents', async () => {

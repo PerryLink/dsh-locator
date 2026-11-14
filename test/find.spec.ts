@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { makeFindTool } from '../src/find.ts'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
+import { CONTENT_STATE_SCHEMA, makeFindTool } from '../src/find.ts'
 import type { ContentIndex } from '../src/content.ts'
 import type { ContentSearchOptions } from '../src/content-search.ts'
 
@@ -175,6 +176,28 @@ describe('locator_find workspace scope', () => {
     const result = await tool.execute({ query: 'note', offset: 7, limit: 5 }, {} as never) as { offset?: number }
     expect(calls[0]!.offset).toBe(7)
     expect(result.offset).toBe(7)
+  })
+
+
+  it('declares every content-state field the host validates', () => {
+    // Regression: 0.11.3 added fullIndex/reasoningIndex to ContentState but not
+    // to the locator_find output schema, so every call failed host validation
+    // with "invalid output" until the schema caught up.
+    const schema = CONTENT_STATE_SCHEMA as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    const state = {
+      building: true,
+      files: 0,
+      sessions: 0,
+      messages: 0,
+      truncated: false,
+      error: '',
+      warnings: [],
+      updatedAt: 1,
+      fullIndex: true,
+      reasoningIndex: true,
+      progress: { phase: 'files', scanned: 3, indexed: 1, total: 9, path: '/tmp/a.md', startedAt: 2 },
+    }
+    expect(validateJsonSchemaValue(schema, state)).toEqual([])
   })
 
 })

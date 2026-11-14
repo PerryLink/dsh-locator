@@ -29,7 +29,9 @@ import {
   resolveExportTarget,
   type SqliteModuleLike,
 } from '../src/export.ts'
-import { makeRebuildTool, validateRebuildArguments } from '../src/tools.ts'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
+import type { ContentIndex } from '../src/content.ts'
+import { makeRebuildTool, makeStatusTool, validateRebuildArguments } from '../src/tools.ts'
 import {
   executableFileRejection,
   resolveWithinRoots,
@@ -437,4 +439,56 @@ describe('locator_export execution', () => {
     expect(existsSync(join(state, 'broken.sqlite'))).toBe(false)
     expect(readdirSync(state)).toEqual([])
   })
+
+  it('reports the content index and validates its declared schema', async () => {
+    const contentState = {
+      building: true,
+      files: 2,
+      sessions: 1,
+      messages: 3,
+      truncated: false,
+      error: '',
+      warnings: [],
+      updatedAt: 1,
+      fullIndex: true,
+      reasoningIndex: true,
+      progress: { phase: 'files' as const, scanned: 5, indexed: 2, total: 10, path: '/tmp/a.md', startedAt: 1 },
+    }
+    const runtime = {
+      start: () => {},
+      status: { running: true },
+      roots: ['/tmp'],
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      engineStatus: async () => ({
+        version: '0.11.6', platform: 'linux/amd64', roots: ['/tmp'], entries: 1, files: 1, dirs: 0,
+        nameBytes: 1, deleted: 0, watching: true, scanning: false, usn: false, uptimeSec: 1, stateDir: '/tmp/state',
+      }),
+    } as unknown as LocatorRuntime
+    const content = { status: () => contentState } as unknown as ContentIndex
+    const tool = makeStatusTool(runtime, content)
+    const value = await tool.execute({}, fakeExec())
+    expect(value).toMatchObject({ content: { enabled: true, ...contentState } })
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    const text = tool.output.render({}, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(text).toContain('building: files 5 / 10 scanned')
+  })
+
+  it('keeps locator_status valid when the content index is disabled', async () => {
+    const runtime = {
+      start: () => {},
+      status: { running: true },
+      roots: ['/tmp'],
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      engineStatus: async () => undefined,
+    } as unknown as LocatorRuntime
+    const tool = makeStatusTool(runtime)
+    const value = await tool.execute({}, fakeExec())
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    expect((value as { content?: unknown }).content).toBeUndefined()
+  })
+
 })

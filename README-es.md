@@ -401,6 +401,10 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
+## Correcciones 0.11.6
+
+- Corrige `locator_find`, cuyo `state` declarado no incluía `fullIndex`/`reasoningIndex` (desde 0.11.3) ni `progress`, por lo que el host rechazaba cada llamada con `invalid output`; `locator_status` ahora también devuelve el estado del índice de contenido (`content`). Ambos comparten el mismo schema para evitar que un campo nuevo vuelva a romper uno de ellos.
+
 ## Notas de actualización 0.11.5
 
 - **Progreso de construcción de contenido**: durante la construcción, `locator_status`, la ruta HTTP `status` y el panel informan la fase actual (`files` / `sessions`), las entradas escaneadas, el total conocido y la ruta actual (`content.progress`) en lugar de solo `building: true`; el campo desaparece al terminar o fallar.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.6 — 2026-11-14
+
+* Fix `locator_find` being rejected by host output validation: the declared `state` schema was missing `fullIndex` and `reasoningIndex` (both on `ContentState` since 0.11.3) and the new `progress` field, so every call failed with `invalid output` instead of returning hits. `locator_status` now also returns the content index state (`content`); its schema always declared that object but the implementation never filled it.
+* Both tools now share one content-state output schema, with tests that validate real status snapshots against it.
+* `139 tests`; six engine binaries rebuilt at 0.11.6.
+
 ## 0.11.5 — 2026-11-14
 
 * **Content build progress**: while a build runs, `content.progress` reports the current phase (`files` / `sessions`), scanned entries, the known total and the current path; the HTTP `status` route, `locator_status` and the Web panel (all five client languages) show it, and it disappears when the build finishes or fails. Builds can take minutes on a full index, so `building: true` alone left the panel and the agent blind.

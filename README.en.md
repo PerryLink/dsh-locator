@@ -402,6 +402,10 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.11.6 fixes
+
+- Fix `locator_find` failing host output validation: its declared `state` schema was missing `fullIndex`/`reasoningIndex` (present since 0.11.3) and `progress`, so every call ended in `invalid output`; `locator_status` now also returns the content index state (`content`). Both tools share one state schema so a new field cannot silently break one of them.
+
 ## 0.11.5 upgrade notes
 
 - **Content build progress**: while a build runs, `locator_status`, the HTTP `status` route and the Web panel report the current phase (`files` / `sessions`), scanned entries, the known total and the current path (`content.progress`) instead of a bare `building: true`; the field disappears once the build finishes or fails.

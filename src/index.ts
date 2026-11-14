@@ -161,7 +161,7 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   ctx.tools.register(makeSearchTool(rt))
-  ctx.tools.register(makeStatusTool(rt))
+  ctx.tools.register(makeStatusTool(rt, content))
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
   if (content !== undefined) {

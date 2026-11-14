@@ -2,6 +2,7 @@
  * Agent-facing tools: locator_search, locator_status and locator_rebuild.
  * @module dsh-locator/tools
  */
+import type { ContentIndex } from './content.ts';
 import type { LocatorRuntime } from './runtime.ts';
 /** Validated rebuild scope: only narrowing of the configured roots/excludes is allowed. */
 export interface RebuildScope {
@@ -36,7 +37,7 @@ export declare function validateRebuildArguments(roots: readonly string[] | unde
 /** Build the locator_search tool. */
 export declare function makeSearchTool(rt: LocatorRuntime): import("@deepseek-ai/dsh-tools").ToolDefinition;
 /** Build the locator_status tool. */
-export declare function makeStatusTool(rt: LocatorRuntime): import("@deepseek-ai/dsh-tools").ToolDefinition;
+export declare function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex): import("@deepseek-ai/dsh-tools").ToolDefinition;
 /** Build the locator_rebuild tool. */
 export declare function makeRebuildTool(rt: LocatorRuntime): import("@deepseek-ai/dsh-tools").ToolDefinition;
 //# sourceMappingURL=tools.d.ts.map

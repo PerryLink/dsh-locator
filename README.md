@@ -364,6 +364,10 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.11.6 修复
+
+- 修复 `locator_find` 输出被宿主判为非法的问题：工具声明的 `state` schema 缺少 `fullIndex`/`reasoningIndex`（0.11.3 起存在）和 `progress`，导致每次调用都以 `invalid output` 失败；`locator_status` 现在也会返回内容索引状态（`content`）。两个工具共用同一份 state schema，避免新字段再次悄悄打破其中一个。
+
 ## 0.11.5 更新
 
 - **内容构建进度**：构建期间 `locator_status`、HTTP `status` 路由和 Web 面板会报告当前阶段（`files` / `sessions`）、已扫描条目数、已知总数和当前路径（`content.progress`），不再只有一个 `building: true`；构建结束或失败后该字段消失。
