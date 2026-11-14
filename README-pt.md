@@ -402,6 +402,10 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Correções 0.11.8
+
+- Corrige `locator_find` no escopo workspace quando o cwd não está dentro de nenhum root indexado: retornava apenas as mensagens da sessão atual, embora não exista um subconjunto de arquivos do workspace. Agora os arquivos são buscados em todos os roots indexados e as sessões continuam limitadas à sessão atual.
+
 ## Correções 0.11.7
 
 - Corrige `locator_find` no escopo workspace: o filtro de sessão e o prefixo do cwd eram combinados com AND na mesma linha (nunca casava). Agora são compostos por tipo de documento (sessão = sessão atual, arquivo = cwd); se a sessão ativa ainda não está indexada, a busca cobre só arquivos com um aviso `unknown-session`, em vez de retornar vazio sempre.

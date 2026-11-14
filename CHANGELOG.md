@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.8 — 2026-11-14
+
+* Fix `locator_find` workspace scope when the caller cwd is outside every indexed root: it silently returned only the current session's messages even though there is no workspace file subset to restrict to. File bodies are now searched across the indexed roots while session hits stay limited to the caller session.
+* `142 tests`; six engine binaries rebuilt at 0.11.8.
+
 ## 0.11.7 — 2026-11-14
 
 * Fix `locator_find` workspace scope returning no file hits: the session filter and the caller-cwd path filter were **ANDed on the same row**, which can never match (a row cannot be both a session log and a cwd file). They are now composed by document kind — session rows from the caller's session log, file rows under the caller's cwd — so workspace-scope content search finds file bodies again.

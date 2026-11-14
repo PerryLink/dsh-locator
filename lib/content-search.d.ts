@@ -68,6 +68,13 @@ export interface ContentSearchOptions {
     sessionUnavailable?: 'empty' | 'files-only';
     /** Drop session documents entirely (the unknown-session fallback). */
     excludeSessions?: boolean;
+    /**
+     * Keep file documents from every indexed root while session documents stay
+     * scoped to `sessionPath`. Used by `locator_find` workspace scope when the
+     * caller cwd is outside every indexed root: there is no workspace file
+     * subset, so files fall back to the whole index while sessions stay current.
+     */
+    fileHitsAllRoots?: boolean;
     /** Override for the whole-word scan caps; production uses the defaults. */
     scanBudget?: ContentScanBudget;
 }

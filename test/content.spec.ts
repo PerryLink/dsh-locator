@@ -1293,4 +1293,31 @@ describe('content database self-healing', () => {
     expect(strict.warnings).toContain('unknown-session')
   })
 
+
+  it('keeps session scoping while file hits come from every root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-ws3-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-ws3-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-ws3-sessions-'))
+    cleanups.push(
+      () => rmSync(root, { recursive: true, force: true }),
+      () => rmSync(state, { recursive: true, force: true }),
+      () => rmSync(sessions, { recursive: true, force: true }),
+    )
+    const filePath = join(root, 'all-roots.md')
+    writeFileSync(filePath, 'ALLROOTS-MARKER file body')
+    const sessionDir = join(sessions, '--workspace--', 'session-allroots')
+    mkdirSync(sessionDir, { recursive: true })
+    const sessionFile = join(sessionDir, 'session.v4.jsonl.zstd')
+    writeFileSync(sessionFile, zstdCompressSync(Buffer.from(JSON.stringify({ type: 'user/message', data: { id: 'm-ar', seq: 1, content: [{ type: 'text', text: 'ALLROOTS-MARKER session body' }] } }))))
+    const runtime = { dump: async () => ({ entries: [{ path: filePath, name: 'all-roots.md', size: 22, mtime: Date.now(), ext: 'md', dir: false }], next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const scoped = await content.search('ALLROOTS-MARKER', 10, { sessionPath: sessionFile })
+    expect(scoped.hits.map(hit => hit.kind)).toEqual(['session'])
+    const allRoots = await content.search('ALLROOTS-MARKER', 10, { sessionPath: sessionFile, fileHitsAllRoots: true })
+    expect(allRoots.hits.map(hit => hit.kind).sort()).toEqual(['file', 'session'])
+  })
+
 })

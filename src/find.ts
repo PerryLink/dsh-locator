@@ -157,7 +157,12 @@ export function makeFindTool(content: ContentIndex, ensure?: () => void, roots: 
       // Restricting file hits to it would return nothing even though the user's
       // indexed files are searchable; omit the path filter in that case.
       const cwdIsIndexed = callerCwd !== undefined && roots.some(root => withinRoots(callerCwd, [root]))
+      // When there is a caller session but its cwd is outside every indexed
+      // root, there is no workspace file subset: search file bodies across the
+      // indexed roots while session hits stay limited to the caller session.
+      const fileHitsAllRoots = scope === 'workspace' && callerSessionId !== undefined && !cwdIsIndexed
       const options: ContentSearchOptions = {
+        ...(fileHitsAllRoots ? { fileHitsAllRoots: true } : {}),
         // Before the active session settles the session id is not indexed yet;
         // workspace scope must still search file bodies in that window.
         ...(scope === 'workspace' ? { sessionUnavailable: 'files-only' as const } : {}),
