@@ -10,7 +10,7 @@
  * @module dsh-locator/combined
  */
 
-import type { ContentHit, ContentState } from './content.ts'
+import type { ContentHit, ContentProgress, ContentState } from './content.ts'
 import { checkContentQuery, decodeExtendedForNames } from './content-search.ts'
 import type {
   ContentCount,
@@ -82,6 +82,8 @@ export interface ContentGroup {
   sessions: number
   messages: number
   truncated: boolean
+  /** Live build progress while `building`; the panel shows the counters. */
+  progress?: ContentProgress
   /** Wall-clock time of the content lookup; 0 when it was skipped. */
   tookMs: number
   error?: string
@@ -298,6 +300,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
       sessions: state?.sessions ?? 0,
       messages: state?.messages ?? 0,
       truncated: state?.truncated ?? false,
+      ...(state?.progress === undefined ? {} : { progress: state.progress }),
       tookMs: 0,
     }
   }
@@ -339,6 +342,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
       sessions: state?.sessions ?? 0,
       messages: state?.messages ?? 0,
       truncated: state?.truncated ?? false,
+      ...(state?.progress === undefined ? {} : { progress: state.progress }),
       tookMs: Date.now() - started,
       ...(result.error === undefined ? {} : { error: result.error }),
     }

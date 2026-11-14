@@ -31,6 +31,26 @@ export interface ContentHit {
     line?: number;
     score: number;
 }
+/** Which half of the content build a progress record belongs to. */
+export type ContentProgressPhase = 'files' | 'sessions';
+/**
+ * Live progress for the content build. It only exists while `building` is
+ * true, so the status endpoint, the Web panel and `locator_status` can show
+ * what a long first build is doing instead of a bare boolean.
+ */
+export interface ContentProgress {
+    phase: ContentProgressPhase;
+    /** Entries examined: engine entries for files, session logs for sessions. */
+    scanned: number;
+    /** Entries stored by this phase: indexed files or indexed session logs. */
+    indexed: number;
+    /** Known total for this phase; absent when it is not known yet. */
+    total?: number;
+    /** Most recently examined path, for a live "current item" hint. */
+    path?: string;
+    /** Epoch milliseconds when this phase started. */
+    startedAt: number;
+}
 export interface ContentState {
     building: boolean;
     files: number;
@@ -44,6 +64,8 @@ export interface ContentState {
      */
     warnings: string[];
     updatedAt: number;
+    /** Live build progress; absent when no build is running. */
+    progress?: ContentProgress;
     /** Both numeric content caps are explicitly unlimited. */
     fullIndex?: boolean;
     /** Assistant reasoning/thinking blocks are included in session docs. */
@@ -97,6 +119,7 @@ export declare class ContentIndex {
     private readonly lockToken;
     private workerSeq;
     private pendingStart;
+    private progress;
     private dbIdentity;
     /** Session id → indexed session log path, for session-scoped content search. */
     private readonly sessionPaths;
@@ -198,6 +221,16 @@ export declare class ContentIndex {
     private breathe;
     /** True when a session log has been quiet long enough to be read safely. */
     private settled;
+    /** Start one build phase; `total` becomes the progress denominator when known. */
+    private beginPhase;
+    /** Forget live progress once a build finishes, fails or is abandoned. */
+    private clearProgress;
+    /** Count one examined entry and keep its path for the "current item" hint. */
+    private scanEntry;
+    /** Count one entry that produced a stored row. */
+    private countIndexed;
+    /** Total engine entries, used as the files-phase progress denominator. */
+    private engineEntries;
     private finish;
     /**
      * Rebuild the session id → session log path map from the persisted sources.

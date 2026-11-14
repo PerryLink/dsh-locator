@@ -334,4 +334,17 @@ describe('combined search', () => {
     expect(names.find(args => args.dirsOnly)?.offset).toBe(20)
     expect(options[0]?.offset).toBe(30)
   })
+
+  it('passes content build progress through to the panel', async () => {
+    const progress = { phase: 'files' as const, scanned: 12, indexed: 7, total: 100, path: '/tmp/page-1.md', startedAt: 1 }
+    const withProgress = deps({
+      contentStatus: () => state({ building: true, progress }),
+      contentSearch: async () => contentResult([]),
+    })
+    const queried = await runCombinedSearch(withProgress, readCombinedRequest({ query: 'note', limit: 5 }, 100))
+    expect(queried.content).toMatchObject({ building: true, progress })
+    const idle = await runCombinedSearch(withProgress, readCombinedRequest({ query: '  ' }, 100))
+    expect(idle.content).toMatchObject({ building: true, progress })
+  })
+
 })

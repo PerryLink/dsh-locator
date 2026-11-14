@@ -402,6 +402,10 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Notas de atualização 0.11.5
+
+- **Progresso da construção de conteúdo**: durante a construção, `locator_status`, a rota HTTP `status` e o painel informam a fase atual (`files` / `sessions`), as entradas verificadas, o total conhecido e o caminho atual (`content.progress`) em vez de apenas `building: true`; o campo desaparece quando a construção termina ou falha.
+
 ## Notas de atualização 0.11.0
 
 - Alternar `contentIndexReasoning` reconstrói apenas as sessões (o índice de arquivos é mantido); reduzir os caps força reconstrução; `locator_find` aceita `offset`; o painel copia todos os caminhos carregados/filtrados.

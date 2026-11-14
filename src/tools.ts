@@ -67,6 +67,18 @@ const STATUS_OUTPUT = {
         truncated: { type: 'boolean' },
         fullIndex: { type: 'boolean' },
         reasoningIndex: { type: 'boolean' },
+        progress: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            phase: { type: 'string' },
+            scanned: { type: 'integer' },
+            indexed: { type: 'integer' },
+            total: { type: 'integer' },
+            path: { type: 'string' },
+            startedAt: { type: 'integer' },
+          },
+        },
         warnings: { type: 'array', items: { type: 'string' } },
       },
     },
@@ -309,7 +321,17 @@ export function makeStatusTool(rt: LocatorRuntime) {
           watchReason?: string
           watchRoots?: number
           refreshFallback?: boolean
-          content?: { enabled?: boolean; files?: number; sessions?: number; messages?: number; truncated?: boolean; fullIndex?: boolean; reasoningIndex?: boolean; warnings?: string[] }
+          content?: {
+            enabled?: boolean
+            files?: number
+            sessions?: number
+            messages?: number
+            truncated?: boolean
+            fullIndex?: boolean
+            reasoningIndex?: boolean
+            progress?: { phase?: string; scanned?: number; indexed?: number; total?: number; path?: string; startedAt?: number }
+            warnings?: string[]
+          }
           usn?: boolean
           scanning?: boolean
           stateDir?: string
@@ -328,6 +350,11 @@ export function makeStatusTool(rt: LocatorRuntime) {
         if (v.refreshFallback === true) lines.push('  fallback: periodic rebuild is active (native watcher incomplete)')
         if (v.content?.enabled === true) {
           lines.push(`  content: ${String(v.content.files ?? 0)} files / ${String(v.content.messages ?? 0)} messages${v.content.fullIndex === true ? ' · full-index' : ''}${v.content.reasoningIndex === true ? ' · reasoning-indexed' : ''}${v.content.truncated === true ? ' · truncated' : ''}`)
+          const progress = v.content.progress
+          if (progress !== undefined) {
+            const total = typeof progress.total === 'number' ? ` / ${String(progress.total)}` : ''
+            lines.push(`  building: ${progress.phase === 'sessions' ? 'sessions' : 'files'} ${String(progress.scanned ?? 0)}${total} scanned, ${String(progress.indexed ?? 0)} indexed${typeof progress.path === 'string' && progress.path !== '' ? ` · ${progress.path}` : ''}`)
+          }
         }
         if (v.warning !== undefined) lines.push(`  warning: ${v.warning}`)
         if (v.error !== undefined) lines.push(`  error: ${v.error}`)

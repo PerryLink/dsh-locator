@@ -364,6 +364,10 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.11.5 更新
+
+- **内容构建进度**：构建期间 `locator_status`、HTTP `status` 路由和 Web 面板会报告当前阶段（`files` / `sessions`）、已扫描条目数、已知总数和当前路径（`content.progress`），不再只有一个 `building: true`；构建结束或失败后该字段消失。
+
 ## 0.11.0 升级注意
 
 - 切换 `contentIndexReasoning` 只重建会话，不再全量重建 185k 文件；调小内容 cap 会在下次启动重建，避免旧数据继续越预算可搜；`locator_find` 支持 `offset`；面板可一键复制当前已加载/过滤结果的路径。

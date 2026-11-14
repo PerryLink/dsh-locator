@@ -199,6 +199,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         asc: 'Ascending', descOrder: 'Descending',
         groupContent: 'Content', groupFiles: 'Files', groupDirs: 'Folders',
         relevance: 'by relevance', contentBuilding: 'indexing… {files} files / {messages} messages',
+        contentProgressFiles: 'indexing… {scanned}/{total} files', contentProgressSessions: 'indexing… {scanned}/{total} sessions',
         contentShort: 'Type at least 3 characters to search bodies and sessions (Ctrl+F handles shorter queries)',
         contentDisabled: 'Content index is disabled (contentIndex: false)',
         contentCapped: 'first {n}', showing: 'first {n}', deduped: '{n} name hits merged into content', loading: 'Searching…',
@@ -248,6 +249,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         asc: '升序', descOrder: '降序',
         groupContent: '内容', groupFiles: '文件', groupDirs: '目录',
         relevance: '按相关度', contentBuilding: '索引构建中… {files} 文件 / {messages} 消息',
+        contentProgressFiles: '索引构建中… 文件 {scanned}/{total}', contentProgressSessions: '索引构建中… 会话 {scanned}/{total}',
         contentShort: '输入至少 3 个字符后搜索正文与会话（更短的词请用 Ctrl+F）',
         contentDisabled: '内容索引已关闭（contentIndex: false）',
         contentCapped: '前 {n} 条', showing: '前 {n} 条', deduped: '{n} 条文件命中已并入内容', loading: '搜索中…',
@@ -297,6 +299,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         asc: 'Ascendente', descOrder: 'Descendente',
         groupContent: 'Contenido', groupFiles: 'Archivos', groupDirs: 'Carpetas',
         relevance: 'por relevancia', contentBuilding: 'indexando… {files} archivos / {messages} mensajes',
+        contentProgressFiles: 'indexando… {scanned}/{total} archivos', contentProgressSessions: 'indexando… {scanned}/{total} sesiones',
         contentShort: 'Escribe al menos 3 caracteres para buscar contenido y sesiones (Ctrl+F para consultas cortas)',
         contentDisabled: 'Índice de contenido desactivado (contentIndex: false)',
         contentCapped: 'primeros {n}', showing: 'primeros {n}', deduped: '{n} aciertos de nombre fusionados', loading: 'Buscando…',
@@ -346,6 +349,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         asc: 'Ascendente', descOrder: 'Descendente',
         groupContent: 'Conteúdo', groupFiles: 'Arquivos', groupDirs: 'Pastas',
         relevance: 'por relevância', contentBuilding: 'indexando… {files} arquivos / {messages} mensagens',
+        contentProgressFiles: 'indexando… {scanned}/{total} arquivos', contentProgressSessions: 'indexando… {scanned}/{total} sessões',
         contentShort: 'Digite pelo menos 3 caracteres para buscar conteúdo e sessões (Ctrl+F para consultas curtas)',
         contentDisabled: 'Índice de conteúdo desativado (contentIndex: false)',
         contentCapped: 'primeiros {n}', showing: 'primeiros {n}', deduped: '{n} acertos de nome mesclados', loading: 'Buscando…',
@@ -395,6 +399,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         asc: 'आरोही', descOrder: 'अवरोही',
         groupContent: 'सामग्री', groupFiles: 'फ़ाइलें', groupDirs: 'फ़ोल्डर',
         relevance: 'प्रासंगिकता से', contentBuilding: 'इंडेक्स बन रहा है… {files} फ़ाइलें / {messages} संदेश',
+        contentProgressFiles: 'इंडेक्स बन रहा है… {scanned}/{total} फ़ाइलें', contentProgressSessions: 'इंडेक्स बन रहा है… {scanned}/{total} सत्र',
         contentShort: 'सामग्री और सत्र खोजने के लिए कम से कम 3 अक्षर लिखें (छोटी खोज के लिए Ctrl+F)',
         contentDisabled: 'सामग्री इंडेक्स बंद है (contentIndex: false)',
         contentCapped: 'पहले {n}', showing: 'पहले {n}', deduped: '{n} नाम-परिणाम सामग्री में मिलाए', loading: 'खोज रहे हैं…',
@@ -2278,6 +2283,24 @@ self.onmessage = event => {
         if (code === 'invalid-control-char') return t('contentBadChars')
         return code
       }
+      // Show the live build counters (phase + scanned/total + current path) when
+      // the host publishes them; fall back to the aggregate counters otherwise.
+      const shortProgressPath = value => {
+        const text = String(value)
+        return text.length <= 48 ? text : '…' + text.slice(-47)
+      }
+      const contentProgressText = () => {
+        const progress = content !== undefined && content.progress ? content.progress : null
+        const aggregate = () => t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
+        if (progress === null || typeof progress.scanned !== 'number') return aggregate()
+        const total = typeof progress.total === 'number' && progress.total > 0 ? progress.total.toLocaleString() : ''
+        if (total === '') return aggregate()
+        const text = t(progress.phase === 'sessions' ? 'contentProgressSessions' : 'contentProgressFiles', {
+          scanned: progress.scanned.toLocaleString(),
+          total,
+        })
+        return typeof progress.path === 'string' && progress.path !== '' ? text + ' · ' + shortProgressPath(progress.path) : text
+      }
       const renderGroup = (key, label, group, extra) => {
         if (!scopes[key] || group === undefined) return null
         const hits = Array.isArray(group.hits) ? group.hits : []
@@ -2289,7 +2312,7 @@ self.onmessage = event => {
         const budget = key === 'content' && group.truncated === true ? t('contentBudget') : null
         const note = key === 'content'
           ? (matchMode === 'regex' ? t('panelRegexPaused')
-            : contentBuilding ? t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
+            : contentBuilding ? contentProgressText()
               : (content?.capped ? t('contentCapped', { n: count }) : (query.trim() !== '' ? t('relevance') : null)))
           : (group.deduped > 0 ? t('deduped', { n: group.deduped }) : (group.truncated ? t('showing', { n: hits.length }) : null))
         const combinedNote = [note, warnings, budget].filter(value => value !== null && value !== '').join(' · ')

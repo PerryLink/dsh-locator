@@ -7,7 +7,7 @@ import type { Worker } from 'node:worker_threads'
 import { zstdCompressSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
 import { ContentIndex } from '../src/content.ts'
-import type { ContentOptions } from '../src/content.ts'
+import type { ContentOptions, ContentProgress } from '../src/content.ts'
 import type { LocatorRuntime, DumpPage } from '../src/runtime.ts'
 
 const cleanups: Array<() => void> = []
@@ -1176,6 +1176,65 @@ describe('content database self-healing', () => {
     await settle(second)
     expect(second.status().files).toBe(1)
     expect(second.status().truncated).toBe(true)
+  })
+
+
+  it('reports live file-build progress and clears it when the build finishes', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-progress-state-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }))
+    // Directory entries are scanned but never read: a long, deterministic pass
+    // that yields often enough between pages to observe the counters mid-build.
+    const pages: DumpPage[] = []
+    for (let page = 0; page < 40; page++) {
+      const entries: Array<{ path: string; name: string; size: number; mtime: number; ext: string; dir: boolean }> = []
+      for (let i = 0; i < 500; i++) {
+        entries.push({ path: `/virtual/page-${String(page)}-${String(i)}`, name: `page-${String(page)}`, size: 0, mtime: 1, ext: '', dir: true })
+      }
+      pages.push({ entries, next: page + 1, done: page === 39 })
+    }
+    let call = 0
+    const runtime = { dump: async () => pages[Math.min(call++, pages.length - 1)]! } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    let seen: ContentProgress | undefined
+    for (let i = 0; i < 2000 && content.status().building; i++) {
+      const snapshot = content.status()
+      if (snapshot.progress !== undefined && snapshot.progress.phase === 'files' && snapshot.progress.scanned > 0) seen = snapshot.progress
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    expect(seen).toBeDefined()
+    expect(seen?.phase).toBe('files')
+    expect(seen?.scanned).toBeGreaterThan(0)
+    expect(seen?.path).toBeTypeOf('string')
+    expect(seen?.startedAt).toBeGreaterThan(0)
+    expect(content.status().progress).toBeUndefined()
+  })
+
+  it('reports the session phase while building session documents', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-progress-session-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-progress-sessions-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const line = (id: string) => JSON.stringify({ type: 'user/message', data: { id, seq: 1, content: [{ type: 'text', text: `progress marker ${id}` }] } })
+    for (let i = 0; i < 20; i++) {
+      const dir = join(sessions, '--workspace--', `session-progress-${String(i)}`)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(line(`msg-${String(i)}`))))
+    }
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 100 })
+    cleanups.push(() => content.close())
+    content.start()
+    let seen: ContentProgress | undefined
+    for (let i = 0; i < 4000 && content.status().building; i++) {
+      const snapshot = content.status()
+      if (snapshot.progress !== undefined && snapshot.progress.phase === 'sessions') seen = snapshot.progress
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    expect(seen).toBeDefined()
+    expect(seen?.total).toBe(20)
+    expect(seen?.scanned).toBeGreaterThan(0)
+    expect(content.status().progress).toBeUndefined()
   })
 
 })

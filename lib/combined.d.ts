@@ -9,7 +9,7 @@
  * of a path that appears both as a body hit and a name hit.
  * @module dsh-locator/combined
  */
-import type { ContentHit, ContentState } from './content.ts';
+import type { ContentHit, ContentProgress, ContentState } from './content.ts';
 import type { ContentCount, ContentCountMode, ContentMatchMode, ContentSearchOptions, ContentSearchResult } from './content-search.ts';
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts';
 /** Which groups a combined request asked for; every scope is on by default. */
@@ -70,6 +70,8 @@ export interface ContentGroup {
     sessions: number;
     messages: number;
     truncated: boolean;
+    /** Live build progress while `building`; the panel shows the counters. */
+    progress?: ContentProgress;
     /** Wall-clock time of the content lookup; 0 when it was skipped. */
     tookMs: number;
     error?: string;

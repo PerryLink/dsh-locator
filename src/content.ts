@@ -72,6 +72,28 @@ export interface ContentHit {
   score: number
 }
 
+/** Which half of the content build a progress record belongs to. */
+export type ContentProgressPhase = 'files' | 'sessions'
+
+/**
+ * Live progress for the content build. It only exists while `building` is
+ * true, so the status endpoint, the Web panel and `locator_status` can show
+ * what a long first build is doing instead of a bare boolean.
+ */
+export interface ContentProgress {
+  phase: ContentProgressPhase
+  /** Entries examined: engine entries for files, session logs for sessions. */
+  scanned: number
+  /** Entries stored by this phase: indexed files or indexed session logs. */
+  indexed: number
+  /** Known total for this phase; absent when it is not known yet. */
+  total?: number
+  /** Most recently examined path, for a live "current item" hint. */
+  path?: string
+  /** Epoch milliseconds when this phase started. */
+  startedAt: number
+}
+
 export interface ContentState {
   building: boolean
   files: number
@@ -85,6 +107,8 @@ export interface ContentState {
    */
   warnings: string[]
   updatedAt: number
+  /** Live build progress; absent when no build is running. */
+  progress?: ContentProgress
   /** Both numeric content caps are explicitly unlimited. */
   fullIndex?: boolean
   /** Assistant reasoning/thinking blocks are included in session docs. */
@@ -150,6 +174,7 @@ export class ContentIndex {
   private readonly lockToken = randomUUID()
   private workerSeq = 0
   private pendingStart = false
+  private progress: ContentProgress | null = null
   private dbIdentity: { dev: number; ino: number } | null = null
   /** Session id → indexed session log path, for session-scoped content search. */
   private readonly sessionPaths = new Map<string, string>()
@@ -159,10 +184,12 @@ export class ContentIndex {
 
   status(): ContentState {
     if (this.db !== null && !this.state.building && !this.databaseIsCurrent()) this.recoverExternal()
+    const progress = this.progress
     return {
       ...this.state,
       warnings: [...this.state.warnings],
       building: this.state.building || this.pendingStart,
+      ...(progress === null ? {} : { progress: { ...progress } }),
       fullIndex: this.options.maxTotalBytes === 0 && this.options.maxFiles === 0,
       reasoningIndex: this.options.includeReasoning === true,
     }
@@ -206,6 +233,7 @@ export class ContentIndex {
     this.stopWorker()
     this.releaseLock()
     this.pendingStart = false
+    this.progress = null
     this.dbIdentity = null
     this.sessionPaths.clear()
   }
@@ -284,11 +312,13 @@ export class ContentIndex {
     this.state.error = ''
     this.state.truncated = false
     this.state.warnings = []
+    this.progress = null
     const run = mode === 'full' ? this.full(generation) : this.incremental(generation)
     void run.catch(error => {
       if (generation !== this.generation) return
       this.state.error = messageOf(error)
       this.state.building = false
+      this.progress = null
     }).finally(() => {
       this.releaseLock()
     })
@@ -576,6 +606,7 @@ export class ContentIndex {
     this.state.files = 0
     this.state.sessions = 0
     this.state.messages = 0
+    this.progress = null
     this.boot()
   }
 
@@ -650,7 +681,46 @@ export class ContentIndex {
     return delay <= 0 || Date.now() - mtime >= delay
   }
 
+  /** Start one build phase; `total` becomes the progress denominator when known. */
+  private beginPhase(phase: ContentProgressPhase, total?: number): void {
+    this.progress = { phase, scanned: 0, indexed: 0, startedAt: Date.now(), ...(total === undefined ? {} : { total }) }
+  }
+
+  /** Forget live progress once a build finishes, fails or is abandoned. */
+  private clearProgress(): void {
+    this.progress = null
+  }
+
+  /** Count one examined entry and keep its path for the "current item" hint. */
+  private scanEntry(path: string): void {
+    const progress = this.progress
+    if (progress === null) return
+    progress.scanned++
+    progress.path = path
+  }
+
+  /** Count one entry that produced a stored row. */
+  private countIndexed(amount = 1): void {
+    if (this.progress !== null) this.progress.indexed += amount
+  }
+
+  /** Total engine entries, used as the files-phase progress denominator. */
+  private async engineEntries(): Promise<number | undefined> {
+    const cached = (this.rt as { status?: { engine?: { entries?: unknown } } }).status?.engine?.entries
+    if (typeof cached === 'number' && cached > 0) return cached
+    const engineStatus = (this.rt as { engineStatus?: () => Promise<{ entries?: unknown } | undefined> }).engineStatus
+    if (typeof engineStatus !== 'function') return undefined
+    try {
+      const status = await engineStatus.call(this.rt)
+      const entries = status?.entries
+      return typeof entries === 'number' && entries > 0 ? entries : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   private finish(): void {
+    this.clearProgress()
     const counts = this.db!.prepare("SELECT kind, COUNT(*) AS n FROM docs_meta GROUP BY kind").all() as Array<{ kind: string; n: number }>
     this.state.files = Number(counts.find(row => row.kind === 'file')?.n ?? 0)
     this.state.messages = Number(counts.find(row => row.kind === 'session')?.n ?? 0)
@@ -737,6 +807,9 @@ export class ContentIndex {
     let seen = 0
     let scanned = 0
     let capped = false
+    const total = await this.engineEntries()
+    if (generation !== this.generation) return
+    this.beginPhase('files', total)
     for (;;) {
       if (generation !== this.generation) return
       if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
@@ -744,6 +817,7 @@ export class ContentIndex {
       for (const entry of page.entries) {
         if ((++scanned & 0xff) === 0) await this.breathe()
         if (generation !== this.generation) return
+        this.scanEntry(entry.path)
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
         if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
         if (this.options.maxFiles > 0 && seen >= this.options.maxFiles) { capped = true; break }
@@ -751,6 +825,7 @@ export class ContentIndex {
         if (row === null) continue
         seen++
         if (!this.addDoc(row)) return
+        this.countIndexed()
         await this.breathe()
       }
       if (capped) { this.state.truncated = true; break }
@@ -772,6 +847,9 @@ export class ContentIndex {
     let indexed = 0
     let scanned = 0
     let capped = false
+    const total = await this.engineEntries()
+    if (generation !== this.generation) return
+    this.beginPhase('files', total)
     for (;;) {
       if (generation !== this.generation) return
       if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
@@ -779,6 +857,7 @@ export class ContentIndex {
       for (const entry of page.entries) {
         if ((++scanned & 0xff) === 0) await this.breathe()
         if (generation !== this.generation) return
+        this.scanEntry(entry.path)
         if (entry.dir || entry.size <= 0 || entry.size > this.options.maxFileBytes) continue
         if (!TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase()) || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
         if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) { capped = true; break }
@@ -787,6 +866,7 @@ export class ContentIndex {
         if (meta.get(key) === entry.mtime) {
           // Unchanged and already stored: it still occupies one of the slots.
           indexed++
+          this.countIndexed()
           continue
         }
         if (this.wouldExceed(entry.size, key)) {
@@ -802,6 +882,7 @@ export class ContentIndex {
           continue
         }
         indexed++
+        this.countIndexed()
         await this.breathe()
       }
       if (capped) { this.state.truncated = true; break }
@@ -817,6 +898,7 @@ export class ContentIndex {
       const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
       if (row === null) continue
       if (!this.addDoc(row)) { this.state.truncated = true; continue }
+      this.countIndexed()
       await this.breathe()
     }
   }
@@ -839,8 +921,10 @@ export class ContentIndex {
 
   private async indexSessions(generation: number): Promise<void> {
     const files = (await this.sessionCandidates()).filter(file => this.settled(file.mtime))
+    this.beginPhase('sessions', files.length)
     for (const file of files) {
       if (generation !== this.generation) return
+      this.scanEntry(file.path)
       const read = await this.readSessionText(file)
       if (!read.ok) {
         // A log that cannot be read or decompressed does not contribute rows;
@@ -851,6 +935,7 @@ export class ContentIndex {
       this.deletePath(file.path)
       if (!(await this.indexSessionText(file, read.text, generation))) return
       this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+      this.countIndexed()
       await this.breathe()
     }
   }
@@ -859,9 +944,11 @@ export class ContentIndex {
     const known = new Map<string, number>()
     for (const row of this.db!.prepare('SELECT path, mtime FROM sources').all() as Array<{ path: string; mtime: number }>) known.set(row.path, row.mtime)
     const files = await this.sessionCandidates()
+    this.beginPhase('sessions', files.length)
     const present = new Set<string>()
     for (const file of files) {
       if (generation !== this.generation) return
+      this.scanEntry(file.path)
       present.add(file.path)
       // The session being written right now is left for a later refresh: keep
       // its existing rows instead of re-reading the whole growing log.
@@ -878,6 +965,7 @@ export class ContentIndex {
       this.deletePath(file.path)
       if (!(await this.indexSessionText(file, read.text, generation))) return
       this.db!.prepare('INSERT OR REPLACE INTO sources (path, mtime) VALUES (?, ?)').run(file.path, file.mtime)
+      this.countIndexed()
       await this.breathe()
     }
     for (const path of known.keys()) {

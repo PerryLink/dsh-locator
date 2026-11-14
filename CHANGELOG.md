@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.5 — 2026-11-14
+
+* **Content build progress**: while a build runs, `content.progress` reports the current phase (`files` / `sessions`), scanned entries, the known total and the current path; the HTTP `status` route, `locator_status` and the Web panel (all five client languages) show it, and it disappears when the build finishes or fails. Builds can take minutes on a full index, so `building: true` alone left the panel and the agent blind.
+* `136 tests`; six engine binaries rebuilt at 0.11.5.
+
 ## 0.11.4 — 2026-11-14
 
 * Toggling `contentIndexReasoning` now rebuilds **only session documents**, keeping the 185k-file index intact instead of re-reading every file.
