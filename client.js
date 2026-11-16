@@ -112,6 +112,7 @@ window.__ModuleLoader__.load({
 .dsh-locator-snippet{grid-column:1/-1;margin-top:2px;font-size:12.5px;opacity:.85;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.4}
 .dsh-locator-path{grid-column:1/-1;font-size:11.5px;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
 .dsh-locator-refchip{margin-left:8px;padding:0 6px;border:1px solid rgba(120,125,135,.35);border-radius:6px;background:transparent;color:inherit;font:inherit;font-size:10px;line-height:16px;opacity:.75;cursor:pointer;direction:ltr}
+.dsh-locator-refchip-url{max-width:min(240px,40vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;opacity:.65}
 .dsh-locator-meta{font-size:11.5px;opacity:.65;white-space:nowrap;font-variant-numeric:tabular-nums;text-align:right}
 .dsh-locator-hit{background:rgba(245,158,11,.32);border-radius:2px;color:inherit}
 .dsh-locator-empty{padding:36px 16px;text-align:center;opacity:.65;font-size:12.5px;white-space:pre-wrap}
@@ -186,7 +187,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
       })
       const data = await response.json().catch(() => null)
       if (!response.ok || data === null) throw new Error('HTTP ' + response.status)
-      if (data.ok === false) throw new Error(typeof data.error === 'string' ? data.error : 'request failed')
+      if (data.ok === false) throw new Error(typeof data.error === 'string' ? data.error : t('requestFailed'))
       return data
     }
 
@@ -207,14 +208,18 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         emptyQuery: 'Type to search file names, paths, bodies and sessions',
         emptyResults: 'No matches · try fewer scopes or another keyword',
         emptyScopes: 'Select at least one scope (Content, Files, Folders)',
-        errorPrefix: 'Search failed: ', retry: 'Retry', indexing: 'indexing, results may be incomplete',
+        errorPrefix: 'Search failed: ', retry: 'Retry', indexing: 'indexing, results may be incomplete', requestFailed: 'request failed',
         statusLoading: 'Reading index status…', status: 'Index {entries} entries · {mode} · {roots} roots',
         live: 'live', snapshot: 'snapshot', usn: 'USN',
-        copyRef: 'Copy evidence ref', copiedRef: 'Ref copied',
+        copyRef: 'Copy evidence ref', copiedRef: 'Ref copied', urlRefTitle: 'URL ref · {url} · origin {origin}',
         capabilityTab: 'Capabilities', capabilityBack: 'Search', capabilitySearch: 'Find',
         capabilityPlaceholder: 'Find a tool, MCP action or skill… e.g. search files, write a file, run a command',
         capabilityHint: 'Type an intent to search the live tool and skill registries; select a result to preflight it.',
+        capabilityGlobalHint: 'Global registry view: preset-scoped tools (such as bash or write) may not appear here.',
         capabilityTotal: 'Matches: {n}', capabilityPreflight: 'Preflight',
+        capabilityRisk: 'risk: {level}', capabilityApproval: 'approval: {approval}', capabilityEmpty: 'No matching capability · try another intent',
+        capabilityError: 'Capability request failed: ', capabilityPreflightResult: 'Preflight {id} → callable: {value}',
+        capabilityPreflightFailed: 'Preflight {id} failed: {error}',
         copiedPath: 'Path copied', revealed: 'Revealed in file manager', opened: 'Opened', inserted: 'Inserted @file',
         insertFailed: 'Insert failed; @file copied', jumped: 'Opened session', jumpFailed: 'Opened the session but could not locate the match',
         footer: '↑↓ select · Enter open/jump · Ctrl+Shift+C copy path · Ctrl+O open · Alt+1–3 scopes · Esc close',
@@ -267,6 +272,15 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         errorPrefix: '搜索失败：', retry: '重试', indexing: '索引构建中，结果可能不完整',
         statusLoading: '索引状态读取中…', status: '索引 {entries} 条 · {mode} · {roots} 个根目录',
         live: '实时监听', snapshot: '快照', usn: 'USN',
+        copyRef: '复制引用', copiedRef: '引用已复制', urlRefTitle: 'URL 引用 · {url} · 来源 {origin}',
+        capabilityTab: '能力', capabilityBack: '搜索', capabilitySearch: '查找',
+        capabilityPlaceholder: '查找工具、MCP 动作或技能… 例如：搜索文件、写文件、运行命令',
+        capabilityHint: '输入意图以搜索实时工具与技能注册表；选中结果可预检。',
+        capabilityGlobalHint: '全局注册表视图：预设范围内的工具（如 bash、write）可能不在此显示。',
+        capabilityTotal: '匹配 {n} 条', capabilityPreflight: '预检',
+        capabilityRisk: '风险：{level}', capabilityApproval: '审批：{approval}', capabilityEmpty: '没有匹配的能力 · 换个意图试试',
+        capabilityError: '能力请求失败：', capabilityPreflightResult: '预检 {id} → 可调用：{value}',
+        capabilityPreflightFailed: '预检 {id} 失败：{error}', requestFailed: '请求失败',
         copiedPath: '已复制路径', revealed: '已在文件管理器中定位', opened: '已打开', inserted: '已插入 @file',
         insertFailed: '插入失败，已复制 @file', jumped: '已打开会话', jumpFailed: '已打开会话，但未定位到该消息',
         footer: '↑↓ 选择 · Enter 打开/跳转 · Ctrl+Shift+C 复制路径 · Ctrl+O 打开 · Alt+1–3 切换范围 · Esc 关闭',
@@ -319,6 +333,15 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         errorPrefix: 'Error de búsqueda: ', retry: 'Reintentar', indexing: 'indexando, resultados incompletos',
         statusLoading: 'Leyendo el estado del índice…', status: 'Índice: {entries} entradas · {mode} · {roots} raíces',
         live: 'en vivo', snapshot: 'instantánea', usn: 'USN',
+        copyRef: 'Copiar referencia de evidencia', copiedRef: 'Referencia copiada', urlRefTitle: 'Referencia URL · {url} · origen {origin}',
+        capabilityTab: 'Capacidades', capabilityBack: 'Buscar', capabilitySearch: 'Buscar',
+        capabilityPlaceholder: 'Busca una herramienta, acción MCP o skill… p. ej. buscar archivos, escribir un archivo, ejecutar un comando',
+        capabilityHint: 'Escribe una intención para buscar en los registros activos de herramientas y skills; selecciona un resultado para verificarlo antes de usarlo.',
+        capabilityGlobalHint: 'Vista del registro global: las herramientas limitadas al preset (como bash o write) pueden no aparecer aquí.',
+        capabilityTotal: 'Coincidencias: {n}', capabilityPreflight: 'Verificación previa',
+        capabilityRisk: 'riesgo: {level}', capabilityApproval: 'aprobación: {approval}', capabilityEmpty: 'Ninguna capacidad coincide · prueba otra intención',
+        capabilityError: 'Falló la solicitud de capacidades: ', capabilityPreflightResult: 'Verificación de {id} → invocable: {value}',
+        capabilityPreflightFailed: 'Falló la verificación de {id}: {error}', requestFailed: 'solicitud fallida',
         copiedPath: 'Ruta copiada', revealed: 'Mostrado en el gestor de archivos', opened: 'Abierto', inserted: '@file insertado',
         insertFailed: 'No se pudo insertar; @file copiado', jumped: 'Sesión abierta', jumpFailed: 'Sesión abierta, pero no se localizó el mensaje',
         footer: '↑↓ elegir · Enter abrir/ir · Ctrl+Shift+C copiar ruta · Ctrl+O abrir · Alt+1–3 ámbitos · Esc cerrar',
@@ -371,6 +394,15 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         errorPrefix: 'Falha na busca: ', retry: 'Tentar novamente', indexing: 'indexando, resultados incompletos',
         statusLoading: 'Lendo o estado do índice…', status: 'Índice: {entries} entradas · {mode} · {roots} raízes',
         live: 'ao vivo', snapshot: 'instantâneo', usn: 'USN',
+        copyRef: 'Copiar referência de evidência', copiedRef: 'Referência copiada', urlRefTitle: 'Referência de URL · {url} · origem {origin}',
+        capabilityTab: 'Capacidades', capabilityBack: 'Buscar', capabilitySearch: 'Buscar',
+        capabilityPlaceholder: 'Busque uma ferramenta, ação MCP ou skill… p. ex. buscar arquivos, escrever um arquivo, executar um comando',
+        capabilityHint: 'Digite uma intenção para buscar nos registros ativos de ferramentas e skills; selecione um resultado para pré-verificar.',
+        capabilityGlobalHint: 'Visão do registro global: ferramentas limitadas ao preset (como bash ou write) podem não aparecer aqui.',
+        capabilityTotal: 'Correspondências: {n}', capabilityPreflight: 'Pré-verificação',
+        capabilityRisk: 'risco: {level}', capabilityApproval: 'aprovação: {approval}', capabilityEmpty: 'Nenhuma capacidade correspondente · tente outra intenção',
+        capabilityError: 'Falha na solicitação de capacidades: ', capabilityPreflightResult: 'Pré-verificação de {id} → invocável: {value}',
+        capabilityPreflightFailed: 'Falha na pré-verificação de {id}: {error}', requestFailed: 'solicitação falhou',
         copiedPath: 'Caminho copiado', revealed: 'Mostrado no gerenciador de arquivos', opened: 'Aberto', inserted: '@file inserido',
         insertFailed: 'Falha ao inserir; @file copiado', jumped: 'Sessão aberta', jumpFailed: 'Sessão aberta, mas a mensagem não foi localizada',
         footer: '↑↓ escolher · Enter abrir/ir · Ctrl+Shift+C copiar caminho · Ctrl+O abrir · Alt+1–3 escopos · Esc fechar',
@@ -423,6 +455,15 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         errorPrefix: 'खोज विफल: ', retry: 'पुन: प्रयास', indexing: 'इंडेक्स बन रहा है, परिणाम अधूरे हो सकते हैं',
         statusLoading: 'इंडेक्स स्थिति पढ़ी जा रही है…', status: 'इंडेक्स {entries} प्रविष्टियाँ · {mode} · {roots} रूट',
         live: 'लाइव', snapshot: 'स्नैपशॉट', usn: 'USN',
+        copyRef: 'साक्ष्य संदर्भ कॉपी करें', copiedRef: 'संदर्भ कॉपी हुआ', urlRefTitle: 'URL संदर्भ · {url} · स्रोत {origin}',
+        capabilityTab: 'क्षमताएँ', capabilityBack: 'खोज', capabilitySearch: 'खोजें',
+        capabilityPlaceholder: 'कोई टूल, MCP क्रिया या स्किल खोजें… जैसे फ़ाइलें खोजना, फ़ाइल लिखना, कमांड चलाना',
+        capabilityHint: 'लाइव टूल और स्किल रजिस्ट्री में खोजने के लिए इरादा लिखें; किसी परिणाम को चुनकर पहले जाँचें।',
+        capabilityGlobalHint: 'वैश्विक रजिस्ट्री दृश्य: प्रीसेट-सीमित टूल (जैसे bash या write) यहाँ न दिखें।',
+        capabilityTotal: 'मिलान: {n}', capabilityPreflight: 'पूर्व-जाँच',
+        capabilityRisk: 'जोखिम: {level}', capabilityApproval: 'स्वीकृति: {approval}', capabilityEmpty: 'कोई मिलती क्षमता नहीं · दूसरा इरादा आज़माएँ',
+        capabilityError: 'क्षमता अनुरोध विफल: ', capabilityPreflightResult: '{id} की पूर्व-जाँच → कॉल योग्य: {value}',
+        capabilityPreflightFailed: '{id} की पूर्व-जाँच विफल: {error}', requestFailed: 'अनुरोध विफल',
         copiedPath: 'पथ कॉपी हुआ', revealed: 'फ़ाइल मैनेजर में दिखाया', opened: 'खोला गया', inserted: '@file डाला गया',
         insertFailed: 'डालना विफल; @file कॉपी हुआ', jumped: 'सत्र खुला', jumpFailed: 'सत्र खुला, पर संदेश नहीं मिला',
         footer: '↑↓ चुनें · Enter खोलें/जाएँ · Ctrl+Shift+C पथ कॉपी · Ctrl+O खोलें · Alt+1–3 क्षेत्र · Esc बंद',
@@ -497,6 +538,24 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         live: "リアルタイム",
         snapshot: "スナップショット",
         usn: "USN",
+        copyRef: "証拠参照をコピー",
+        copiedRef: "参照をコピーしました",
+        urlRefTitle: "URL 参照 · {url} · 提供元 {origin}",
+        capabilityTab: "機能",
+        capabilityBack: "検索",
+        capabilitySearch: "検索",
+        capabilityPlaceholder: "ツール、MCP アクション、スキルを検索… 例: ファイルを検索、ファイルを書き込む、コマンドを実行",
+        capabilityHint: "意図を入力してライブのツール/スキルレジストリを検索します。結果を選ぶと事前チェックできます。",
+        capabilityGlobalHint: "グローバルレジストリ表示: プリセット限定のツール（bash や write など）はここに表示されないことがあります。",
+        capabilityTotal: "一致: {n}",
+        capabilityPreflight: "事前チェック",
+        capabilityRisk: "リスク: {level}",
+        capabilityApproval: "承認: {approval}",
+        capabilityEmpty: "一致する機能がありません · 別の意図をお試しください",
+        capabilityError: "機能リクエストに失敗しました: ",
+        capabilityPreflightResult: "{id} の事前チェック → 呼び出し可能: {value}",
+        capabilityPreflightFailed: "{id} の事前チェックに失敗: {error}",
+        requestFailed: "リクエストに失敗しました",
         copiedPath: "パスをコピーしました",
         revealed: "ファイルマネージャーで表示しました",
         opened: "開きました",
@@ -623,6 +682,24 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         live: "en direct",
         snapshot: "instantané",
         usn: "USN",
+        copyRef: "Copier la référence de preuve",
+        copiedRef: "Référence copiée",
+        urlRefTitle: "Référence URL · {url} · origine {origin}",
+        capabilityTab: "Capacités",
+        capabilityBack: "Recherche",
+        capabilitySearch: "Rechercher",
+        capabilityPlaceholder: "Rechercher un outil, une action MCP ou une compétence… ex. rechercher des fichiers, écrire un fichier, exécuter une commande",
+        capabilityHint: "Saisissez une intention pour chercher dans les registres actifs d'outils et de compétences ; sélectionnez un résultat pour le pré-vérifier.",
+        capabilityGlobalHint: "Vue du registre global : les outils limités au preset (comme bash ou write) peuvent ne pas apparaître ici.",
+        capabilityTotal: "Correspondances : {n}",
+        capabilityPreflight: "Pré-vérification",
+        capabilityRisk: "risque : {level}",
+        capabilityApproval: "approbation : {approval}",
+        capabilityEmpty: "Aucune capacité correspondante · essayez une autre intention",
+        capabilityError: "Échec de la requête de capacités : ",
+        capabilityPreflightResult: "Pré-vérification de {id} → appelable : {value}",
+        capabilityPreflightFailed: "Échec de la pré-vérification de {id} : {error}",
+        requestFailed: "échec de la requête",
         copiedPath: "Chemin copié",
         revealed: "Révélé dans le gestionnaire de fichiers",
         opened: "Ouvert",
@@ -749,6 +826,24 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         live: "live",
         snapshot: "Snapshot",
         usn: "USN",
+        copyRef: "Evidenz-Referenz kopieren",
+        copiedRef: "Referenz kopiert",
+        urlRefTitle: "URL-Referenz · {url} · Quelle {origin}",
+        capabilityTab: "Fähigkeiten",
+        capabilityBack: "Suche",
+        capabilitySearch: "Suchen",
+        capabilityPlaceholder: "Werkzeug, MCP-Aktion oder Skill finden… z. B. Dateien suchen, Datei schreiben, Befehl ausführen",
+        capabilityHint: "Absicht eingeben, um die aktiven Werkzeug- und Skill-Registries zu durchsuchen; Ergebnis auswählen, um es vorab zu prüfen.",
+        capabilityGlobalHint: "Globale Registry-Ansicht: preset-beschränkte Werkzeuge (z. B. bash oder write) erscheinen hier möglicherweise nicht.",
+        capabilityTotal: "Treffer: {n}",
+        capabilityPreflight: "Vorabprüfung",
+        capabilityRisk: "Risiko: {level}",
+        capabilityApproval: "Freigabe: {approval}",
+        capabilityEmpty: "Keine passende Fähigkeit · andere Absicht versuchen",
+        capabilityError: "Fähigkeits-Anfrage fehlgeschlagen: ",
+        capabilityPreflightResult: "Vorabprüfung von {id} → aufrufbar: {value}",
+        capabilityPreflightFailed: "Vorabprüfung von {id} fehlgeschlagen: {error}",
+        requestFailed: "Anfrage fehlgeschlagen",
         copiedPath: "Pfad kopiert",
         revealed: "Im Dateimanager angezeigt",
         opened: "Geöffnet",
@@ -875,6 +970,24 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         live: "в реальном времени",
         snapshot: "снимок",
         usn: "USN",
+        copyRef: "Копировать ссылку-доказательство",
+        copiedRef: "Ссылка скопирована",
+        urlRefTitle: "Ссылка URL · {url} · источник {origin}",
+        capabilityTab: "Возможности",
+        capabilityBack: "Поиск",
+        capabilitySearch: "Найти",
+        capabilityPlaceholder: "Найдите инструмент, действие MCP или навык… напр. поиск файлов, запись файла, запуск команды",
+        capabilityHint: "Введите задачу, чтобы искать в живых реестрах инструментов и навыков; выберите результат для предварительной проверки.",
+        capabilityGlobalHint: "Просмотр глобального реестра: инструменты, ограниченные пресетом (например, bash или write), могут здесь не отображаться.",
+        capabilityTotal: "Совпадения: {n}",
+        capabilityPreflight: "Предпроверка",
+        capabilityRisk: "риск: {level}",
+        capabilityApproval: "одобрение: {approval}",
+        capabilityEmpty: "Нет подходящих возможностей · попробуйте другую задачу",
+        capabilityError: "Запрос возможностей не удался: ",
+        capabilityPreflightResult: "Предпроверка {id} → вызываемо: {value}",
+        capabilityPreflightFailed: "Предпроверка {id} не удалась: {error}",
+        requestFailed: "запрос не выполнен",
         copiedPath: "Путь скопирован",
         revealed: "Показано в файловом менеджере",
         opened: "Открыто",
@@ -990,6 +1103,31 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
       if (diff >= 0 && diff < 3_600_000) return t('minutesAgo', { n: Math.floor(diff / 60_000) })
       if (diff >= 0 && diff < 86_400_000) return t('hoursAgo', { n: Math.floor(diff / 3_600_000) })
       return ''
+    }
+
+    // A `ref://url?...` ref carries the readable URL as a query parameter. The
+    // panel has no server route that returns URL occurrences, so this only
+    // formats a URL ref that already arrived on a hit: file/session refs keep
+    // the plain "ref" chip, URL refs show the readable URL plus origin/title.
+    function parseUrlRefInfo(ref) {
+      if (typeof ref !== 'string' || !ref.startsWith('ref://url?')) return null
+      try {
+        const parsed = new URL(ref)
+        const target = parsed.searchParams.get('url') || parsed.searchParams.get('u')
+        if (target === null || target === '') return null
+        const address = new URL(target)
+        const origin = address.origin && address.origin !== 'null' ? address.origin : (address.host || 'url')
+        return { url: target, origin }
+      } catch {
+        return null
+      }
+    }
+
+    /** Readable one-line URL for the ref chip: drop the scheme, cap the width. */
+    function shortUrlLabel(url, max) {
+      const limit = typeof max === 'number' && max > 8 ? max : 56
+      const text = String(url).replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+      return text.length <= limit ? text : text.slice(0, limit - 1) + '…'
     }
 
     function copyText(text) {
@@ -2594,10 +2732,11 @@ self.onmessage = event => {
           }),
           h('button', { className: 'dsh-locator-dirbtn', disabled: capBusy, onClick: () => void runCapabilitySearch() },
             capBusy ? t('loading') : t('capabilitySearch'))),
+        h('div', { className: 'dsh-locator-groupempty' }, t('capabilityGlobalHint')),
         capResult === null
           ? h('div', { className: 'dsh-locator-empty' }, t('capabilityHint'))
           : capResult.ok === false
-            ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, String(capResult.error || 'request failed'))
+            ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, t('capabilityError') + String(capResult.error || t('requestFailed')))
             : [
                 h('div', { className: 'dsh-locator-grouphead' },
                   h('span', null, t('capabilityTotal', { n: capResult.total || 0 }))),
@@ -2611,14 +2750,20 @@ self.onmessage = event => {
                     h('span', { className: 'dsh-locator-badge' }, hit.card.kind),
                     h('span', { className: 'dsh-locator-name' }, hit.card.name),
                     h('span', { className: 'dsh-locator-meta', style: { marginLeft: 'auto' } },
-                      'risk:' + hit.card.risk.level + ' · approval:' + hit.card.permission.approval)),
+                      t('capabilityRisk', { level: hit.card.risk.level }) + ' · ' + t('capabilityApproval', { approval: hit.card.permission.approval }))),
                   h('div', { className: 'dsh-locator-snippet' }, hit.card.summary))),
+                (capResult.hits || []).length === 0
+                  ? h('div', { className: 'dsh-locator-groupempty' }, t('capabilityEmpty'))
+                  : null,
                 capDetail === null
                   ? null
                   : h('div', { className: 'dsh-locator-groupempty' },
-                      t('capabilityPreflight') + ' ' + capDetail.card.id + ' → ' + (capDetail.result && capDetail.result.ok === false
-                        ? String(capDetail.result.error)
-                        : 'callable=' + String(capDetail.result && capDetail.result.next && capDetail.result.next.callable))),
+                      capDetail.result && capDetail.result.ok === false
+                        ? t('capabilityPreflightFailed', { id: capDetail.card.id, error: String(capDetail.result.error || t('requestFailed')) })
+                        : t('capabilityPreflightResult', {
+                            id: capDetail.card.id,
+                            value: String(capDetail.result && capDetail.result.next && capDetail.result.next.callable),
+                          })),
               ],
       ]
 
@@ -2929,6 +3074,13 @@ self.onmessage = event => {
         const meta = isContent
           ? formatTime(hit.mtime)
           : [formatSize(hit.size), formatTime(hit.mtime)].filter(Boolean).join(' · ')
+        // URL refs are metadata-only evidence; show the readable URL instead of
+        // the opaque "ref" label and keep origin/title in the tooltip.
+        const urlRef = typeof hit.ref === 'string' ? parseUrlRefInfo(hit.ref) : null
+        const urlTitle = urlRef !== null && typeof hit.title === 'string' && hit.title !== '' ? hit.title : ''
+        const refTitle = urlRef === null
+          ? t('copyRef')
+          : t('copyRef') + ' · ' + t('urlRefTitle', { url: urlRef.url, origin: urlRef.origin }) + (urlTitle === '' ? '' : ' · ' + urlTitle)
         return h('div', {
           key: group + ':' + hit.path + ':' + String(hit.messageId || index),
           id: 'dsh-locator-opt-' + index,
@@ -2953,15 +3105,16 @@ self.onmessage = event => {
             h('span', { className: 'dsh-locator-pathlabel' }, hit.path),
             hit.ref
               ? h('button', {
-                  className: 'dsh-locator-refchip',
+                  className: 'dsh-locator-refchip' + (urlRef === null ? '' : ' dsh-locator-refchip-url'),
                   type: 'button',
-                  title: t('copyRef'),
+                  title: refTitle,
+                  'aria-label': refTitle,
                   onMouseDown: event => event.preventDefault(),
                   onClick: event => {
                     event.stopPropagation()
                     copyText(hit.ref).then(() => notify(t('copiedRef'))).catch(() => {})
                   },
-                }, 'ref')
+                }, urlRef === null ? 'ref' : shortUrlLabel(urlRef.url))
               : null,
           ),
         )

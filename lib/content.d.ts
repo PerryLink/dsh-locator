@@ -53,6 +53,11 @@ export interface ContentProgress {
     /** Epoch milliseconds when this phase started. */
     startedAt: number;
 }
+/** Distinct evidence-ref identities stored in the content index, grouped by kind. */
+export interface RefKindCount {
+    total: number;
+    byKind: Record<string, number>;
+}
 export interface ContentState {
     building: boolean;
     files: number;
@@ -74,6 +79,8 @@ export interface ContentState {
     reasoningIndex?: boolean;
     /** Tool-result text is indexed as its own session documents. */
     toolResultsIndex?: boolean;
+    /** Distinct stored evidence refs grouped by kind; absent before the database opens. */
+    refs?: RefKindCount;
 }
 export interface ContentOptions {
     stateDir: string;
@@ -303,6 +310,32 @@ export declare class ContentIndex {
         refs: number;
         occurrences: number;
     };
+    /**
+     * Distinct evidence refs grouped by kind, for `locator_status`. One GROUP BY
+     * keeps the status call cheap; a database without the additive tables reports
+     * zeros instead of failing.
+     * @returns total distinct refs plus one count per ref kind.
+     */
+    refsByKind(): RefKindCount;
+    /**
+     * Persist the lazy "missing" marker for one ref across all its occurrences.
+     * Only the first miss writes; later resolves read the stored meta instead of
+     * re-statting the spill file / attachment store.
+     * @param refKey - complete ref string of the missing target.
+     * @returns true when this call wrote a new marker, false when it was cached.
+     */
+    markRefMissing(refKey: string): boolean;
+    /**
+     * Stored session-event refs for one page of indexed message ids, used by
+     * `locator_find` to attach the event seq/ref to session hits.
+     * @param sessionId - owning session.
+     * @param messageIds - message ids from the current hit page.
+     * @returns message id → { seq, ref }; ids without a stored event are absent.
+     */
+    sessionEventRefs(sessionId: string, messageIds: readonly string[]): Map<string, {
+        seq: number;
+        ref: string;
+    }>;
     /**
      * Read one event by sequence from the local session log, for refs resolution.
      * The header is the first physical line, so event `seq` is line `seq + 1`.

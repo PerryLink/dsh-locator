@@ -366,6 +366,16 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.17.0 更新
+
+- **兼容 DSH 0.2.2**：宿主现在先对每条 Web 路由鉴权、再把已认证的 Peer 交给 handler，同时把旧的 `connection.requestRejection` 换成 `connection.admit`。本版优先信任宿主交来的 Peer（保留本地同源校验），并兼容两种旧 connection 形态（都没有时仍 fail-closed 503），修复 0.16.0 在 DSH 0.2.2 上面板 HTTP 路由全部 503 的问题。
+- **会话命中带事件地址**：`locator_find` 的会话命中新增 `seq` 与 `eventRef`（`ref://session-event?sid=…&seq=N`），可直接交给 `locator_resolve`/`locator_cite`；同时修复会话命中时 `provenance.indexedAt` 为小数导致工具输出被判 invalid 的问题。
+- **状态页 refs 计数**：`locator_status` 新增 additive `content.refs`（`total` 与 `byKind`），显示已存的 URL / session-event / spill / attachment 证据引用数。
+- **缺失引用懒写回**：spill / attachment 目标已不存在时，第一次 resolve 会把 `missing` 标记写回 `refs.meta`，后续直接读标记（warning `missing-state-cached`），不再反复探测文件系统。
+- **面板**：Capabilities 与 ref chip 文案补齐 9 种语言（英文 fallback 不变）；Capabilities 页注明这是全局能力注册表视图（preset 作用域工具如 bash/write 可能不出现）；URL 引用显示截断后的可读 URL，并带 origin/title tooltip。
+- 新增 `test/client.spec.ts`（client.js 语法、9 语言键集、面板路由契约、URL ref helper）；`test/lag.spec.ts` 改为显式等待上限 + 自校准阈值。
+- 测试 **205 个**；六引擎按 0.17.0 重建（darwin 发布二进制仍由 macOS CI 以 CGO/FSEvents 重建）。
+
 ## 0.16.0 更新
 
 - **面板能力视图**：新增 `POST /dsh-locator/capabilities`（与其它面板路由同一 trust fence），把 `capability_search`/`capability_preflight` 的数据接到面板；面板新增 **Capabilities** 标签：输入意图 → 能力卡列表（kind/risk/approval），选中可看 preflight（callable/schema/副作用）。英文文案，其余语言回退。

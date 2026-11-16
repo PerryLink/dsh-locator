@@ -50,6 +50,21 @@ export declare const CONTENT_STATE_SCHEMA: {
         readonly toolResultsIndex: {
             readonly type: "boolean";
         };
+        readonly refs: {
+            readonly type: "object";
+            readonly additionalProperties: false;
+            readonly properties: {
+                readonly total: {
+                    readonly type: "integer";
+                    readonly description: "Distinct evidence ref identities stored in the content index.";
+                };
+                readonly byKind: {
+                    readonly type: "object";
+                    readonly additionalProperties: true;
+                    readonly description: "Distinct ref identities per kind (url, session-event, spill, attachment).";
+                };
+            };
+        };
         readonly progress: {
             readonly type: "object";
             readonly additionalProperties: false;

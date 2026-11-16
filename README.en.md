@@ -404,6 +404,16 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.17.0 upgrade notes
+
+- **DSH 0.2.2 compatibility**: the host now authenticates each Web route before dispatch and hands the admitted Peer to the handler, and it replaced the old `connection.requestRejection` hook with `connection.admit`. The plugin trusts the host-admitted Peer (keeping the local same-origin checks), accepts either legacy connection shape, and stays fail-closed 503 when no signal exists — fixing the 503 on every panel HTTP route under DSH 0.2.2.
+- **Session hits carry their event address**: `locator_find` session hits now include `seq` and `eventRef` (`ref://session-event?sid=…&seq=N`), ready for `locator_resolve`/`locator_cite`. Fractional `provenance.indexedAt` values are truncated so a session hit can no longer fail output validation.
+- **Ref counts in status**: `locator_status` gains an additive `content.refs` block (`total` and `byKind`) counting the stored URL / session-event / spill / attachment evidence refs.
+- **Lazy missing markers**: when a spill or attachment target is already gone, the first resolve writes a `missing` marker back into `refs.meta`; later resolves answer from the marker (warning `missing-state-cached`) instead of probing the filesystem again.
+- **Panel**: Capabilities tab and ref chip strings are localised in all nine languages (English fallback unchanged); the tab states that it shows the global capability registry (preset-scoped tools such as bash/write may be absent); URL refs render as a readable truncated URL with an origin/title tooltip.
+- New `test/client.spec.ts` covers client.js syntax, the nine locale key sets, panel route contracts and the URL-ref helper; `test/lag.spec.ts` now uses explicit wait deadlines and self-calibrated thresholds.
+- **205 tests**; six engine binaries rebuilt at 0.17.0 (the darwin release binaries are rebuilt on macOS with CGO/FSEvents by CI).
+
 ## 0.16.0 upgrade notes
 
 - **Capability view in the panel**: a new `POST /dsh-locator/capabilities` route (same trust fence as every panel route) exposes `capability_search`/`capability_preflight` data to the Web panel, which gains a **Capabilities** tab: type an intent, get ranked cards with kind/risk/approval, select one to see its preflight result. English strings; other locales fall back.

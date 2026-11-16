@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.0 — 2026-11-16
+
+* **Host 0.2.2 compatibility (panel HTTP)**: DSH 0.2.2 authenticates each Web route before dispatch and hands the admitted Peer to the handler, and it replaced the old `connection.requestRejection` trust-fence hook with `connection.admit`. The HTTP surface now trusts the host-admitted Peer (keeping the local same-origin markers), still accepts either legacy connection shape, and stays fail-closed 503 when no signal exists — restoring every `POST /dsh-locator/*` route instead of answering 503. Tests cover peer admission, rejection pass-through, throwing/absent services and the local same-origin fence.
+* **Session hits carry their event address**: `locator_find` session hits add `seq` and `eventRef` (`ref://session-event?sid=…&seq=N`) for every indexed message, so a cited session result resolves through `locator_resolve`/`locator_cite` without a second lookup. Fractional `provenance.indexedAt` values are truncated so the declared integer schema can no longer reject a result.
+* **Ref counts in `locator_status`**: new additive `content.refs` (`total`, `byKind`) counting distinct stored URL / session-event / spill / attachment refs.
+* **Lazy missing markers**: resolving a spill or attachment ref whose target is gone writes a one-shot `missing` marker into the existing refs metadata and answers later resolves from it (warning `missing-state-cached`), avoiding repeated filesystem probes.
+* **Panel**: Capabilities tab and ref chip strings are localised in all nine languages (English fallback unchanged), the tab states that it shows the global capability registry (preset-scoped tools such as `bash`/`write` may be absent), and URL refs render as a readable truncated URL with an origin/title tooltip.
+* **Client test**: new `test/client.spec.ts` checks that the single-file bundle parses, that all nine locale key sets match the English baseline (including template placeholders), that the panel route markers exist and that the URL-ref helper behaves.
+* **Stability**: `test/lag.spec.ts` uses an explicit wait deadline and self-calibrated gap budgets instead of a fixed poll and absolute thresholds.
+* `205 tests`; six engine binaries rebuilt at 0.17.0 (darwin release binaries are rebuilt on macOS by CI).
+
 ## 0.16.0 — 2026-11-14
 
 * **Capability view in the Web panel (Wave 3, part 2)**: new `POST /dsh-locator/capabilities` route (same trust fence as every other panel route) serves `capability_search` and `capability_preflight` data from the live tool/skill registries. The panel gains a **Capabilities** tab: type an intent, get ranked cards with kind/risk/approval, select one to see its preflight result (`callable`, schema validity, side effects). English strings; other locales fall back.

@@ -97,6 +97,12 @@ export interface ContentProgress {
   startedAt: number
 }
 
+/** Distinct evidence-ref identities stored in the content index, grouped by kind. */
+export interface RefKindCount {
+  total: number
+  byKind: Record<string, number>
+}
+
 export interface ContentState {
   building: boolean
   files: number
@@ -118,6 +124,8 @@ export interface ContentState {
   reasoningIndex?: boolean
   /** Tool-result text is indexed as its own session documents. */
   toolResultsIndex?: boolean
+  /** Distinct stored evidence refs grouped by kind; absent before the database opens. */
+  refs?: RefKindCount
 }
 
 export interface ContentOptions {
@@ -206,6 +214,7 @@ export class ContentIndex {
       fullIndex: this.options.maxTotalBytes === 0 && this.options.maxFiles === 0,
       reasoningIndex: this.options.includeReasoning === true,
       toolResultsIndex: this.options.includeToolResults === true,
+      ...(this.db === null ? {} : { refs: this.refsByKind() }),
     }
   }
 
@@ -1284,6 +1293,77 @@ export class ContentIndex {
   }
 
   /**
+   * Distinct evidence refs grouped by kind, for `locator_status`. One GROUP BY
+   * keeps the status call cheap; a database without the additive tables reports
+   * zeros instead of failing.
+   * @returns total distinct refs plus one count per ref kind.
+   */
+  refsByKind(): RefKindCount {
+    if (this.db === null) return { total: 0, byKind: {} }
+    try {
+      const rows = this.db.prepare('SELECT kind, COUNT(DISTINCT ref_key) AS n FROM refs GROUP BY kind').all() as Array<{ kind?: string; n?: number }>
+      const byKind: Record<string, number> = {}
+      let total = 0
+      for (const row of rows) {
+        if (typeof row.kind !== 'string' || row.kind === '') continue
+        const count = Number(row.n ?? 0)
+        if (!Number.isFinite(count) || count <= 0) continue
+        byKind[row.kind] = count
+        total += count
+      }
+      return { total, byKind }
+    } catch { return { total: 0, byKind: {} } }
+  }
+
+  /**
+   * Persist the lazy "missing" marker for one ref across all its occurrences.
+   * Only the first miss writes; later resolves read the stored meta instead of
+   * re-statting the spill file / attachment store.
+   * @param refKey - complete ref string of the missing target.
+   * @returns true when this call wrote a new marker, false when it was cached.
+   */
+  markRefMissing(refKey: string): boolean {
+    if (this.db === null || refKey === '') return false
+    try {
+      const rows = this.db.prepare('SELECT rowid AS rowid, meta AS meta FROM refs WHERE ref_key = ?').all(refKey) as Array<{ rowid: number; meta: string | null }>
+      if (rows.length === 0) return false
+      const update = this.db.prepare('UPDATE refs SET meta = ? WHERE rowid = ?')
+      let marked = false
+      for (const row of rows) {
+        if (refMetaMissing(row.meta)) continue
+        update.run(markRefMeta(row.meta), row.rowid)
+        marked = true
+      }
+      return marked
+    } catch { return false }
+  }
+
+  /**
+   * Stored session-event refs for one page of indexed message ids, used by
+   * `locator_find` to attach the event seq/ref to session hits.
+   * @param sessionId - owning session.
+   * @param messageIds - message ids from the current hit page.
+   * @returns message id → { seq, ref }; ids without a stored event are absent.
+   */
+  sessionEventRefs(sessionId: string, messageIds: readonly string[]): Map<string, { seq: number; ref: string }> {
+    const out = new Map<string, { seq: number; ref: string }>()
+    if (this.db === null || sessionId === '') return out
+    const unique = [...new Set(messageIds.filter(id => id !== ''))]
+    if (unique.length === 0) return out
+    try {
+      const placeholders = unique.map(() => '?').join(', ')
+      const rows = this.db.prepare(`SELECT message_id AS messageId, ref_key AS refKey, seq AS seq
+        FROM refs WHERE session_id = ? AND kind = 'session-event' AND message_id IN (${placeholders})
+        ORDER BY seq`).all(sessionId, ...unique) as Array<{ messageId?: string; refKey?: string; seq?: number }>
+      for (const row of rows) {
+        if (typeof row.messageId !== 'string' || typeof row.refKey !== 'string' || typeof row.seq !== 'number') continue
+        if (!out.has(row.messageId)) out.set(row.messageId, { seq: row.seq, ref: row.refKey })
+      }
+    } catch { /* older/foreign databases keep hits without event refs */ }
+    return out
+  }
+
+  /**
    * Read one event by sequence from the local session log, for refs resolution.
    * The header is the first physical line, so event `seq` is line `seq + 1`.
    * @param sessionId - session id.
@@ -1542,10 +1622,50 @@ function urlIdentity(raw: string): { ref: string; target: string; sha256: string
   return { ref, target, sha256: createHash('sha256').update(target).digest('hex') }
 }
 
+/** Longest `refs.meta` JSON string this release writes. */
+const REF_META_LIMIT = 400
+
 /** Bounded JSON metadata column for one ref. */
 function refMeta(value: Record<string, unknown>): string {
   const text = JSON.stringify(value)
-  return text.length > 400 ? `${text.slice(0, 397)}...` : text
+  return text.length > REF_META_LIMIT ? `${text.slice(0, REF_META_LIMIT - 3)}...` : text
+}
+
+/** Whether a stored ref meta JSON already carries the lazy missing marker. */
+function refMetaMissing(meta: string | null): boolean {
+  if (meta === null || meta === '') return false
+  try {
+    const parsed: unknown = JSON.parse(meta)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      && (parsed as { missing?: unknown }).missing === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Merge the lazy missing marker into one ref's stored meta JSON. The marker is
+ * written first and optional metadata is dropped as needed, so a bounded column
+ * never truncates it into unparseable JSON.
+ */
+function markRefMeta(previous: string | null): string {
+  const extras = new Map<string, unknown>()
+  if (previous !== null) {
+    try {
+      const parsed: unknown = JSON.parse(previous)
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+          if (key !== 'missing' && key !== 'missingAt') extras.set(key, value)
+        }
+      }
+    } catch { /* only the marker survives */ }
+  }
+  const entries = [...extras.entries()]
+  for (let keep = entries.length; keep >= 0; keep--) {
+    const text = JSON.stringify({ missing: true, missingAt: Date.now(), ...Object.fromEntries(entries.slice(0, keep)) })
+    if (text.length <= REF_META_LIMIT) return text
+  }
+  return JSON.stringify({ missing: true, missingAt: Date.now() })
 }
 
 /**

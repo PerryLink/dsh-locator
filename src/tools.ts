@@ -364,6 +364,7 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex) {
             toolResultsIndex?: boolean
             progress?: { phase?: string; scanned?: number; indexed?: number; total?: number; path?: string; startedAt?: number }
             warnings?: string[]
+            refs?: { total?: number; byKind?: Record<string, number> }
           }
           usn?: boolean
           scanning?: boolean
@@ -387,6 +388,12 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex) {
           if (progress !== undefined) {
             const total = typeof progress.total === 'number' ? ` / ${String(progress.total)}` : ''
             lines.push(`  building: ${progress.phase === 'sessions' ? 'sessions' : 'files'} ${String(progress.scanned ?? 0)}${total} scanned, ${String(progress.indexed ?? 0)} indexed${typeof progress.path === 'string' && progress.path !== '' ? ` · ${progress.path}` : ''}`)
+          }
+          if (v.content.refs !== undefined) {
+            const kinds = Object.entries(v.content.refs.byKind ?? {})
+              .map(([kind, count]) => `${kind} ${String(count)}`)
+              .join(', ')
+            lines.push(`  refs: ${String(v.content.refs.total ?? 0)}${kinds === '' ? '' : ` (${kinds})`}`)
           }
         }
         if (v.warning !== undefined) lines.push(`  warning: ${v.warning}`)

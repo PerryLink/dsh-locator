@@ -404,6 +404,16 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Notas de atualização 0.17.0
+
+- **Compatibilidade com DSH 0.2.2**: o host agora autentica cada rota Web antes do despacho e entrega o Peer admitido ao handler, e trocou o antigo gancho `connection.requestRejection` por `connection.admit`. O plugin confia nesse Peer (mantendo as checagens locais de mesma origem), aceita também os dois formatos antigos e continua fail-closed 503 quando não há sinal — corrigindo o 503 em todas as rotas HTTP do painel no DSH 0.2.2.
+- **Hits de sessão levam o endereço do evento**: `locator_find` agora inclui `seq` e `eventRef` (`ref://session-event?sid=…&seq=N`) nos hits de sessão, prontos para `locator_resolve`/`locator_cite`. Valores fracionários de `provenance.indexedAt` são truncados para que um hit de sessão não falhe a validação de saída.
+- **Contagem de refs no status**: `locator_status` ganha `content.refs` (aditivo; `total` e `byKind`) contando as refs de evidência URL / session-event / spill / attachment armazenadas.
+- **Marcadores de ausência preguiçosos**: quando o destino de um spill ou anexo já não existe, o primeiro resolve grava um marcador `missing` em `refs.meta`; os resolves seguintes respondem pelo marcador (aviso `missing-state-cached`) sem sondar o sistema de arquivos de novo.
+- **Painel**: textos da aba Capabilities e do chip de ref localizados nos nove idiomas (fallback em inglês inalterado); a aba informa que mostra o registro global de capacidades (ferramentas com escopo de preset, como bash/write, podem não aparecer); refs URL aparecem como URL legível truncada com tooltip de origin/title.
+- Novo `test/client.spec.ts` (sintaxe do client.js, chaves dos nove idiomas, contratos de rotas do painel e helper de URL ref); `test/lag.spec.ts` agora usa prazos explícitos e limites autocalibrados.
+- **205 tests**; os seis binários do motor foram reconstruídos em 0.17.0 (os binários darwin de release são reconstruídos pelo CI do macOS com CGO/FSEvents).
+
 ## Notas de atualização 0.16.0
 
 - **Visão de capacidades no painel**: nova rota `POST /dsh-locator/capabilities` (mesmo trust fence) expõe `capability_search`/`capability_preflight` ao painel, que ganha uma aba **Capabilities**: digite uma intenção, veja cartões com kind/risk/approval e selecione para ver o preflight. Textos em inglês; outros idiomas usam fallback.

@@ -19,7 +19,8 @@ import type { LocatorRuntime } from '../src/runtime.ts'
 interface RegisteredRoute {
   kind: string
   path: string
-  handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  auth?: string
+  handler: (req: IncomingMessage, res: ServerResponse, peer?: unknown) => void | Promise<void>
 }
 
 /** A minimal connection service: rejection is configurable and can be swapped mid-test. */
@@ -35,14 +36,35 @@ class FakeConnection {
   }
 }
 
+/**
+ * Host 0.2.2+ connection shape: `admit()` returns the admitted peer or a
+ * rejection status. Exercised separately from the legacy `requestRejection` API.
+ */
+class FakeAdmitConnection {
+  rejection: 401 | 403 | 503 | undefined = undefined
+  omitOutcome = false
+  calls = 0
+  throws = false
+
+  admit(): { peer?: unknown; rejection?: number } | undefined {
+    this.calls++
+    if (this.throws) throw new Error('admit exploded')
+    if (this.rejection !== undefined) return { rejection: this.rejection }
+    if (this.omitOutcome) return {}
+    return { peer: { principal: { kind: 'owner' } } }
+  }
+}
+
+type FakeConnectionService = FakeConnection | FakeAdmitConnection
+
 interface FakeHarness {
   ctx: Context
   routes: RegisteredRoute[]
-  connection: FakeConnection | undefined
-  setConnection(connection: FakeConnection | undefined): void
+  connection: FakeConnectionService | undefined
+  setConnection(connection: FakeConnectionService | undefined): void
 }
 
-function fakeHarness(options: { connection?: FakeConnection; missingDeps?: readonly string[] } = {}): FakeHarness {
+function fakeHarness(options: { connection?: FakeConnectionService; missingDeps?: readonly string[] } = {}): FakeHarness {
   const routes: RegisteredRoute[] = []
   let connection = options.connection
   const services = new Map<string, unknown>()
@@ -138,11 +160,12 @@ async function callRoute(
   harness: FakeHarness,
   path: string,
   request: IncomingMessage,
+  peer?: unknown,
 ): Promise<FakeResponse> {
   const route = harness.routes.find(candidate => candidate.path === path)
   if (route === undefined) throw new Error(`route not registered: ${path}`)
   const response = new FakeResponse()
-  await route.handler(request, response as unknown as ServerResponse)
+  await route.handler(request, response as unknown as ServerResponse, peer)
   return response
 }
 
@@ -240,6 +263,99 @@ describe('HTTP trust fence', () => {
     )
     expect(response.statusCode).toBe(200)
     expect(response.json().ok).toBe(true)
+  })
+})
+
+describe('HTTP trust fence (host 0.2.2 admit API)', () => {
+  it('accepts a request the host admits as a peer', async () => {
+    const connection = new FakeAdmitConnection()
+    const harness = fakeHarness({ connection })
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(200)
+    expect(response.json().ok).toBe(true)
+    expect(connection.calls).toBe(1)
+  })
+
+  it('passes an admit rejection through unchanged', async () => {
+    const connection = new FakeAdmitConnection()
+    connection.rejection = 401
+    const harness = fakeHarness({ connection })
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(401)
+    expect(connection.calls).toBe(1)
+  })
+
+  it('answers 503 when admit throws', async () => {
+    const connection = new FakeAdmitConnection()
+    connection.throws = true
+    const harness = fakeHarness({ connection })
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(503)
+  })
+
+  it('answers 503 when admit returns neither a peer nor a rejection', async () => {
+    const connection = new FakeAdmitConnection()
+    connection.omitOutcome = true
+    const harness = fakeHarness({ connection })
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(503)
+  })
+
+  it('treats a connection service with neither trust API as unavailable', async () => {
+    const harness = fakeHarness({ connection: {} as unknown as FakeConnectionService })
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(503)
+  })
+
+  it('still enforces the local same-origin markers behind admit', async () => {
+    const connection = new FakeAdmitConnection()
+    const harness = fakeHarness({ connection })
+    registerHttp(harness.ctx, fakeRuntime())
+    const crossSite = await callRoute(harness, '/dsh-locator/status', fakeRequest({}, { 'sec-fetch-site': 'cross-site' }))
+    expect(crossSite.statusCode).toBe(403)
+  })
+})
+
+describe('HTTP host-authenticated Peer (DSH 0.2.x)', () => {
+  const peer = { principal: { kind: 'owner' } }
+
+  it('accepts the host-admitted Peer even when the connection service is not visible', async () => {
+    const harness = fakeHarness()
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}), peer)
+    expect(response.statusCode).toBe(200)
+    expect(response.json().ok).toBe(true)
+  })
+
+  it('registers every panel route with the host auth policy required', () => {
+    const harness = fakeHarness()
+    registerHttp(harness.ctx, fakeRuntime())
+    expect(harness.routes.length).toBeGreaterThan(0)
+    for (const route of harness.routes) expect(route.auth).toBe('required')
+  })
+
+  it('trusts the Peer over the legacy connection rejection', async () => {
+    const connection = new FakeConnection()
+    connection.rejection = 401
+    const harness = fakeHarness({ connection })
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}), peer)
+    expect(response.statusCode).toBe(200)
+    expect(connection.calls).toBe(0)
+  })
+
+  it('still refuses cross-site browser markers behind an admitted Peer', async () => {
+    const harness = fakeHarness()
+    registerHttp(harness.ctx, fakeRuntime())
+    const crossSite = await callRoute(harness, '/dsh-locator/status', fakeRequest({}, { 'sec-fetch-site': 'cross-site' }), peer)
+    expect(crossSite.statusCode).toBe(403)
+    const foreignOrigin = await callRoute(harness, '/dsh-locator/status', fakeRequest({}, { origin: 'http://evil.example' }), peer)
+    expect(foreignOrigin.statusCode).toBe(403)
   })
 })
 

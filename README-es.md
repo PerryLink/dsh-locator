@@ -403,6 +403,16 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
+## Notas de actualización 0.17.0
+
+- **Compatibilidad con DSH 0.2.2**: el host ahora autentica cada ruta Web antes del despacho y entrega el Peer admitido al handler, y sustituyó el antiguo gancho `connection.requestRejection` por `connection.admit`. El plugin confía en ese Peer (manteniendo las comprobaciones locales de mismo origen), acepta también las dos formas antiguas y sigue cerrando con 503 si no hay ninguna señal: corrige el 503 en todas las rutas HTTP del panel bajo DSH 0.2.2.
+- **Los hits de sesión llevan su dirección de evento**: `locator_find` añade `seq` y `eventRef` (`ref://session-event?sid=…&seq=N`) a los hits de sesión, listos para `locator_resolve`/`locator_cite`. Los valores fraccionarios de `provenance.indexedAt` se truncan para que un hit de sesión no pueda fallar la validación de salida.
+- **Conteo de refs en status**: `locator_status` añade `content.refs` (`total` y `byKind`) con las refs de evidencia URL / session-event / spill / attachment almacenadas.
+- **Marcas de ausencia perezosas**: si el destino de un spill o adjunto ya no existe, el primer resolve escribe una marca `missing` en `refs.meta`; los siguientes responden desde la marca (aviso `missing-state-cached`) sin volver a inspeccionar el sistema de archivos.
+- **Panel**: los textos de la pestaña Capabilities y del chip de ref están en los nueve idiomas (fallback en inglés sin cambios); la pestaña indica que muestra el registro global de capacidades (las herramientas con ámbito de preset, como bash/write, pueden no aparecer); las refs URL se muestran como URL legible truncada con tooltip de origin/title.
+- Nuevo `test/client.spec.ts` (sintaxis de client.js, claves de los nueve idiomas, contratos de rutas del panel y helper de URL ref); `test/lag.spec.ts` usa ahora plazos explícitos y umbrales autocalibrados.
+- **205 tests**; los seis binarios del motor se reconstruyeron en 0.17.0 (los binarios darwin de release los reconstruye macOS CI con CGO/FSEvents).
+
 ## Notas de actualización 0.16.0
 
 - **Vista de capacidades en el panel**: nueva ruta `POST /dsh-locator/capabilities` (mismo trust fence) que expone `capability_search`/`capability_preflight` al panel, con una pestaña **Capabilities**: escribe una intención, obtén tarjetas con kind/risk/approval y selecciona una para ver su preflight. Textos en inglés; otros idiomas usan fallback.

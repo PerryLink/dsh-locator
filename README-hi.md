@@ -404,6 +404,16 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
 
+## 0.17.0 अपग्रेड नोट्स
+
+- **DSH 0.2.2 संगतता**: होस्ट अब हर Web route को dispatch से पहले authenticate करके admitted Peer handler को देता है, और पुराने `connection.requestRejection` की जगह `connection.admit` आ गया है। plugin उस Peer पर भरोसा करता है (local same-origin checks बने रहते हैं), दोनों पुराने रूप भी स्वीकारता है, और कोई signal न हो तो fail-closed 503 रहता है — इससे DSH 0.2.2 पर panel की सभी HTTP रूट का 503 ठीक होता है।
+- **Session hits में event address**: `locator_find` के session hits में अब `seq` और `eventRef` (`ref://session-event?sid=…&seq=N`) जुड़ते हैं, जो सीधे `locator_resolve`/`locator_cite` को दिए जा सकते हैं। `provenance.indexedAt` के भिन्नात्मक मान truncate होते हैं ताकि session hit output validation में fail न हो।
+- **Status में refs गिनती**: `locator_status` में additive `content.refs` (`total` और `byKind`) जुड़ा, जो मौजूद URL / session-event / spill / attachment evidence refs गिनता है।
+- **गायब refs का lazy marker**: spill या attachment का लक्ष्य पहले से न हो तो पहला resolve `refs.meta` में `missing` marker लिखता है; आगे के resolves marker से उत्तर देते हैं (warning `missing-state-cached`) और फ़ाइल सिस्टम दोबारा नहीं जाँचते।
+- **Panel**: Capabilities tab और ref chip के टेक्स्ट नौ भाषाओं में स्थानीयकृत (अंग्रेज़ी fallback वही); tab बताता है कि यह global capability registry है (preset-scoped tools जैसे bash/write शायद न दिखें); URL refs छोटी पढ़ने योग्य URL के रूप में origin/title tooltip के साथ दिखती हैं।
+- नया `test/client.spec.ts` (client.js syntax, नौ भाषाओं के key sets, panel route contracts, URL-ref helper); `test/lag.spec.ts` अब स्पष्ट wait deadline और self-calibrated thresholds इस्तेमाल करता है।
+- **205 tests**; छह engine binaries 0.17.0 पर rebuild (darwin release binaries CI में macOS + CGO/FSEvents से बनते हैं)।
+
 ## 0.16.0 अपग्रेड नोट्स
 
 - **Panel में capability view**: नया `POST /dsh-locator/capabilities` route (वही trust fence) जो `capability_search`/`capability_preflight` डेटा panel तक पहुँचाता है; panel में **Capabilities** tab: intent टाइप करें, kind/risk/approval वाले cards पाएं, चुनकर preflight देखें। अंग्रेज़ी टेक्स्ट; अन्य भाषाएँ fallback।

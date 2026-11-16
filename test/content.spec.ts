@@ -1426,6 +1426,29 @@ describe('content database self-healing', () => {
     expect(content.refsForMessage('session-refs-a', 'm-user').some(row => row.kind === 'attachment')).toBe(true)
     const counts = content.refCount()
     expect(counts.occurrences).toBeGreaterThanOrEqual(5)
+    // 0.17.0: ref counts for locator_status (distinct identities per kind).
+    const refsByKind = content.refsByKind()
+    expect(refsByKind.total).toBe(counts.refs)
+    expect(refsByKind.byKind).toMatchObject({ url: 2, 'session-event': 2, spill: 1, attachment: 1 })
+    expect(content.status().refs).toEqual(refsByKind)
+    // 0.17.0: locator_find looks the stored session-event ref up by message id.
+    const events = content.sessionEventRefs('session-refs-a', ['m-assistant', 'm-user'])
+    expect(events.get('m-assistant')).toEqual({ seq: 1, ref: sessionEventRef({ sessionId: 'session-refs-a', seq: 1 }) })
+    expect(events.get('m-user')).toEqual({ seq: 0, ref: sessionEventRef({ sessionId: 'session-refs-a', seq: 0 }) })
+    expect(content.sessionEventRefs('session-refs-a', [])).toEqual(new Map())
+    // 0.17.0: the lazy missing marker is written once and keeps counts stable.
+    const spillKey = spillRef({ path: spillPath, sessionId: 'session-refs-a', seq: 2 })
+    expect(content.markRefMissing(spillKey)).toBe(true)
+    expect(content.refsFor(spillKey)[0]?.meta).toContain('"missing":true')
+    expect(content.markRefMissing(spillKey)).toBe(false)
+    expect(content.refsByKind().total).toBe(refsByKind.total)
+    // An attachment occurrence already has metadata: the marker must merge, not replace.
+    const attachmentKey = attachmentRef({ sha256: sha })
+    expect(content.markRefMissing(attachmentKey)).toBe(true)
+    const markedAttachment = content.refsFor(attachmentKey)[0]
+    expect(markedAttachment?.meta).toContain('"missing":true')
+    expect(markedAttachment?.meta).toContain('mediaType')
+    expect(content.markRefMissing(attachmentKey)).toBe(false)
     // Additive upgrade: dropping the refs tables must make the next refresh
     // re-read session logs only and repopulate refs without touching file rows.
     const before = content.status()

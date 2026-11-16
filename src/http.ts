@@ -42,13 +42,27 @@ interface WebServerLike {
   register(route: {
     kind: 'exact'
     path: string
-    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+    /** Host 0.2.x authenticates every route before dispatch; defaults to required there. */
+    auth?: 'anonymous' | 'required' | 'deny'
+    handler: (req: IncomingMessage, res: ServerResponse, peer?: unknown) => void | Promise<void>
   }): () => void
 }
 
-/** The host `connection` service slice consumed here (typed locally: the package is browser-side). */
+/** One HTTP carrier request as the trust fence sees it. */
+interface ConnectionTrustRequestLike {
+  readonly headers: IncomingMessage['headers']
+}
+
+/**
+ * The host `connection` service slice consumed here (typed locally: the package
+ * is browser-side). Host 0.1.x exposed `requestRejection`; host 0.2.2+ replaced
+ * it with `admit`, which returns the admitted peer or a rejection status. Both
+ * are accepted so the panel keeps working across the API change; a service with
+ * neither method is treated as unavailable (fail closed).
+ */
 interface ConnectionLike {
-  requestRejection(req: { readonly headers: IncomingMessage['headers'] }): number | undefined
+  requestRejection?(request: ConnectionTrustRequestLike): number | undefined
+  admit?(request: ConnectionTrustRequestLike): { readonly peer?: unknown; readonly rejection?: number } | undefined
 }
 
 interface SearchBody {
@@ -113,7 +127,7 @@ export function registerHttp(
       path: string,
       run: (body: Record<string, unknown>) => Promise<unknown>,
     ): void => {
-      scoped.effect(() => server.register({ kind: 'exact', path, handler: handler(scoped, run, options.connectionOptional === true) }))
+      scoped.effect(() => server.register({ kind: 'exact', path, auth: 'required', handler: handler(scoped, run, options.connectionOptional === true) }))
     }
     route('/dsh-locator/search', async body => await search(rt, body))
     route('/dsh-locator/status', async () => await status(rt, content))
@@ -160,9 +174,9 @@ function handler(
   scoped: Context,
   run: (body: Record<string, unknown>) => Promise<unknown>,
   connectionOptional = false,
-): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  return async (req, res) => {
-    const rejection = trustRejection(scoped, req, connectionOptional)
+): (req: IncomingMessage, res: ServerResponse, peer?: unknown) => Promise<void> {
+  return async (req, res, peer) => {
+    const rejection = trustRejection(scoped, req, connectionOptional, peer)
     if (rejection !== undefined) {
       res.statusCode = rejection
       res.end()
@@ -198,13 +212,27 @@ function handler(
 /**
  * The connection trust fence, fail-closed.
  *
- * A missing/inactive `connection` service, a throwing check, or a numeric
- * rejection all refuse the request. When the service accepts the request the
- * local same-origin markers are checked again, so a future trust-policy
- * regression here cannot silently expose a route to another site.
+ * Host 0.2.x authenticates the route before dispatch and passes the admitted
+ * Peer; that admission is trusted directly. On hosts that dispatch without a
+ * Peer, a missing/inactive `connection` service, a throwing check, or a numeric
+ * rejection all refuse the request, and the local same-origin markers are
+ * checked again, so a future trust-policy regression here cannot silently
+ * expose a route to another site.
  * @returns an HTTP status to reject with, or undefined to proceed.
  */
-function trustRejection(scoped: Context, req: IncomingMessage, connectionOptional = false): number | undefined {
+function trustRejection(
+  scoped: Context,
+  req: IncomingMessage,
+  connectionOptional = false,
+  peer?: unknown,
+): number | undefined {
+  // DSH 0.2.x authenticates the route before dispatch and hands the admitted
+  // Peer to the handler. The host already applied its Host/Origin policy and
+  // credential verifiers, so trust that admission but keep the local same-origin
+  // markers as defense in depth. This path also covers hosts whose `connection`
+  // service is not resolvable from a hot-reloaded plugin scope (observed on DSH
+  // 0.2.2 builds where the service exists but the scoped get() fails).
+  if (peer !== undefined && peer !== null) return originRejection(req.headers)
   const connection = activeConnection(scoped)
   if (connection === undefined) {
     // Explicit opt-in for hosts whose connection service is absent/not active.
@@ -212,14 +240,23 @@ function trustRejection(scoped: Context, req: IncomingMessage, connectionOptiona
     // Fetch metadata so a cross-site page cannot drive the local API.
     return connectionOptional ? originRejection(req.headers) : 503
   }
-  let rejection: number | undefined
   try {
-    rejection = connection.requestRejection(req)
+    if (typeof connection.requestRejection === 'function') {
+      const rejection = connection.requestRejection({ headers: req.headers })
+      if (typeof rejection === 'number') return rejection
+      return originRejection(req.headers)
+    }
+    // Host 0.2.2+ trust fence: admit() applies the Host/Origin policy and the
+    // registered credential verifiers. A peer means the request is authenticated;
+    // a numeric rejection is passed through; anything else fails closed.
+    const admission = connection.admit?.({ headers: req.headers })
+    if (admission === undefined) return 503
+    if (typeof admission.rejection === 'number') return admission.rejection
+    if (admission.peer === undefined || admission.peer === null) return 503
+    return originRejection(req.headers)
   } catch {
     return 503
   }
-  if (typeof rejection === 'number') return rejection
-  return originRejection(req.headers)
 }
 
 /** Read the active connection implementation; inactive/missing/throwing all mean "unavailable". */
@@ -234,9 +271,9 @@ function activeConnection(scoped: Context): ConnectionLike | undefined {
     return undefined
   }
   if (typeof value !== 'object' || value === null) return undefined
-  const requestRejection = (value as { requestRejection?: unknown }).requestRejection
-  if (typeof requestRejection !== 'function') return undefined
-  return value as ConnectionLike
+  const candidate = value as ConnectionLike
+  if (typeof candidate.requestRejection !== 'function' && typeof candidate.admit !== 'function') return undefined
+  return candidate
 }
 
 function webServerOf(scoped: Context): WebServerLike | undefined {

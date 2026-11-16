@@ -1,11 +1,14 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
+import { ContentIndex } from '../src/content.ts'
 import { CONTENT_STATE_SCHEMA, makeFindTool } from '../src/find.ts'
-import type { ContentIndex } from '../src/content.ts'
 import type { ContentSearchOptions } from '../src/content-search.ts'
+import { sessionEventRef } from '../src/refs.ts'
+import type { LocatorRuntime } from '../src/runtime.ts'
 
 /** Fake content store with the authorization/ref helpers locator_find now uses. */
 function withAuth(fake: Record<string, unknown>): ContentIndex {
@@ -232,6 +235,7 @@ describe('locator_find workspace scope', () => {
       updatedAt: 1,
       fullIndex: true,
       reasoningIndex: true,
+      refs: { total: 3, byKind: { url: 2, spill: 1 } },
       progress: { phase: 'files', scanned: 3, indexed: 1, total: 9, path: '/tmp/a.md', startedAt: 2 },
     }
     expect(validateJsonSchemaValue(schema, state)).toEqual([])
@@ -297,6 +301,90 @@ describe('locator_find workspace scope', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('attaches session-event seq and eventRef to session hits', async () => {
+    const sessionPath = '/tmp/locator-find-events/session-1/session.v4.jsonl.zstd'
+    const eventRef = sessionEventRef({ sessionId: 'session-1', seq: 4 })
+    const fake = withAuth({
+      search: async () => ({
+        hits: [
+          { kind: 'session' as const, path: sessionPath, title: 'chat', snippet: 'event body', sessionId: 'session-1', messageId: 'msg-1', score: 1 },
+          { kind: 'session' as const, path: sessionPath, title: 'tool output', snippet: 'result body', sessionId: 'session-1', messageId: 'call-1', score: 1 },
+        ],
+        count: { value: 2, kind: 'exact' as const },
+        warnings: [],
+      }),
+      status: () => ({ ...state }),
+      sessionEventRefs: () => new Map([['msg-1', { seq: 4, ref: eventRef }]]),
+    })
+    const tool = makeFindTool(fake, undefined, [])
+    const result = await tool.execute({ query: 'event body' }, exec()) as {
+      ok: boolean
+      hits?: Array<{ messageId?: string; seq?: number; eventRef?: string }>
+    }
+    expect(result.ok).toBe(true)
+    expect(result.hits?.[0]).toMatchObject({ messageId: 'msg-1', seq: 4, eventRef })
+    // Tool-result documents have no session-event ref: the fields stay absent.
+    expect(result.hits?.[1]?.seq).toBeUndefined()
+    expect(result.hits?.[1]?.eventRef).toBeUndefined()
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, result)).toEqual([])
+  })
+
+  it('reads real session-event refs from the content index', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-find-events-sessions-'))
+    const stateDir = mkdtempSync(join(tmpdir(), 'locator-find-events-state-'))
+    const dir = join(sessions, '--work-a--', 'session-events')
+    mkdirSync(dir, { recursive: true })
+    const lines = [
+      JSON.stringify({ type: 'session', version: 4, id: 'session-events', createdAt: 1, cwd: '/work/a' }),
+      JSON.stringify({ type: 'user/message', data: { id: 'msg-events', seq: 1, content: [{ type: 'text', text: 'EVENTMARK evidence decision' }] } }),
+    ].join('\n')
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(lines)))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    try {
+      content.start()
+      for (let i = 0; i < 200 && content.status().building; i++) await new Promise(resolve => setTimeout(resolve, 25))
+      const tool = makeFindTool(content, undefined, [])
+      const result = await tool.execute({ query: 'EVENTMARK', sessionId: 'session-events' }, {
+        agent: { session: { id: 'caller-session', header: { cwd: '/work/a' } } },
+      } as never) as { ok: boolean; hits?: Array<{ kind: string; sessionId?: string; messageId?: string; seq?: number; eventRef?: string }> }
+      const hit = (result.hits ?? []).find(candidate => candidate.kind === 'session')
+      expect(hit).toMatchObject({
+        sessionId: 'session-events',
+        messageId: 'msg-events',
+        seq: 0,
+        eventRef: sessionEventRef({ sessionId: 'session-events', seq: 0 }),
+      })
+    } finally {
+      content.close()
+      rmSync(sessions, { recursive: true, force: true })
+      rmSync(stateDir, { recursive: true, force: true })
+    }
+  })
+
+  it('truncates fractional indexedAt so the output schema stays valid', async () => {
+    const sessionPath = '/tmp/locator-find-events-fractional/session-1/session.v4.jsonl.zstd'
+    const fake = withAuth({
+      search: async () => ({
+        hits: [{ kind: 'session' as const, path: sessionPath, title: 'chat', snippet: 'fractional', sessionId: 'session-1', messageId: 'msg-1', score: 1 }],
+        count: { value: 1, kind: 'exact' as const },
+        warnings: [],
+      }),
+      status: () => ({ ...state }),
+      indexedMtime: () => 1794833230332.75,
+    })
+    const tool = makeFindTool(fake, undefined, [])
+    const result = await tool.execute({ query: 'fractional' }, exec()) as {
+      ok: boolean
+      hits?: Array<{ provenance?: { indexedAt?: number } }>
+    }
+    expect(result.ok).toBe(true)
+    expect(result.hits?.[0]?.provenance?.indexedAt).toBe(1794833230332)
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, result)).toEqual([])
   })
 
 })

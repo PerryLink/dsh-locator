@@ -452,6 +452,7 @@ describe('locator_export execution', () => {
       updatedAt: 1,
       fullIndex: true,
       reasoningIndex: true,
+      refs: { total: 7, byKind: { url: 4, spill: 2, attachment: 1 } },
       progress: { phase: 'files' as const, scanned: 5, indexed: 2, total: 10, path: '/tmp/a.md', startedAt: 1 },
     }
     const runtime = {
@@ -473,6 +474,7 @@ describe('locator_export execution', () => {
     expect(validateJsonSchemaValue(schema, value)).toEqual([])
     const text = tool.output.render({}, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
     expect(text).toContain('building: files 5 / 10 scanned')
+    expect(text).toContain('refs: 7 (url 4, spill 2, attachment 1)')
   })
 
   it('keeps locator_status valid when the content index is disabled', async () => {

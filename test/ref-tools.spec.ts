@@ -189,3 +189,84 @@ describe('locator_resolve — Wave 2 ref kinds', () => {
     }
   })
 })
+
+describe('locator_resolve — lazy missing write-back', () => {
+  it('writes one spill miss and answers later resolves from the stored marker', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-spill-miss-'))
+    const file = join(dir, 'gone-notes.txt')
+    const sessionId = 'target-session'
+    const ref = spillRef({ path: file, sessionId, seq: 2 })
+    let meta: string | null = null
+    const marked: string[] = []
+    const tool = makeResolveTool(runtime([]), fakeContent({
+      authorizedSessionIds: () => new Set(['caller-session', sessionId]),
+      refsFor: () => [{
+        refKey: ref, kind: 'spill', target: file, sha256: null, sessionId, messageId: 'call-1',
+        seq: 2, origin: 'spill', title: null, bytes: null, meta, logMtime: 1, indexedAt: 1,
+      }],
+      markRefMissing: (refKey: string) => {
+        marked.push(refKey)
+        meta = JSON.stringify({ missing: true, missingAt: 1 })
+        return true
+      },
+    }))
+    try {
+      const first = await tool.execute({ ref }, exec()) as { ok: boolean; freshness?: { state?: string }; warnings?: string[] }
+      expect(first).toMatchObject({ ok: true, freshness: { state: 'missing' } })
+      expect(first.warnings).toContain('spill-file-missing')
+      expect(first.warnings).not.toContain('missing-state-cached')
+      expect(marked).toEqual([ref])
+      // The path appears later; the persisted marker answers without statting it.
+      writeFileSync(file, 'created later')
+      const second = await tool.execute({ ref }, exec()) as { ok: boolean; freshness?: { state?: string }; warnings?: string[] }
+      expect(second).toMatchObject({ ok: true, freshness: { state: 'missing' } })
+      expect(second.warnings).toContain('missing-state-cached')
+      expect(marked).toHaveLength(1)
+      expect(validateJsonSchemaValue(schemaOf(tool), second)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writes one attachment miss and skips the attachment store afterwards', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'locator-attach-miss-'))
+    const sha = 'd'.repeat(64)
+    const sessionId = 'target-session'
+    const ref = attachmentRef({ sha256: sha })
+    let meta: string | null = null
+    const marked: string[] = []
+    const tool = makeResolveTool(runtime([]), fakeContent({
+      authorizedSessionIds: () => new Set([sessionId]),
+      refsFor: () => [{
+        refKey: ref, kind: 'attachment', target: sha, sha256: sha, sessionId, messageId: 'm-user',
+        seq: null, origin: 'attachment', title: 'pic.png', bytes: 12, meta, logMtime: 1, indexedAt: 1,
+      }],
+      markRefMissing: (refKey: string) => {
+        marked.push(refKey)
+        meta = JSON.stringify({ missing: true, missingAt: 1 })
+        return true
+      },
+    }))
+    const previous = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    try {
+      const first = await tool.execute({ ref }, exec()) as { ok: boolean; freshness?: { state?: string }; warnings?: string[] }
+      expect(first).toMatchObject({ ok: true, freshness: { state: 'missing' } })
+      expect(first.warnings).toContain('attachment-missing')
+      expect(marked).toEqual([ref])
+      // Materialize the object: the marker must still win (no existsSync probe).
+      const objectDir = join(home, 'attachments', 'v1', 'objects', sha.slice(0, 2))
+      mkdirSync(objectDir, { recursive: true })
+      writeFileSync(join(objectDir, sha), 'image bytes')
+      const second = await tool.execute({ ref, mode: 'excerpt' }, exec()) as { ok: boolean; freshness?: { state?: string }; warnings?: string[]; excerpt?: string }
+      expect(second).toMatchObject({ ok: true, freshness: { state: 'missing' } })
+      expect(second.warnings).toContain('missing-state-cached')
+      expect(second.excerpt).toBeUndefined()
+      expect(marked).toHaveLength(1)
+    } finally {
+      if (previous === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previous
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
