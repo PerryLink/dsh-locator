@@ -366,6 +366,12 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.18.0 更新
+
+- **远程盘 roots 不再走 inotify 目录树**：NFS / SMB / CIFS / Ceph / AFS 与 WSL 9p/DrvFs 根目录不会产生可用 inotify 事件。Linux watcher 现在完全跳过这些根目录的逐目录挂 watch（此前仍会走一遍、随后才标记 degraded），启动/周期重建不再为此多花数秒到数分钟，也不再占用数万个内核 watch 槽位；这些根目录仍由周期重建兜底，状态继续报告 `watchDegraded` + 原因；本地根目录保持原生监听。
+- **content 刷新撞上引擎重建不再丢库全量重建**：当引擎在 content 刷新分页之间开始重扫（周期 fallback 或 `locator_rebuild`）时，本次刷新改为顺延到下一周期（`content-refresh-deferred` 警告），不再回退为全量重建、重读所有已索引文件；此前在大根目录/忙碌 profile 上可能意外触发多 GB content 库重建。
+- 测试 **206 个**（另新增两个 Linux watcher 的 Go 测试）；六引擎按 0.18.0 重建（darwin 发布二进制由 macOS CI 重建）。
+
 ## 0.17.0 更新
 
 - **兼容 DSH 0.2.2**：宿主现在先对每条 Web 路由鉴权、再把已认证的 Peer 交给 handler，同时把旧的 `connection.requestRejection` 换成 `connection.admit`。本版优先信任宿主交来的 Peer（保留本地同源校验），并兼容两种旧 connection 形态（都没有时仍 fail-closed 503），修复 0.16.0 在 DSH 0.2.2 上面板 HTTP 路由全部 503 的问题。

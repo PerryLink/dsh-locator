@@ -403,6 +403,12 @@ DeepSeek Harness
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
 
+## Notas de actualización 0.18.0
+
+- **Los roots en sistemas de archivos remotos ya no se recorren para inotify**: NFS, SMB/CIFS, Ceph, AFS y los roots 9p/DrvFs de WSL no entregan eventos inotify utilizables. El watcher de Linux ahora omite por completo su recorrido por directorios (antes instalaba un watch por directorio y solo después marcaba "degraded"), así que un root 9p ya no cuesta segundos o minutos de arranque/reconstrucción ni decenas de miles de slots de watch del kernel. Esos roots mantienen la reconstrucción periódica de respaldo y siguen reportando `watchDegraded` con el mismo motivo; los roots locales conservan el monitoreo nativo.
+- **Un refresh de contenido que choca con una reconstrucción del motor ya no pierde la base**: si el motor inicia un re-escaneo (reconstrucción periódica de respaldo o `locator_rebuild`) entre páginas del refresh, este se aplaza al siguiente ciclo con el aviso `content-refresh-deferred` en lugar de caer a una reconstrucción completa del contenido (que releía todos los archivos indexados).
+- **206 tests** (más dos pruebas nuevas del watcher de Linux en la suite Go); los seis binarios del motor se reconstruyeron en 0.18.0.
+
 ## Notas de actualización 0.17.0
 
 - **Compatibilidad con DSH 0.2.2**: el host ahora autentica cada ruta Web antes del despacho y entrega el Peer admitido al handler, y sustituyó el antiguo gancho `connection.requestRejection` por `connection.admit`. El plugin confía en ese Peer (manteniendo las comprobaciones locales de mismo origen), acepta también las dos formas antiguas y sigue cerrando con 503 si no hay ninguna señal: corrige el 503 en todas las rutas HTTP del panel bajo DSH 0.2.2.

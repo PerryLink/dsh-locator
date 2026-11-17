@@ -25,12 +25,13 @@ type watcher struct {
 	excludes []string
 	onError  func(error)
 
-	onDegraded  func(Health)
-	rootsWatch  int // roots with at least one watch
-	dirsWatched int
-	dirsFailed  int
-	degraded    bool
-	reasons     []string
+	onDegraded   func(Health)
+	rootsWatch   int // roots with at least one watch
+	rootsSkipped int // roots intentionally not walked (remote filesystems)
+	dirsWatched  int
+	dirsFailed   int
+	degraded     bool
+	reasons      []string
 
 	fd      int
 	mu      sync.Mutex
@@ -66,8 +67,18 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		stopCh:     make(chan struct{}),
 	}
 	for _, root := range opt.Roots {
-		if reason := unreliableNotifyFS(root); reason != "" {
+		if reason, skip := classifyRoot(root); reason != "" {
 			w.markDegraded(reason)
+			// Remote/9p roots never deliver usable inotify events: do not walk
+			// their trees (tens of thousands of useless kernel watches and
+			// seconds-to-minutes of startup/rebuild time). The periodic rebuild
+			// fallback keeps them converging.
+			if skip {
+				w.mu.Lock()
+				w.rootsSkipped++
+				w.mu.Unlock()
+				continue
+			}
 		}
 		before := w.watchedDirCount()
 		if err := w.addTree(root, true); err != nil {
@@ -78,8 +89,16 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		}
 	}
 	if w.watchedDirCount() == 0 {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("inotify: no directory could be watched (check fs.inotify.max_user_watches)")
+		w.mu.Lock()
+		skipped := w.rootsSkipped
+		w.mu.Unlock()
+		if skipped == 0 {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("inotify: no directory could be watched (check fs.inotify.max_user_watches)")
+		}
+		// Every root was intentionally skipped (for example a 9p-only profile).
+		// A degraded watcher with no watches is still useful: it reports the
+		// reason and lets the daemon run the periodic rebuild fallback.
 	}
 	return w, nil
 }
@@ -440,8 +459,9 @@ func excluded(path, name string, patterns []string) bool {
 }
 
 // Filesystem magic numbers for mounts where inotify notifications cannot be
-// trusted. The watcher still installs its watches (local subtrees may work) but
-// reports degraded so the daemon also runs the periodic rebuild.
+// trusted. Remote filesystems are skipped entirely (no per-directory walk);
+// FUSE/stacked roots still install their watches (local subtrees may work) and
+// only report degraded so the daemon also runs the periodic rebuild.
 const (
 	nfsSuperMagic  = 0x6969
 	smbSuperMagic  = 0x517B
@@ -456,10 +476,42 @@ const (
 	aufsSuperMagic = 0x61756673
 )
 
+// classifyRoot reports the degraded reason for one root and whether the
+// watcher should skip walking it entirely instead of installing one inotify
+// watch per directory. A variable so the linux watcher tests can exercise the
+// skipped-root path without a remote mount.
+var classifyRoot = classifyRootFS
+
+func classifyRootFS(root string) (reason string, skip bool) {
+	reason = unreliableNotifyFS(root)
+	if reason == "" {
+		return "", false
+	}
+	return reason, skipTreeWatchFS(root)
+}
+
+// skipTreeWatchFS reports whether the walk should skip root entirely. Remote
+// filesystems (NFS, SMB/CIFS, Ceph, AFS, WSL 9p/DrvFs) never deliver usable
+// events, so walking them only wastes startup/rebuild time and kernel watch
+// slots. FUSE and stacked filesystems (overlay/ecryptfs/aufs) are still walked:
+// they often do deliver events and remain merely "degraded".
+var skipTreeWatchFS = func(root string) bool {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(root, &st); err != nil {
+		return false
+	}
+	switch magic := uint64(uint32(st.Type)); magic {
+	case nfsSuperMagic, smbSuperMagic, cifsMagic, smb2Magic, v9fsMagic, cephSuperMagic, afsSuperMagic:
+		return true
+	}
+	return isWSL() && strings.HasPrefix(filepath.ToSlash(root), "/mnt/")
+}
+
 // unreliableNotifyFS names the filesystem type when inotify cannot report
 // changes for root. Network and FUSE mounts either never deliver events or drop
 // them silently; WSL DrvFs mounts (Windows drives under /mnt) are the common
-// case on this platform.
+// case on this platform. Remote roots are additionally skipped by
+// skipTreeWatchFS; FUSE/stacked roots are still walked.
 func unreliableNotifyFS(root string) string {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(root, &st); err != nil {

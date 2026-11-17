@@ -404,6 +404,12 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
 
+## 0.18.0 अपग्रेड नोट्स
+
+- **रिमोट फ़ाइलसिस्टम roots के लिए inotify walk बंद**: NFS, SMB/CIFS, Ceph, AFS और WSL 9p/DrvFs roots उपयोगी inotify events नहीं देते। Linux watcher अब इनका per-directory walk पूरी तरह छोड़ देता है (पहले हर directory पर watch लगाकर बाद में "degraded" बताता था), इसलिए 9p root अब startup/rebuild में सेकंडों-मिनटों या हज़ारों kernel watch slots नहीं लेता। ये roots periodic rebuild fallback रखते हैं और वही कारण के साथ `watchDegraded` रिपोर्ट करते हैं; local roots पर native watching बनी रहती है।
+- **engine rebuild से टकराने वाला content refresh अब database नहीं गिराता**: यदि content refresh के pages के बीच engine नया scan शुरू करता है (periodic fallback rebuild या `locator_rebuild`), तो refresh अगले चक्र पर टाल दिया जाता है (`content-refresh-deferred` warning), पूरी content rebuild नहीं होती।
+- **206 tests** (Go suite में दो नए Linux watcher tests सहित); छह engine binaries 0.18.0 पर rebuild।
+
 ## 0.17.0 अपग्रेड नोट्स
 
 - **DSH 0.2.2 संगतता**: होस्ट अब हर Web route को dispatch से पहले authenticate करके admitted Peer handler को देता है, और पुराने `connection.requestRejection` की जगह `connection.admit` आ गया है। plugin उस Peer पर भरोसा करता है (local same-origin checks बने रहते हैं), दोनों पुराने रूप भी स्वीकारता है, और कोई signal न हो तो fail-closed 503 रहता है — इससे DSH 0.2.2 पर panel की सभी HTTP रूट का 503 ठीक होता है।

@@ -49,6 +49,55 @@ describe('ContentIndex', () => {
     expect(hits[0]?.snippet).toContain('brown fox')
   })
 
+  it('defers an incremental refresh that collides with an engine re-scan instead of rebuilding', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-defer-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-defer-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, '# Notes\n\nthe deferred refresh marker\n')
+    const page: DumpPage = {
+      entries: [{ path, name: 'notes.md', size: 40, mtime: Date.now() - 1000, ext: 'md', dir: false }],
+      next: 1,
+      done: true,
+    }
+    const runtime = { dump: async () => page, status: {} } as unknown as { dump: () => Promise<DumpPage>; status: { scanning?: unknown } }
+    const content = new ContentIndex(runtime as unknown as LocatorRuntime, {
+      stateDir: state,
+      sessionDirs: [],
+      maxFileBytes: 1_000_000,
+      maxFiles: 100,
+      maxSessions: 0,
+    })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const before = content.status()
+    expect(before.files).toBe(1)
+    expect(before.building).toBe(false)
+
+    // A fallback rebuild starts between refreshes: the dump cursor moves, so the
+    // refresh cannot finish. The database must survive and the next refresh retry.
+    runtime.status.scanning = { phase: 'files' }
+    content.refresh()
+    await settle(content)
+    const deferred = content.status()
+    expect(deferred.building).toBe(false)
+    expect(deferred.error).toBe('')
+    expect(deferred.files).toBe(1)
+    expect(deferred.updatedAt).toBe(before.updatedAt)
+    expect(deferred.warnings).toContain('content-refresh-deferred')
+
+    delete runtime.status.scanning
+    content.refresh()
+    await settle(content)
+    const recovered = content.status()
+    expect(recovered.building).toBe(false)
+    expect(recovered.error).toBe('')
+    expect(recovered.files).toBe(1)
+    expect(recovered.warnings).not.toContain('content-refresh-deferred')
+    expect(recovered.updatedAt).toBeGreaterThan(before.updatedAt)
+  })
+
   it('indexes session messages with sessionId and messageId', async () => {
     const state = mkdtempSync(join(tmpdir(), 'locator-session-state-'))
     const sessions = mkdtempSync(join(tmpdir(), 'locator-sessions-'))

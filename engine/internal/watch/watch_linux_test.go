@@ -169,3 +169,67 @@ func TestLinuxWatcherReportsDegradedCoverage(t *testing.T) {
 		t.Fatal("watcher was created without any watchable root")
 	}
 }
+
+// TestLinuxWatcherSkipsRemoteRoots: a root on a filesystem that cannot deliver
+// inotify events must not be walked directory-by-directory. The watcher reports
+// degraded coverage (so the daemon runs the periodic rebuild) and must not fail
+// startup just because every root was skipped.
+func TestLinuxWatcherSkipsRemoteRoots(t *testing.T) {
+	root := t.TempDir()
+	ix := index.New()
+	ix.AddRoot(root)
+
+	old := classifyRoot
+	classifyRoot = func(string) (string, bool) {
+		return "test remote fs does not deliver inotify events", true
+	}
+	defer func() { classifyRoot = old }()
+
+	w, err := New(ix, Options{Roots: []string{root}})
+	if err != nil {
+		t.Fatalf("a skipped root must not fail the watcher: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+	h := HealthOf(w)
+	if !h.Degraded {
+		t.Fatalf("expected degraded health, got %+v", h)
+	}
+	if h.Watching != 0 {
+		t.Fatalf("expected 0 watched roots, got %d", h.Watching)
+	}
+	if !strings.Contains(h.Reason, "test remote fs") {
+		t.Fatalf("reason must explain the skip, got %q", h.Reason)
+	}
+}
+
+// TestLinuxWatcherKeepsLocalRootsWhenOneIsRemote: only the remote root is
+// skipped; local roots keep their native watches while the health report stays
+// honest about incomplete coverage.
+func TestLinuxWatcherKeepsLocalRootsWhenOneIsRemote(t *testing.T) {
+	local := t.TempDir()
+	remote := t.TempDir()
+	ix := index.New()
+	ix.AddRoot(local)
+
+	old := classifyRoot
+	classifyRoot = func(root string) (string, bool) {
+		if root == remote {
+			return "test remote fs does not deliver inotify events", true
+		}
+		return "", false
+	}
+	defer func() { classifyRoot = old }()
+
+	w, err := New(ix, Options{Roots: []string{local, remote}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+	h := HealthOf(w)
+	if h.Watching != 1 {
+		t.Fatalf("expected 1 watched root, got %d (%+v)", h.Watching, h)
+	}
+	if !h.Degraded {
+		t.Fatalf("expected degraded health for partial coverage, got %+v", h)
+	}
+}

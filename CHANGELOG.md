@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0 — 2026-11-17
+
+* **Remote-filesystem roots are no longer walked for inotify**: NFS, SMB/CIFS, Ceph, AFS and WSL 9p/DrvFs roots cannot deliver usable inotify events. The Linux watcher now skips their per-directory walk entirely instead of installing one watch per directory and only then reporting "degraded", so a 9p root no longer costs seconds-to-minutes of startup/rebuild time or tens of thousands of kernel watch slots. Those roots keep the periodic rebuild fallback and still report `watchDegraded` with the same reason; local roots keep native watching.
+* **A content refresh that collides with an engine rebuild keeps the database**: if the engine starts a re-scan (periodic fallback rebuild or `locator_rebuild`) between content-refresh pages, the refresh now defers to the next cycle with a `content-refresh-deferred` warning instead of falling back to a full content rebuild (which re-read every indexed file). The previous behaviour could unexpectedly rebuild the multi-GB content database on a busy, large-root profile.
+* `206 tests` (plus two new Linux watcher tests in the Go suite); six engine binaries rebuilt at 0.18.0.
+
 ## 0.17.0 — 2026-11-16
 
 * **Host 0.2.2 compatibility (panel HTTP)**: DSH 0.2.2 authenticates each Web route before dispatch and hands the admitted Peer to the handler, and it replaced the old `connection.requestRejection` trust-fence hook with `connection.admit`. The HTTP surface now trusts the host-admitted Peer (keeping the local same-origin markers), still accepts either legacy connection shape, and stays fail-closed 503 when no signal exists — restoring every `POST /dsh-locator/*` route instead of answering 503. Tests cover peer admission, rejection pass-through, throwing/absent services and the local same-origin fence.

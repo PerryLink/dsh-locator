@@ -402,8 +402,18 @@ export class ContentIndex {
       await this.refreshSessions(generation)
       if (generation !== this.generation) return
       this.finish()
-    } catch {
+    } catch (error) {
       if (generation !== this.generation) return
+      // A background engine re-scan (periodic fallback rebuild or
+      // locator_rebuild) swaps the index and moves the dump cursor under us.
+      // That is transient: keep the database and let the next refresh retry
+      // instead of dropping it and re-reading every indexed file.
+      if (isEngineRescanError(error)) {
+        this.state.building = false
+        this.progress = null
+        this.addWarning('content-refresh-deferred')
+        return
+      }
       // A corrupt or outdated database must not disable content search for the
       // rest of the session: rebuild it from scratch instead.
       this.db?.close()
@@ -1833,4 +1843,13 @@ function contentSkipPath(path: string, excludes: string[]): boolean {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Whether a refresh failed only because the engine started a new scan. The
+ * engine dump cursor belongs to one snapshot generation, so a rebuild in flight
+ * makes the current refresh unanswerable; the database itself is still valid.
+ */
+function isEngineRescanError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('engine re-scan started')
 }

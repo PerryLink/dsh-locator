@@ -404,6 +404,12 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Notas de atualização 0.18.0
+
+- **Roots em sistemas de arquivos remotos não são mais percorridos para inotify**: NFS, SMB/CIFS, Ceph, AFS e roots 9p/DrvFs do WSL não entregam eventos inotify utilizáveis. O watcher do Linux agora ignora totalmente a varredura por diretórios (antes instalava um watch por diretório e só então marcava "degraded"), então um root 9p não custa mais segundos ou minutos de inicialização/reconstrução nem dezenas de milhares de slots de watch do kernel. Esses roots mantêm a reconstrução periódica de fallback e continuam reportando `watchDegraded` com o mesmo motivo; roots locais mantêm o monitoramento nativo.
+- **Um refresh de conteúdo que colide com uma reconstrução do motor não perde mais o banco**: se o motor iniciar uma nova varredura (reconstrução periódica de fallback ou `locator_rebuild`) entre páginas do refresh, ele agora é adiado para o próximo ciclo com o aviso `content-refresh-deferred` em vez de cair em uma reconstrução completa do conteúdo.
+- **206 tests** (mais dois testes novos do watcher Linux na suíte Go); os seis binários do motor foram reconstruídos em 0.18.0.
+
 ## Notas de atualização 0.17.0
 
 - **Compatibilidade com DSH 0.2.2**: o host agora autentica cada rota Web antes do despacho e entrega o Peer admitido ao handler, e trocou o antigo gancho `connection.requestRejection` por `connection.admit`. O plugin confia nesse Peer (mantendo as checagens locais de mesma origem), aceita também os dois formatos antigos e continua fail-closed 503 quando não há sinal — corrigindo o 503 em todas as rotas HTTP do painel no DSH 0.2.2.

@@ -404,6 +404,12 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.18.0 upgrade notes
+
+- **Remote-filesystem roots are no longer walked for inotify**: NFS, SMB/CIFS, Ceph, AFS and WSL 9p/DrvFs roots cannot deliver usable inotify events. The Linux watcher now skips their per-directory walk entirely (previously it installed one watch per directory and only then reported "degraded"), so a 9p root no longer costs seconds-to-minutes of startup/rebuild time or tens of thousands of kernel watch slots. Those roots keep the periodic rebuild fallback and still report `watchDegraded` with the same reason; local roots keep native watching.
+- **A content refresh colliding with an engine rebuild keeps the database**: when the engine starts a re-scan (periodic fallback rebuild or `locator_rebuild`) between content-refresh pages, the refresh now defers to the next cycle with a `content-refresh-deferred` warning instead of falling back to a full content rebuild. The previous behaviour could unexpectedly rebuild the multi-GB content database on a busy profile with large roots.
+- **206 tests** (plus two new Linux watcher tests in the Go suite); six engine binaries rebuilt at 0.18.0.
+
 ## 0.17.0 upgrade notes
 
 - **DSH 0.2.2 compatibility**: the host now authenticates each Web route before dispatch and hands the admitted Peer to the handler, and it replaced the old `connection.requestRejection` hook with `connection.admit`. The plugin trusts the host-admitted Peer (keeping the local same-origin checks), accepts either legacy connection shape, and stays fail-closed 503 when no signal exists — fixing the 503 on every panel HTTP route under DSH 0.2.2.
