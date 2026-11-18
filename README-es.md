@@ -165,7 +165,7 @@ La construcción ocurre dentro del proceso anfitrión de DSH, pero las lecturas 
 
 ## Panel web
 
-Pulsa `Ctrl+Shift+F` en la GUI web, o haz clic en la lupa del pie de la barra lateral. El panel usa rutas del mismo origen (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sin otro servidor ni otro puerto. La ruta `/combined` acepta `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` y `count`; el grupo de contenido devuelve `count`/`warnings`, y sus aciertos de archivo incluyen `line`.
+Pulsa `Ctrl+Shift+F` en la GUI web, o haz clic en la lupa de la cabecera de la conversación. El panel usa rutas del mismo origen (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sin otro servidor ni otro puerto. La ruta `/combined` acepta `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` y `count`; el grupo de contenido devuelve `count`/`warnings`, y sus aciertos de archivo incluyen `line`.
 
 - **Los tres ámbitos están activos por defecto**: contenido (cuerpos + sesiones), archivos y carpetas; desmarca cualquiera para acotar. Los resultados se agrupan **contenido → archivos → carpetas** con el recuento por grupo; el contenido se ordena por relevancia y los grupos de nombres siguen el menú de orden.
 - **Doble clic o `Enter` activa un resultado**: una sesión abre la conversación y pinta las palabras encontradas con un resaltado ámbar translúcido que sigue el desplazamiento, se centra al llegar y se limpia con `Esc`; archivos y carpetas se muestran en el gestor de archivos. `Ctrl+Shift+C` copia la ruta, `Ctrl+O` abre, `Ctrl+Enter` inserta `@file` y `Alt+1–3` alterna los ámbitos.

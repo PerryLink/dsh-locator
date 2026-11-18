@@ -3,6 +3,7 @@
 ## 0.19.2 — 2026-11-18
 
 * **Documentation fix and 0.2.2-rc.4 alignment completed**: restores the corrupted intro sentence and compatibility line in all five READMEs (0.19.1 inserted the `dsh-v0.2.2-rc.4` stamp mid-sentence), and actually applies the rc.4 adjustments announced in 0.19.1 — `@deepseek-ai/dsh-tools` devDependency 0.2.2-rc.4 and the append-only `>=0.2.2-0` clause in `engines.dsh` and the dsh-tools peer range. No runtime behaviour change.
+* **Panel search entry**: the sidebar-footer launcher button is removed; the only search entry is now the session-header icon (Ctrl+Shift+F still opens the panel). That icon uses a 16 px stroked magnifier in a 28 px hit target and is vertically centred so it matches the adjacent header controls.
 
 ## 0.19.1 — 2026-11-18
 

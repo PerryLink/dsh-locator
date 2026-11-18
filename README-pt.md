@@ -165,7 +165,7 @@ A construção roda dentro do processo anfitrião do DSH, mas leituras de arquiv
 
 ## Painel web
 
-Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no pé da barra lateral. O painel usa rotas de mesma origem (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sem outro servidor nem outra porta. O `/combined` aceita `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` e `count`; o grupo de conteúdo devolve `count`/`warnings`, e os resultados de arquivo trazem `line`.
+Pressione `Ctrl+Shift+F` na GUI web, ou clique na lupa no cabeçalho da conversa. O painel usa rotas de mesma origem (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), sem outro servidor nem outra porta. O `/combined` aceita `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` e `count`; o grupo de conteúdo devolve `count`/`warnings`, e os resultados de arquivo trazem `line`.
 
 - **Os três escopos vêm ativados por padrão**: conteúdo (corpos + sessões), arquivos e pastas; desmarque qualquer um para restringir. Os resultados são agrupados **conteúdo → arquivos → pastas** com a contagem por grupo; o conteúdo é ordenado por relevância e os grupos de nomes seguem o menu de ordem.
 - **Duplo clique ou `Enter` ativa um resultado**: uma sessão abre a conversa e pinta as palavras encontradas com destaque âmbar translúcido que acompanha a rolagem, é centralizado ao chegar e é limpo com `Esc`; arquivos e pastas são mostrados no gerenciador de arquivos. `Ctrl+Shift+C` copia o caminho, `Ctrl+O` abre, `Ctrl+Enter` insere `@file` e `Alt+1–3` alterna os escopos.

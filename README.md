@@ -164,7 +164,7 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 
 ## Web 面板
 
-在 Web GUI 里按 `Ctrl+Shift+F`，或者点侧栏底部的放大镜。面板通过同源路由工作（`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`），不另起服务、不占额外端口。`/combined` 新增 `matchMode`、`caseSensitive`、`wholeWord`、`sessionId`、`count` 参数，内容组返回 `count`/`warnings`，文件命中带 `line`。
+在 Web GUI 里按 `Ctrl+Shift+F`，或者点会话头部的放大镜。面板通过同源路由工作（`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`），不另起服务、不占额外端口。`/combined` 新增 `matchMode`、`caseSensitive`、`wholeWord`、`sessionId`、`count` 参数，内容组返回 `count`/`warnings`，文件命中带 `line`。
 
 - **默认同时搜索三个范围**：内容（正文 + 会话）、文件、目录，三个勾选默认全部打开；取消任一勾选即可缩小范围。结果按“内容 → 文件 → 目录”分组，组头显示数量；内容按相关度排序，文件/目录按排序菜单。
 - **双击或 `Enter` 激活**：会话命中打开对应会话，并把命中的词用半透明琥珀色高亮（随滚动跟随、自动居中、`Esc` 清除）；文件/目录在文件管理器中定位。`Ctrl+Shift+C` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 插入 `@file`，`Alt+1–3` 切换范围。

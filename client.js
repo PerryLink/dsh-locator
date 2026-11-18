@@ -121,9 +121,10 @@ window.__ModuleLoader__.load({
   font-size:11px;opacity:.7;flex-wrap:wrap}
 .dsh-locator-foot .grow{flex:1}
 .dsh-locator-toast{color:var(--dsw-alias-state-success-primary,#2e7d32)}
-.dsh-locator-launch{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:0;border-radius:7px;
-  background:transparent;color:inherit;opacity:.65;cursor:pointer;font-size:14px}
-.dsh-locator-launch:hover{opacity:1;background:rgba(120,125,135,.14)}
+.dsh-locator-findtoggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;margin:0;padding:0;border:0;border-radius:7px;
+  background:transparent;color:inherit;opacity:.72;cursor:pointer;line-height:1;vertical-align:middle;align-self:center}
+.dsh-locator-findtoggle:hover{opacity:1;background:rgba(120,125,135,.14)}
+.dsh-locator-findtoggle svg{display:block;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 body[data-ds-dark-theme] .dsh-locator-panel{box-shadow:0 24px 64px rgba(0,0,0,.6)}
 body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.55))}
 .dsh-locator-target{outline:2px solid rgba(245,158,11,.75);outline-offset:2px;border-radius:6px}
@@ -2603,11 +2604,13 @@ self.onmessage = event => {
     function FindToggle(props) {
       const onClick = () => { openFind({ sessionId: props && props.sessionId ? props.sessionId : '', selection: false }) }
       return h('button', {
-        className: 'dsh-locator-launch',
+        className: 'dsh-locator-findtoggle',
         title: t('findOpen') + ' (Ctrl+F)',
         'aria-label': t('findOpen'),
         onClick,
-      }, '⌕')
+      }, h('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true', focusable: 'false' },
+        h('circle', { cx: '11', cy: '11', r: '7' }),
+        h('path', { d: 'M20 20l-3.6-3.6' })))
     }
 
     function FindBar() {
@@ -4191,14 +4194,6 @@ self.onmessage = event => {
       ))
     }
 
-    function Launcher() {
-      return h('button', {
-        className: 'dsh-locator-launch',
-        title: t('launcher'),
-        'aria-label': t('searchLabel'),
-        onClick: () => store.toggle(),
-      }, '🔎')
-    }
 
     // ── plugin ──────────────────────────────────────────────────────────────
     const plugin = {
@@ -4294,11 +4289,6 @@ self.onmessage = event => {
             ctx.slots.register({ name: 'conversation.session.header.utilities', id: 'dsh-locator-find-toggle', order: 30 }, FindToggle))
         } catch (error) {
           console.error('dsh-locator: session header slot unavailable', error)
-        }
-        try {
-          ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsh-locator-launch', order: 36 }, Launcher))
-        } catch (error) {
-          console.error('dsh-locator: sidebar action slot unavailable', error)
         }
       },
     }
