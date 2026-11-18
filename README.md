@@ -366,6 +366,24 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
 
+## 0.19.0 更新
+
+- **中文文件名检索**：名称索引新增全角/半角、大小写、CJK 兼容归一与拼音匹配——全拼 `guojia`、首字母 `gjjy`/`gjy`、混合 `guo家` 都能命中中文文件名；snapshot 格式不变，旧快照加载时自动构建拼音派生键。
+- **周期重建增量优化**：watcher 覆盖不到的 root（9p/NFS/SMB 等）才重扫，健康的被监听 root 复用索引；失败/结构变化自动回退全量。引擎新增 `--no-incremental-refresh` 可回退 0.18 行为；`locator_status` 新增 9 个刷新状态字段。
+- **文档正文抽取**：内容索引可选抽取 PDF/Word/Excel/PPT/EPUB 正文（`contentExtractDocuments`/`contentExtractMaxBytes`，lazy 加载），损坏或超限只产生 warning，不阻塞构建；命中带 `format`。
+- **代码符号与 repo map**：additive `symbols` 表 + `docs_meta.format`（不 bump user_version），索引时填充（`contentIndexSymbols`/`contentSymbolMaxBytes`）；新增 `locator_outline`、`locator_symbol`、`locator_repo_map`（按 token 预算截断）。支持 14 种语言 + Markdown 标题，启发式解析。
+- **结果预算与模式**：`locator_search`/`locator_find` 新增 `mode`（names/content/count）、`headLimit`、`contextLines`，输出 `totalCount`/`nextOffset`/`truncated`/`budget`（默认 8000 字符），命中带 `format`/`refStatus`/上下文行。
+- **证据层**：`locator_resolve` 新增 `status`（fresh/stale/missing/tombstoned）、`checkedAt`、`anchor`；`locator_cite` 新增 `detail: exact|compact`（逐字原文 + offsets + fallback 链接）与 `maxBytes`；文件 ref 带 `line/cs/ce`；find 命中带 `refStatus`。
+- **URL ref 保鲜**（可选 `urlFreshness`，默认关闭）：ETag/Last-Modified + 有界正文哈希的条件请求，结果持久化到 refs meta；304→fresh、404/410→missing、不可达→stale。
+- **忽略语义三层**：`notIndexed` / `notSearchable` / `notReadable`（glob）分别控制「不进正文索引 / 名称不可见 / agent 不可读」；`locator_status` 展示生效规则。
+- **面板**：官方提及语法互操作（`@path` / `@"path"` / `@[标题](dsh-session:…)`）；搜索框粘贴 ref/mention 触发 Quick Switch；证据详情（行点击 / `Ctrl+I`）展示 freshness/permissions/hash/session 信息，可复制 ref/Markdown 引用、插入提及、打开/定位/跳转；`/combined` 命中新增证据字段；9 语言新增 45 条文案。
+- **公开 API 与 MCP**：`GET /dsh-locator/search?q=...`（同一 trust fence）；随包提供 `locator-cli`（search/find/status/resolve/cite，JSON 输出）与 `locator-mcp`（只读 MCP stdio server）并暴露为 npm bin；新增 `locator_explore` 多 query 探索（token 预算内）。
+  ```sh
+  npx dsh-locator search "handoff ext:md" --json
+  npx dsh-locator-mcp    # stdio MCP server，供 Claude Code / Cursor 等外部 agent 只读调用
+  ```
+- **可选钩子**：`rerankCommand`（find 结果后重排）与 `ocrCommand`（扫描 PDF 走外部 OCR），默认关闭。
+- 测试 **332 个**；六引擎按 0.19.0 重建（darwin 发布二进制由 macOS CI 重建）。
 ## 0.18.0 更新
 
 - **远程盘 roots 不再走 inotify 目录树**：NFS / SMB / CIFS / Ceph / AFS 与 WSL 9p/DrvFs 根目录不会产生可用 inotify 事件。Linux watcher 现在完全跳过这些根目录的逐目录挂 watch（此前仍会走一遍、随后才标记 degraded），启动/周期重建不再为此多花数秒到数分钟，也不再占用数万个内核 watch 槽位；这些根目录仍由周期重建兜底，状态继续报告 `watchDegraded` + 原因；本地根目录保持原生监听。

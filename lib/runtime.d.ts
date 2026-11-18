@@ -71,6 +71,24 @@ export interface EngineStatus {
     watchRoots?: number;
     /** Periodic rebuild fallback is active because the watcher is incomplete. */
     refreshFallback?: boolean;
+    /** The fallback refreshes only watcher-less roots instead of re-scanning all. */
+    incrementalRefresh?: boolean;
+    /** Configured roots no native watcher covers (refreshed by the fallback). */
+    watchUnwatchedRoots?: string[];
+    /** Last fallback refresh mode: incremental or full. */
+    refreshMode?: string;
+    /** Why the last fallback refresh ran. */
+    refreshReason?: string;
+    /** Roots scanned by the last fallback refresh. */
+    refreshScannedRoots?: string[];
+    /** Healthy roots skipped by the last incremental refresh. */
+    refreshSkippedRoots?: string[];
+    /** Entries re-read by the last fallback refresh. */
+    refreshEntries?: number;
+    /** Wall-clock cost of the last fallback refresh. */
+    refreshTookMs?: number;
+    /** Epoch milliseconds of the last fallback refresh. */
+    refreshAt?: number;
     scanning: boolean;
     usn: boolean;
     uptimeSec: number;
@@ -88,6 +106,17 @@ export interface RuntimeStatus {
     };
     engine?: EngineStatus;
 }
+/**
+ * Build the argv for one `indexd serve` session.
+ *
+ * Extracted so the fallback-refresh switch (`--no-incremental-refresh`) and the
+ * other flags can be asserted without spawning a process.
+ * @param config - validated plugin configuration.
+ * @param roots - resolved index roots.
+ * @param stateDir - snapshot directory.
+ * @returns the engine argv.
+ */
+export declare function engineServeArgs(config: Pick<Config, 'excludes' | 'watch' | 'refreshIntervalMs' | 'refreshIncremental' | 'scanWorkers' | 'memoryLimitMB' | 'windowsUsn'>, roots: readonly string[], stateDir: string): string[];
 /**
  * Owns the engine process. Tools await {@link LocatorRuntime.waitReady} before
  * issuing requests; a missing binary or a crashed engine surfaces as a tool

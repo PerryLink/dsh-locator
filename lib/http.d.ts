@@ -5,8 +5,14 @@
  * directly, so the host exposes exact routes on the Web server:
  *
  *   POST /dsh-locator/search   { query, limit, offset, sort, desc, ... }
+ *   GET  /dsh-locator/search?q=...&limit=...&offset=...&mode=names|content|count&json=1
  *   POST /dsh-locator/status   {}
  *
+ * The search route accepts both methods on purpose: the panel keeps the POST
+ * JSON-body contract, while scripts and other tools get a plain, citable GET
+ * query API (Everything-style HTTP) behind the exact same trust fence, the
+ * same auth policy and the same same-origin check.
+
  * Security is fail-closed. The routes only exist when the host's `connection`
  * service — the browser authentication + Host/Origin trust fence — is
  * available, so a profile without it mounts no locator HTTP surface at all.
@@ -25,6 +31,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingHttpHeaders } from 'node:http';
 import type { LocatorRuntime } from './runtime.ts';
 import type { ContentIndex } from './content.ts';
+import { type Scope } from './scope.ts';
 /**
  * Mount the panel's routes when this profile runs a Web server **and** the
  * host connection trust fence. Without `connection` no route is registered:
@@ -41,7 +48,7 @@ export interface CapabilityHttpHandlers {
 }
 export declare function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void, options?: {
     connectionOptional?: boolean;
-}, capabilities?: CapabilityHttpHandlers): void;
+}, capabilities?: CapabilityHttpHandlers, scope?: Scope): void;
 /**
  * The exact JSON media type required by every locator route. A charset or any
  * other parameter is tolerated (`application/json; charset=utf-8`), any other

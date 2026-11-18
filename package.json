@@ -1,6 +1,6 @@
 {
   "name": "dsh-locator",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index, an Everything-style query language, agent tools and a Web search panel (Ctrl+Shift+F). Windows, macOS and Linux.",
   "author": "PerryLink contributors",
   "repository": {
@@ -39,7 +39,9 @@
     "README-es.md",
     "README-pt.md",
     "README-hi.md",
-    "docs/assets"
+    "docs/assets",
+    "scripts/locator-cli.mjs",
+    "scripts/locator-mcp.mjs"
   ],
   "sideEffects": false,
   "dsh": {
@@ -74,7 +76,11 @@
     "@deepseek-ai/dsh-tools": ">=0.2.1-0 <0.3.0",
     "@deepseek-ai/schemastery": "^3.18.5-alpha.1"
   },
-  "dependencies": {},
+  "dependencies": {
+    "fflate": "0.8.3",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "6.5.438"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
@@ -93,5 +99,9 @@
     "verify": "node scripts/verify.mjs",
     "check": "pnpm typecheck && pnpm test && node scripts/verify.mjs"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "bin": {
+    "dsh-locator": "./scripts/locator-cli.mjs",
+    "dsh-locator-mcp": "./scripts/locator-mcp.mjs"
+  }
 }

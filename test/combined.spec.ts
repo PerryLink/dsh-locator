@@ -1,11 +1,17 @@
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, basename } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  COMBINED_HASH_MAX_BYTES,
+  COMBINED_HASH_MAX_HITS,
   dedupeNameHits,
   readCombinedRequest,
   readScopes,
   runCombinedSearch,
   type CombinedDeps,
 } from '../src/combined.ts'
+import { sha256File } from '../src/refs.ts'
 import type { ContentHit, ContentState } from '../src/content.ts'
 import type { SearchArgs, SearchHit, SearchResult } from '../src/runtime.ts'
 import type { ContentCount, ContentSearchOptions, ContentSearchResult } from '../src/content-search.ts'
@@ -399,3 +405,153 @@ describe('combined search', () => {
   })
 
 })
+
+
+/** One name hit built from the current stat of one real file. */
+function liveFileHit(path: string): SearchHit {
+  const info = statSync(path)
+  return { path, name: basename(path), size: info.size, mtime: info.mtimeMs, ext: 'md', dir: false }
+}
+
+/** One name hit whose snapshot predates the current bytes. */
+function staleFileHit(path: string): SearchHit {
+  const info = statSync(path)
+  return { path, name: basename(path), size: info.size, mtime: info.mtimeMs - 60_000, ext: 'md', dir: false }
+}
+
+describe('combined evidence enrichment', () => {
+  it('labels fresh name hits with permissions, ref and a cheap hash', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-fresh-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'combined evidence body')
+    try {
+      const response = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([liveFileHit(file)]) : result([]),
+      }), readCombinedRequest({ query: 'notes' }, 100))
+      const hit = response.files?.hits[0]
+      expect(hit?.freshness).toMatchObject({ state: 'fresh' })
+      expect(typeof hit?.freshness.observedAt).toBe('number')
+      expect(hit?.permissions).toEqual({ read: 'allowed', visibility: 'roots', reason: 'name hit from the configured index roots' })
+      expect(hit?.ref).toMatch(/^ref:\/\/file\?path=/)
+      expect(hit?.hash).toBe(await sha256File(file))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports stale and missing name hits from the snapshot comparison', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-stale-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'old body')
+    try {
+      const staleHit = staleFileHit(file)
+      const stale = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([staleHit]) : result([]),
+      }), readCombinedRequest({ query: 'notes' }, 100))
+      expect(stale.files?.hits[0]?.freshness).toMatchObject({ state: 'stale' })
+      rmSync(file)
+      const missing = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([staleHit]) : result([]),
+      }), readCombinedRequest({ query: 'notes' }, 100))
+      expect(missing.files?.hits[0]?.freshness).toMatchObject({ state: 'missing' })
+      expect(missing.files?.hits[0]?.permissions?.read).toBe('allowed')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('labels directory hits without hashing them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-dir-'))
+    const sub = join(dir, 'sub')
+    mkdirSync(sub)
+    writeFileSync(join(dir, 'placeholder.md'), 'x')
+    try {
+      const info = statSync(sub)
+      const hit: SearchHit = { path: sub, name: basename(sub), size: 0, mtime: info.mtimeMs, ext: '', dir: true }
+      const response = await runCombinedSearch(deps({
+        search: async args => args.dirsOnly ? result([hit]) : result([]),
+      }), readCombinedRequest({ query: 'sub' }, 100))
+      const enriched = response.dirs?.hits[0]
+      expect(enriched?.freshness).toMatchObject({ state: 'fresh' })
+      expect(enriched?.permissions).toEqual({ read: 'allowed', visibility: 'roots', reason: 'directory hit from the configured index roots' })
+      expect(enriched?.hash).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('gives content hits permissions by scope and passes an existing hash through', async () => {
+    const hash = 'a'.repeat(64)
+    const withHash = { ...contentHit('file', '/tmp/with-hash.md'), hash } as unknown as ContentHit
+    const response = await runCombinedSearch(deps({
+      contentSearch: async () => contentResult([
+        withHash,
+        contentHit('session', '/tmp/sessions/s1/session.v4.jsonl.zstd'),
+      ]),
+      search: async () => result([]),
+    }), readCombinedRequest({ query: 'note' }, 100))
+    const hits = response.content?.hits ?? []
+    expect(hits[0]?.permissions).toEqual({ read: 'allowed', visibility: 'roots', reason: 'content hit from the configured index roots' })
+    expect(hits[0]?.hash).toBe(hash)
+    expect(hits[0]?.freshness).toMatchObject({ state: 'unknown' })
+    expect(hits[1]?.permissions).toEqual({ read: 'allowed', visibility: 'session', reason: 'session messages are scoped to the caller workspace' })
+    expect(hits[1]?.ref).toMatch(/^dsh-session:/)
+  })
+
+  it('derives content-hit freshness from the optional index snapshot lookup', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-content-'))
+    const file = join(dir, 'body.md')
+    writeFileSync(file, 'content evidence')
+    try {
+      const info = statSync(file)
+      const stale = await runCombinedSearch(deps({
+        contentSearch: async () => contentResult([contentHit('file', file)]),
+        contentIndexedMtime: () => info.mtimeMs - 5_000,
+        search: async () => result([]),
+      }), readCombinedRequest({ query: 'content' }, 100))
+      expect(stale.content?.hits[0]?.freshness).toMatchObject({ state: 'stale' })
+      const fresh = await runCombinedSearch(deps({
+        contentSearch: async () => contentResult([contentHit('file', file)]),
+        contentIndexedMtime: () => info.mtimeMs,
+        search: async () => result([]),
+      }), readCombinedRequest({ query: 'content' }, 100))
+      expect(fresh.content?.hits[0]?.freshness).toMatchObject({ state: 'fresh' })
+      const gone = await runCombinedSearch(deps({
+        contentSearch: async () => contentResult([contentHit('file', join(dir, 'gone.md'))]),
+        contentIndexedMtime: () => 1,
+        search: async () => result([]),
+      }), readCombinedRequest({ query: 'content' }, 100))
+      expect(gone.content?.hits[0]?.freshness).toMatchObject({ state: 'missing' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('caps hashes by file size and per-page count', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-cap-'))
+    try {
+      const big = join(dir, 'big.md')
+      writeFileSync(big, 'x'.repeat(COMBINED_HASH_MAX_BYTES + 1))
+      const bigResponse = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([liveFileHit(big)]) : result([]),
+      }), readCombinedRequest({ query: 'big' }, 100))
+      expect(bigResponse.files?.hits[0]?.hash).toBeUndefined()
+      expect(bigResponse.files?.hits[0]?.ref).toMatch(/^ref:\/\/file\?path=/)
+
+      const hits: SearchHit[] = []
+      for (let index = 0; index < COMBINED_HASH_MAX_HITS + 2; index++) {
+        const file = join(dir, 'small-' + String(index) + '.md')
+        writeFileSync(file, 'small body ' + String(index))
+        hits.push(liveFileHit(file))
+      }
+      const capped = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result(hits) : result([]),
+      }), readCombinedRequest({ query: 'small', limit: 50 }, 100))
+      const hashed = (capped.files?.hits ?? []).filter(hit => hit.hash !== undefined)
+      expect(hashed).toHaveLength(COMBINED_HASH_MAX_HITS)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+

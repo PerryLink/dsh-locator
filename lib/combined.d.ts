@@ -11,7 +11,42 @@
  */
 import type { ContentHit, ContentProgress, ContentState } from './content.ts';
 import type { ContentCount, ContentCountMode, ContentMatchMode, ContentSearchOptions, ContentSearchResult } from './content-search.ts';
+import type { RefFreshness, RefPermissions } from './refs.ts';
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts';
+/** Additive evidence metadata attached to one combined hit for the panel. */
+export interface CombinedHitEvidence {
+    /** Freshness of the hit's snapshot against the current bytes. */
+    freshness: RefFreshness;
+    /** The caller may read this hit; visibility mirrors the hit's scope. */
+    permissions: RefPermissions;
+    /** sha256 of the file bytes when cheap to compute (small name hits). */
+    hash?: string;
+}
+/** One content hit enriched with evidence metadata. */
+export type CombinedContentHit = ContentHit & {
+    ref?: string;
+} & CombinedHitEvidence;
+/** One name hit enriched with evidence metadata. */
+export type CombinedNameHit = SearchHit & CombinedHitEvidence;
+/** Only files up to this size get a hash on a name hit (panel evidence detail). */
+export declare const COMBINED_HASH_MAX_BYTES: number;
+/** At most this many name hits per page are hashed, keeping keystroke latency low. */
+export declare const COMBINED_HASH_MAX_HITS = 20;
+/**
+ * Compare one hit snapshot (engine mtime/size) with the current stat. A page is
+ * a preview, not a resolve, so the check is one stat per hit and never a read.
+ * @param snapshot - engine-reported mtime, plus size for files.
+ * @param current - current stat, or undefined when the path is gone.
+ * @param observedAt - epoch ms of this observation.
+ * @returns the additive freshness block.
+ */
+export declare function freshnessForHit(snapshot: {
+    mtime: number;
+    size?: number;
+}, current: {
+    mtimeMs: number;
+    size: number;
+} | undefined, observedAt: number): RefFreshness;
 /**
  * Accept a requested root prefix only when it lives under a configured root;
  * the panel sends one of `status.roots`, but the route is still a trust
@@ -57,7 +92,8 @@ export interface CombinedRequest {
 }
 /** One name-index group: files or directories. */
 export interface NameGroup {
-    hits: SearchHit[];
+    /** Hits carry additive freshness/permissions/hash evidence fields. */
+    hits: CombinedNameHit[];
     returned: number;
     total: number;
     truncated: boolean;
@@ -71,7 +107,8 @@ export interface NameGroup {
 }
 /** The content group: body/session hits plus the index state at query time. */
 export interface ContentGroup {
-    hits: ContentHit[];
+    /** Hits carry additive freshness/permissions evidence fields. */
+    hits: CombinedContentHit[];
     returned: number;
     /** True when the group was cut off by its page limit. */
     capped: boolean;
@@ -104,6 +141,12 @@ export interface CombinedDeps {
     search(args: SearchArgs): Promise<SearchResult>;
     contentSearch?: (query: string, limit: number, options: ContentSearchOptions) => Promise<ContentSearchResult>;
     contentStatus?: () => ContentState;
+    /**
+     * Optional look-up of the content-index snapshot mtime for one hit. Supplying
+     * it turns content-hit freshness from "unknown" into fresh/stale/missing; the
+     * panel keeps working without it.
+     */
+    contentIndexedMtime?: (hit: ContentHit) => number | undefined;
     ensure?: () => void;
     maxResults: number;
     /** Configured roots; a requested root prefix must live under one of them. */
@@ -133,8 +176,8 @@ export declare function readCombinedRequest(body: Record<string, unknown>, maxRe
  * @param nameHits - hits from the name index.
  * @returns the kept hits and how many were dropped.
  */
-export declare function dedupeNameHits(contentHits: readonly ContentHit[], nameHits: readonly SearchHit[]): {
-    hits: SearchHit[];
+export declare function dedupeNameHits<T extends SearchHit>(contentHits: readonly ContentHit[], nameHits: readonly T[]): {
+    hits: T[];
     deduped: number;
 };
 /**

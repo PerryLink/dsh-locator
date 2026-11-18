@@ -43,6 +43,22 @@ type Health struct {
 	Degraded bool `json:"degraded"`
 	// Reason explains a degraded state in one short line.
 	Reason string `json:"reason,omitempty"`
+	// Coverage, when non-empty, has exactly one entry per requested root. It
+	// tells the daemon's periodic refresh fallback which roots still have a
+	// healthy native watcher and may therefore be skipped when only the others
+	// are rescanned. Backends that cannot attribute coverage per root leave it
+	// nil; the daemon then falls back to a full rebuild.
+	Coverage []RootCoverage `json:"coverage,omitempty"`
+}
+
+// RootCoverage is the watcher state of one requested root.
+type RootCoverage struct {
+	// Path is the root as the daemon configured it.
+	Path string `json:"path"`
+	// Watched is true when changes below Path are delivered natively.
+	Watched bool `json:"watched"`
+	// Reason explains why an unwatched root is not covered.
+	Reason string `json:"reason,omitempty"`
 }
 
 // HealthReporter is implemented by backends that can describe their coverage.

@@ -10,6 +10,7 @@
  * @module dsh-locator/combined
  */
 
+import { statSync } from 'node:fs'
 import type { ContentHit, ContentProgress, ContentState } from './content.ts'
 import { checkContentQuery, decodeExtendedForNames } from './content-search.ts'
 import type {
@@ -19,7 +20,8 @@ import type {
   ContentSearchOptions,
   ContentSearchResult,
 } from './content-search.ts'
-import { encodeSessionRef, fileRef } from './refs.ts'
+import { encodeSessionRef, fileRef, freshnessFor, sha256File } from './refs.ts'
+import type { RefFreshness, RefPermissions } from './refs.ts'
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts'
 
 /** Attach the citable ref to one content hit (session URI or path snapshot). */
@@ -34,6 +36,108 @@ function contentHitRef<T extends { kind: string; sessionId?: string; path?: stri
 /** Attach the citable ref to one name hit. */
 function nameHitRef(hit: SearchHit): SearchHit {
   return hit.dir ? hit : { ...hit, ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }
+}
+
+
+/** Additive evidence metadata attached to one combined hit for the panel. */
+export interface CombinedHitEvidence {
+  /** Freshness of the hit's snapshot against the current bytes. */
+  freshness: RefFreshness
+  /** The caller may read this hit; visibility mirrors the hit's scope. */
+  permissions: RefPermissions
+  /** sha256 of the file bytes when cheap to compute (small name hits). */
+  hash?: string
+}
+
+/** One content hit enriched with evidence metadata. */
+export type CombinedContentHit = ContentHit & { ref?: string } & CombinedHitEvidence
+
+/** One name hit enriched with evidence metadata. */
+export type CombinedNameHit = SearchHit & CombinedHitEvidence
+
+/** Only files up to this size get a hash on a name hit (panel evidence detail). */
+export const COMBINED_HASH_MAX_BYTES = 64 * 1024
+
+/** At most this many name hits per page are hashed, keeping keystroke latency low. */
+export const COMBINED_HASH_MAX_HITS = 20
+
+/**
+ * Compare one hit snapshot (engine mtime/size) with the current stat. A page is
+ * a preview, not a resolve, so the check is one stat per hit and never a read.
+ * @param snapshot - engine-reported mtime, plus size for files.
+ * @param current - current stat, or undefined when the path is gone.
+ * @param observedAt - epoch ms of this observation.
+ * @returns the additive freshness block.
+ */
+export function freshnessForHit(
+  snapshot: { mtime: number; size?: number },
+  current: { mtimeMs: number; size: number } | undefined,
+  observedAt: number,
+): RefFreshness {
+  if (current === undefined) return { state: 'missing', observedAt }
+  if (snapshot.size !== undefined && current.size !== snapshot.size) {
+    return { state: 'stale', observedAt, mtime: Math.trunc(current.mtimeMs) }
+  }
+  return freshnessFor(snapshot.mtime, current.mtimeMs, observedAt)
+}
+
+/** Whether one runtime value looks like a lowercase sha256 hex digest. */
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+}
+
+/** Enrich one page of name hits with freshness, permissions and an optional hash. */
+async function enrichNameHits(hits: readonly SearchHit[]): Promise<CombinedNameHit[]> {
+  const observedAt = Date.now()
+  let hashed = 0
+  return await Promise.all(hits.map(async hit => {
+    const permissions: RefPermissions = {
+      read: 'allowed',
+      visibility: 'roots',
+      reason: hit.dir ? 'directory hit from the configured index roots' : 'name hit from the configured index roots',
+    }
+    let info: ReturnType<typeof statSync> | undefined
+    try { info = statSync(hit.path) } catch { info = undefined }
+    const snapshot = hit.dir ? { mtime: hit.mtime } : { mtime: hit.mtime, size: hit.size }
+    const freshness = freshnessForHit(snapshot, info === undefined ? undefined : { mtimeMs: info.mtimeMs, size: info.size }, observedAt)
+    if (hit.dir || info === undefined || !info.isFile()) return { ...hit, freshness, permissions }
+    let hash: string | undefined
+    if (hashed < COMBINED_HASH_MAX_HITS && info.size <= COMBINED_HASH_MAX_BYTES) {
+      hashed += 1
+      const computed = await sha256File(hit.path, COMBINED_HASH_MAX_BYTES)
+      if (computed !== null) hash = computed
+    }
+    return { ...hit, freshness, permissions, ...(hash === undefined ? {} : { hash }) }
+  }))
+}
+
+/**
+ * Enrich one page of content hits with permissions (always) and freshness when
+ * the host supplies a content-index snapshot lookup; a hit that already carries
+ * a hash (future find/content field) passes it through unchanged.
+ */
+async function enrichContentHits(hits: readonly (ContentHit & { ref?: string })[], deps: CombinedDeps): Promise<CombinedContentHit[]> {
+  const observedAt = Date.now()
+  return await Promise.all(hits.map(async hit => {
+    const permissions: RefPermissions = hit.kind === 'session'
+      ? { read: 'allowed', visibility: 'session', reason: 'session messages are scoped to the caller workspace' }
+      : { read: 'allowed', visibility: 'roots', reason: 'content hit from the configured index roots' }
+    let indexedAt: number | undefined
+    try { indexedAt = deps.contentIndexedMtime?.(hit) } catch { indexedAt = undefined }
+    let freshness: RefFreshness = { state: 'unknown', observedAt }
+    if (indexedAt !== undefined) {
+      let current: ReturnType<typeof statSync> | undefined
+      try { current = statSync(hit.path) } catch { current = undefined }
+      freshness = current === undefined ? { state: 'missing', observedAt } : freshnessFor(indexedAt, current.mtimeMs, observedAt)
+    }
+    const existing = (hit as { hash?: unknown }).hash
+    return {
+      ...hit,
+      freshness,
+      permissions,
+      ...(isSha256(existing) ? { hash: existing } : {}),
+    }
+  }))
 }
 
 /** Strip trailing separators from a root so prefix checks are unambiguous. */
@@ -101,7 +205,8 @@ export interface CombinedRequest {
 
 /** One name-index group: files or directories. */
 export interface NameGroup {
-  hits: SearchHit[]
+  /** Hits carry additive freshness/permissions/hash evidence fields. */
+  hits: CombinedNameHit[]
   returned: number
   total: number
   truncated: boolean
@@ -116,7 +221,8 @@ export interface NameGroup {
 
 /** The content group: body/session hits plus the index state at query time. */
 export interface ContentGroup {
-  hits: ContentHit[]
+  /** Hits carry additive freshness/permissions evidence fields. */
+  hits: CombinedContentHit[]
   returned: number
   /** True when the group was cut off by its page limit. */
   capped: boolean
@@ -151,6 +257,12 @@ export interface CombinedDeps {
   search(args: SearchArgs): Promise<SearchResult>
   contentSearch?: (query: string, limit: number, options: ContentSearchOptions) => Promise<ContentSearchResult>
   contentStatus?: () => ContentState
+  /**
+   * Optional look-up of the content-index snapshot mtime for one hit. Supplying
+   * it turns content-hit freshness from "unknown" into fresh/stale/missing; the
+   * panel keeps working without it.
+   */
+  contentIndexedMtime?: (hit: ContentHit) => number | undefined
   ensure?: () => void
   maxResults: number
   /** Configured roots; a requested root prefix must live under one of them. */
@@ -212,14 +324,14 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
  * @param nameHits - hits from the name index.
  * @returns the kept hits and how many were dropped.
  */
-export function dedupeNameHits(
+export function dedupeNameHits<T extends SearchHit>(
   contentHits: readonly ContentHit[],
-  nameHits: readonly SearchHit[],
-): { hits: SearchHit[], deduped: number } {
+  nameHits: readonly T[],
+): { hits: T[], deduped: number } {
   const seen = new Set<string>()
   for (const hit of contentHits) seen.add(hit.path)
   if (seen.size === 0) return { hits: [...nameHits], deduped: 0 }
-  const hits: SearchHit[] = []
+  const hits: T[] = []
   let deduped = 0
   for (const hit of nameHits) {
     if (!hit.dir && seen.has(hit.path)) {
@@ -323,7 +435,7 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
     })
     const prefix = request.rootPrefix
     const selected = prefix === null ? result.hits : result.hits.filter(hit => pathUnderPrefix(hit.path, prefix))
-    const hits = selected.map(nameHitRef)
+    const hits = await enrichNameHits(selected.map(nameHitRef))
     const narrowed = prefix !== null && hits.length !== result.hits.length
     return {
       hits,
@@ -393,7 +505,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     deps.ensure?.()
     const result = await deps.contentSearch(request.query, request.contentLimit, options)
     const state = deps.contentStatus?.()
-    const hits = result.hits.map(contentHitRef)
+    const hits = await enrichContentHits(result.hits.map(contentHitRef), deps)
     return {
       hits,
       returned: hits.length,

@@ -4,6 +4,7 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
+import { DEFAULT_OUTPUT_BUDGET_CHARS, validateExternalCommand } from './scope.ts'
 
 /** Locator plugin configuration. */
 export interface Config {
@@ -21,6 +22,12 @@ export interface Config {
    * `locator_rebuild`.
    */
   refreshIntervalMs: number
+  /**
+   * Periodic fallback refreshes only the roots the native watcher cannot cover
+   * (incremental refresh). Default true; false restores the 0.18 behavior of
+   * re-scanning every root on each fallback tick.
+   */
+  refreshIncremental?: boolean
   /** Directory reader concurrency during scans; 0 uses the CPU count. */
   scanWorkers: number
   /** Soft Go heap limit in MiB for the engine; 0 leaves it to GOMEMLIMIT/GOGC. */
@@ -53,6 +60,18 @@ export interface Config {
    * rebuilds session documents only; the file index is kept.
    */
   contentIndexToolResults: boolean
+  /**
+   * Extract bodies from PDF/Office/EPUB documents into the content index
+   * (default true). Turn it off to index plain text only, e.g. to keep a first
+   * build cheap on a document-heavy disk.
+   */
+  contentExtractDocuments?: boolean
+  /** Largest document handed to the extractor in bytes (default 20 MiB; 0 unlimited). */
+  contentExtractMaxBytes?: number
+  /** Index code symbols for locator_outline/locator_symbol/locator_repo_map (default true). */
+  contentIndexSymbols?: boolean
+  /** Largest code file considered for symbol extraction in bytes (default 512 KiB). */
+  contentSymbolMaxBytes?: number
   /**
    * One switch for full content search: overrides both body and file caps to
    * unlimited. Off by default because a full index costs gigabytes of disk and
@@ -88,6 +107,54 @@ export interface Config {
    * user's own documents. The name index still covers them.
    */
   contentExcludes: string[]
+  /**
+   * Glob patterns that must not enter the content index at all (the name index
+   * keeps them). This is the "indexable" layer: document extractors (PDF,
+   * Office, OCR sidecars) skip a match before reading bytes, and content hits
+   * are filtered for databases built before the rule existed. Complements
+   * `contentExcludes`, which stays a fast substring/segment pre-filter.
+   */
+  notIndexed?: string[]
+  /**
+   * Glob patterns never returned as hits by `locator_search`/`locator_find`.
+   * The path stays indexed (and readable unless `notReadable` also matches),
+   * but no result names it. This is the "searchable" layer.
+   */
+  notSearchable?: string[]
+  /**
+   * Glob patterns whose body and evidence ref must not be returned: content
+   * hits are dropped, refs are stripped from name hits and ref resolution must
+   * refuse them. This is the "readable" layer. See `readableDenial` in
+   * `src/scope.ts` for the hook the resolve/cite tools consume.
+   */
+  notReadable?: string[]
+  /**
+   * Soft cap on the character size of one locator tool result. Hits that no
+   * longer fit are dropped and the result reports `truncated`, `nextOffset`
+   * and a `budget` block (JSON-serialized characters). 0 disables the budget.
+   */
+  outputBudgetChars?: number
+  /**
+   * Optional external rerank command for content hits. Empty (the default)
+   * disables it. The command is spawned without a shell and speaks JSON on
+   * stdin/stdout: `{ protocol: "rerank/v1", query, hits: [{path,title,snippet,
+   * score}] }` in, `{ order: number[] }` out (see `src/scope.ts`). A broken
+   * hook only adds a warning; the lexical order is kept.
+   */
+  rerankCommand?: string
+  /**
+   * Optional external OCR command for the document extraction layer. Empty
+   * (the default) disables it. Spawned without a shell; stdin
+   * `{ protocol: "ocr/v1", path, mime? }`, stdout `{ text: string }` (see
+   * `runOcrCommand` in `src/scope.ts`).
+   */
+  ocrCommand?: string
+  /**
+   * Let locator_resolve revalidate URL refs with one bounded conditional HTTP
+   * request (5 s timeout, no crawling, no robots fetch). Off (the default)
+   * keeps URL refs metadata-only: resolving never opens a network connection.
+   */
+  urlFreshness?: boolean
   /**
    * Try the NTFS USN/MFT enumeration before the portable walk (Windows only,
    * requires running DSH as administrator). Falls back automatically.
@@ -129,6 +196,7 @@ export const Config: Schema<Config> = Schema.object({
   ]),
   watch: Schema.boolean().default(true),
   refreshIntervalMs: Schema.number().default(1_800_000),
+  refreshIncremental: Schema.boolean().default(true),
   scanWorkers: Schema.number().default(0),
   memoryLimitMB: Schema.number().default(0),
   contentIndex: Schema.boolean().default(true),
@@ -139,6 +207,10 @@ export const Config: Schema<Config> = Schema.object({
   contentMaxFiles: Schema.number().default(200_000),
   contentIndexReasoning: Schema.boolean().default(false),
   contentIndexToolResults: Schema.boolean().default(false),
+  contentExtractDocuments: Schema.boolean().default(true),
+  contentExtractMaxBytes: Schema.number().default(20_000_000),
+  contentIndexSymbols: Schema.boolean().default(true),
+  contentSymbolMaxBytes: Schema.number().default(524_288),
   contentFullIndex: Schema.boolean().default(false),
   contentMaxSessions: Schema.number().default(100),
   contentIncludeArchived: Schema.boolean().default(false),
@@ -176,6 +248,13 @@ export const Config: Schema<Config> = Schema.object({
     '/.local/share/pnpm/',
     '/go/pkg/mod/',
   ]),
+  notIndexed: Schema.array(Schema.string()).default([]),
+  notSearchable: Schema.array(Schema.string()).default([]),
+  notReadable: Schema.array(Schema.string()).default([]),
+  outputBudgetChars: Schema.number().default(8000),
+  rerankCommand: Schema.string().default(''),
+  ocrCommand: Schema.string().default(''),
+  urlFreshness: Schema.boolean().default(false),
   windowsUsn: Schema.boolean().default(false),
   stateDir: Schema.string().default(''),
   binaryPath: Schema.string().default(''),
@@ -184,6 +263,36 @@ export const Config: Schema<Config> = Schema.object({
   requestTimeoutMs: Schema.number().default(15_000),
   httpConnectionOptional: Schema.boolean().default(false),
 })
+
+/**
+ * Effective per-tool-result character budget. Unset or invalid values fall back
+ * to {@link DEFAULT_OUTPUT_BUDGET_CHARS}; 0 disables the budget.
+ * @param config - validated plugin configuration.
+ * @returns the soft cap in JSON-serialized characters.
+ */
+export function outputBudgetChars(config: Pick<Config, 'outputBudgetChars'>): number {
+  const value = config.outputBudgetChars
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : DEFAULT_OUTPUT_BUDGET_CHARS
+}
+
+/**
+ * Validate the optional external command settings. An empty command is a valid
+ * "disabled" value; anything else must split into a program without a shell.
+ * These are configuration problems, not query failures: `locator_status`
+ * reports them as warnings and the hook is simply not run.
+ * @param config - validated plugin configuration.
+ * @returns human-readable problems, empty when both hooks are valid/off.
+ */
+export function validateHookCommands(config: Pick<Config, 'rerankCommand' | 'ocrCommand'>): string[] {
+  const problems: string[] = []
+  for (const name of ['rerankCommand', 'ocrCommand'] as const) {
+    const value = config[name]
+    if (typeof value !== 'string') continue
+    const problem = validateExternalCommand(value)
+    if (problem !== undefined) problems.push(name + ': ' + problem)
+  }
+  return problems
+}
 
 /**
  * Effective content caps. `contentFullIndex` is the explicit one-switch full

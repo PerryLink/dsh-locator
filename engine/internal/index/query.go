@@ -70,7 +70,11 @@ func ParseQuery(text string) (Query, error) {
 		MinSize: -1, MaxSize: -1, MinMtime: -1, MaxMtime: -1,
 		Limit: defaultLimit,
 	}
-	for _, tok := range tokenize(q.Text) {
+	// Normalize the whole query before tokenizing so full-width spaces,
+	// quotes, '!' negation and filter keywords (ｅｘｔ:、ｐａｔｈ:) behave like
+	// their ASCII forms. Query.Text keeps the caller's original bytes for
+	// display; term matching normalizes again (idempotent) in the matcher.
+	for _, tok := range tokenize(normalizeText(q.Text, false)) {
 		if tok == "" {
 			continue
 		}
@@ -97,7 +101,7 @@ func ParseQuery(text string) (Query, error) {
 				if neg {
 					return q, errors.New("path: cannot be negated")
 				}
-				q.PathTerms = append(q.PathTerms, strings.ToLower(val))
+				q.PathTerms = append(q.PathTerms, normalizeText(val, true))
 				continue
 			case "size":
 				lo, hi, err := parseSizeRange(val)

@@ -5,16 +5,40 @@ import (
 	"strings"
 )
 
+// matcher is the immutable per-query plan: normalized terms plus the filters.
 type matcher struct {
 	q         *Query
 	re        *regexp.Regexp
-	terms     []string
-	rawTerms  []string
+	terms     []matchTerm
 	pathTerms []string
 	exts      map[string]bool
 	notExts   map[string]bool
 	wholeWord bool
 	caseSens  bool
+}
+
+// matchTerm is one bare query term in its normalized search form.
+type matchTerm struct {
+	// raw keeps the query's case (after NFKC width folding); case-sensitive
+	// and glob matching use it.
+	raw string
+	// lower is NFKC + lower case, compared against names and pinyin keys when
+	// the query is case-insensitive.
+	lower string
+	neg   bool
+	// wildcard terms use glob matching only.
+	wildcard bool
+	// han is true when the term contains a Han character.
+	han bool
+	// parts splits a mixed Han+Latin term. Pure Han or pure Latin terms leave
+	// it nil and take the faster single-form path.
+	parts []termPart
+}
+
+// termPart is one Han or non-Han run of a mixed term.
+type termPart struct {
+	text string
+	han  bool
 }
 
 func newMatcher(q *Query) (*matcher, error) {
@@ -49,14 +73,47 @@ func newMatcher(q *Query) (*matcher, error) {
 		return m, nil
 	}
 	for _, t := range q.Terms {
-		m.rawTerms = append(m.rawTerms, t.Value)
-		if q.Case {
-			m.terms = append(m.terms, t.Value)
-		} else {
-			m.terms = append(m.terms, strings.ToLower(t.Value))
-		}
+		m.terms = append(m.terms, newMatchTerm(t, q.Case))
 	}
 	return m, nil
+}
+
+// newMatchTerm normalizes one term up front so the scan compares bytes instead
+// of re-normalizing the query for every record.
+func newMatchTerm(t Term, caseSens bool) matchTerm {
+	mt := matchTerm{neg: t.Neg}
+	mt.raw = normalizeText(t.Value, false)
+	mt.lower = normalizeText(t.Value, true)
+	mt.wildcard = strings.ContainsAny(mt.raw, "*?")
+	mt.han = containsHan(mt.raw)
+	if mt.han && !mt.wildcard && mixedHan(mt.searchForm(caseSens)) {
+		mt.parts = splitHanRuns(mt.searchForm(caseSens))
+	}
+	return mt
+}
+
+// searchForm is the term form the matcher compares against.
+func (t *matchTerm) searchForm(caseSens bool) string {
+	if caseSens {
+		return t.raw
+	}
+	return t.lower
+}
+
+// mixedHan reports whether s contains both Han and non-Han runes.
+func mixedHan(s string) bool {
+	seenHan, seenNonHan := false, false
+	for _, r := range s {
+		if isHan(r) {
+			seenHan = true
+		} else {
+			seenNonHan = true
+		}
+		if seenHan && seenNonHan {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *matcher) matches(ix *Index, id int32) bool {
@@ -92,10 +149,9 @@ func (m *matcher) matches(ix *Index, id int32) bool {
 			return false
 		}
 	} else {
-		for i, term := range m.rawTerms {
-			neg := m.q.Terms[i].Neg
-			ok := m.matchTerm(name, term, m.terms[i])
-			if neg {
+		for i := range m.terms {
+			ok := m.termMatches(ix, id, name, &m.terms[i])
+			if m.terms[i].neg {
 				if ok {
 					return false
 				}
@@ -108,12 +164,9 @@ func (m *matcher) matches(ix *Index, id int32) bool {
 	}
 	if len(m.pathTerms) > 0 {
 		path := ix.pathLocked(id)
-		lower := path
-		if !m.caseSens {
-			lower = strings.ToLower(path)
-		}
+		normalized := normalizeText(path, !m.caseSens)
 		for _, pt := range m.pathTerms {
-			if !strings.Contains(lower, pt) {
+			if !strings.Contains(normalized, pt) {
 				return false
 			}
 		}
@@ -121,17 +174,85 @@ func (m *matcher) matches(ix *Index, id int32) bool {
 	return true
 }
 
-func (m *matcher) matchTerm(name, raw, lower string) bool {
-	if strings.ContainsAny(raw, "*?") {
-		return globMatch(name, raw, m.caseSens)
+// termMatches resolves one term against a record. Literal matching comes first;
+// the pinyin fallback only runs when the literal bytes did not match.
+func (m *matcher) termMatches(ix *Index, id int32, name string, t *matchTerm) bool {
+	hay := name
+	stored := false
+	if !m.caseSens {
+		if folded, ok := ix.foldedName(id); ok {
+			hay, stored = folded, true
+		}
+	}
+	if t.wildcard {
+		if m.caseSens {
+			return globMatch(name, t.raw, true)
+		}
+		return globMatch(hay, t.lower, false)
 	}
 	if m.wholeWord {
-		return containsWord(name, lower, m.caseSens)
+		if m.caseSens {
+			return containsWord(name, t.raw, true)
+		}
+		return containsWord(hay, t.lower, false)
+	}
+	needle := t.searchForm(m.caseSens)
+	if t.han {
+		if len(t.parts) == 0 {
+			// A pure Han term matches the name literally. Pinyin must not
+			// translate the query itself: "国家" is not "guojia".
+			return m.literalMatches(name, hay, stored, needle)
+		}
+		return m.mixedMatches(ix, id, name, hay, stored, t)
+	}
+	// Pure non-Han term: literal match first, then the name's pinyin keys.
+	if m.literalMatches(name, hay, stored, needle) {
+		return true
 	}
 	if m.caseSens {
-		return strings.Contains(name, raw)
+		return false
 	}
-	return containsFold(name, lower)
+	if full, initials, ok := ix.pinyinOf(id); ok {
+		return pinyinContains(full, initials, t.lower)
+	}
+	return false
+}
+
+// mixedMatches handles a term that mixes Han and Latin characters, such as
+// "guo家" or "国家gjy". Each run must match on its own: Han runs literally,
+// Latin runs literally or through the pinyin keys, so neither side breaks the
+// other.
+func (m *matcher) mixedMatches(ix *Index, id int32, name, hay string, stored bool, t *matchTerm) bool {
+	var full, initials string
+	hasPinyin := false
+	for i := range t.parts {
+		p := &t.parts[i]
+		if m.literalMatches(name, hay, stored, p.text) {
+			continue
+		}
+		if p.han || m.caseSens {
+			return false
+		}
+		if !hasPinyin {
+			full, initials, hasPinyin = ix.pinyinOf(id)
+		}
+		if !hasPinyin || !pinyinContains(full, initials, p.text) {
+			return false
+		}
+	}
+	return true
+}
+
+// literalMatches compares a normalized needle with the record name. stored
+// means hay already is the NFKC + lower-case form of the name.
+func (m *matcher) literalMatches(name, hay string, stored bool, needle string) bool {
+	if m.caseSens {
+		return strings.Contains(name, needle)
+	}
+	if stored {
+		return strings.Contains(hay, needle)
+	}
+	return containsFold(name, needle)
 }
 
 // containsWord reports whether needle occurs with non-word bytes on both

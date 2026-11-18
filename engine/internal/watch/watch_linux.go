@@ -32,6 +32,11 @@ type watcher struct {
 	dirsFailed   int
 	degraded     bool
 	reasons      []string
+	// coverage is one entry per requested root once the constructor finished;
+	// ready distinguishes startup walk failures (recorded in coverage) from
+	// runtime failures (which invalidate per-root attribution).
+	coverage []RootCoverage
+	ready    bool
 
 	fd      int
 	mu      sync.Mutex
@@ -67,7 +72,10 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		stopCh:     make(chan struct{}),
 	}
 	for _, root := range opt.Roots {
-		if reason, skip := classifyRoot(root); reason != "" {
+		cov := RootCoverage{Path: root}
+		reason, skip := classifyRoot(root)
+		if reason != "" {
+			cov.Reason = reason
 			w.markDegraded(reason)
 			// Remote/9p roots never deliver usable inotify events: do not walk
 			// their trees (tens of thousands of useless kernel watches and
@@ -76,17 +84,37 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 			if skip {
 				w.mu.Lock()
 				w.rootsSkipped++
+				w.coverage = append(w.coverage, cov)
 				w.mu.Unlock()
 				continue
 			}
 		}
 		before := w.watchedDirCount()
+		beforeFailures := w.failedDirs()
 		if err := w.addTree(root, true); err != nil {
 			w.report(err)
 		}
-		if w.watchedDirCount() > before {
+		watched := w.watchedDirCount() > before
+		failures := w.failedDirs() - beforeFailures
+		if watched {
+			w.mu.Lock()
 			w.rootsWatch++
+			w.mu.Unlock()
 		}
+		switch {
+		case reason != "":
+			// The filesystem may still drop events (FUSE/stacked mounts), so
+			// keep the root in the rescan set even though it was walked.
+		case watched && failures == 0:
+			cov.Watched = true
+		case watched:
+			cov.Reason = fmt.Sprintf("inotify coverage is incomplete (%d directorie(s) could not be watched)", failures)
+		default:
+			cov.Reason = "no directory below this root could be watched"
+		}
+		w.mu.Lock()
+		w.coverage = append(w.coverage, cov)
+		w.mu.Unlock()
 	}
 	if w.watchedDirCount() == 0 {
 		w.mu.Lock()
@@ -100,6 +128,9 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		// A degraded watcher with no watches is still useful: it reports the
 		// reason and lets the daemon run the periodic rebuild fallback.
 	}
+	w.mu.Lock()
+	w.ready = true
+	w.mu.Unlock()
 	return w, nil
 }
 
@@ -121,12 +152,18 @@ func (w *watcher) healthLocked() Health {
 	if w.rootsWatch < len(w.roots) && len(reasons) == 0 {
 		reasons = []string{fmt.Sprintf("%d of %d root(s) could not be watched", len(w.roots)-w.rootsWatch, len(w.roots))}
 	}
+	var coverage []RootCoverage
+	if len(w.coverage) > 0 {
+		coverage = make([]RootCoverage, len(w.coverage))
+		copy(coverage, w.coverage)
+	}
 	return Health{
 		Roots:    len(w.roots),
 		Watching: w.rootsWatch,
 		Dirs:     w.dirsWatched,
 		Degraded: degraded,
 		Reason:   strings.Join(reasons, "; "),
+		Coverage: coverage,
 	}
 }
 
@@ -240,6 +277,12 @@ func (w *watcher) noteWatchFailure(err error) {
 	}
 	w.mu.Lock()
 	w.dirsFailed++
+	if w.ready {
+		// A directory that failed to watch after startup cannot be attributed
+		// to one root, so the daemon must fall back to a full rebuild instead
+		// of trusting the per-root coverage snapshot.
+		w.coverage = nil
+	}
 	w.mu.Unlock()
 	w.markDegraded(fmt.Sprintf("inotify coverage is incomplete (%d directorie(s) unwatched): %v", w.failedDirs(), err))
 }
@@ -261,6 +304,29 @@ func (w *watcher) removeWatch(dir string) {
 	w.mu.Unlock()
 	if ok {
 		_, _ = syscall.InotifyRmWatch(w.fd, uint32(id))
+	}
+}
+
+// rootLost marks the coverage entry for a watched root whose watch was removed
+// (the directory itself was deleted or moved). The daemon then knows this root
+// must be rescanned by the periodic refresh instead of being reused.
+func (w *watcher) rootLost(dir string) {
+	w.mu.Lock()
+	found := false
+	for i := range w.coverage {
+		if w.coverage[i].Path == dir && w.coverage[i].Watched {
+			w.coverage[i].Watched = false
+			w.coverage[i].Reason = "root watch was removed (directory deleted or moved)"
+			found = true
+			break
+		}
+	}
+	if found && w.rootsWatch > 0 {
+		w.rootsWatch--
+	}
+	w.mu.Unlock()
+	if found {
+		w.markDegraded("a watched root was deleted or moved; the periodic refresh will rescan it")
 	}
 }
 
@@ -342,6 +408,7 @@ func (w *watcher) handle(buf []byte) {
 		}
 		if mask&syscall.IN_IGNORED != 0 {
 			w.removeWatch(dir)
+			w.rootLost(dir)
 			continue
 		}
 		if name == "" {
@@ -349,6 +416,7 @@ func (w *watcher) handle(buf []byte) {
 			if mask&(syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF) != 0 {
 				w.ix.RemoveSubtree(dir)
 				w.removeWatch(dir)
+				w.rootLost(dir)
 			}
 			continue
 		}

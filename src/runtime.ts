@@ -81,6 +81,24 @@ export interface EngineStatus {
   watchRoots?: number
   /** Periodic rebuild fallback is active because the watcher is incomplete. */
   refreshFallback?: boolean
+  /** The fallback refreshes only watcher-less roots instead of re-scanning all. */
+  incrementalRefresh?: boolean
+  /** Configured roots no native watcher covers (refreshed by the fallback). */
+  watchUnwatchedRoots?: string[]
+  /** Last fallback refresh mode: incremental or full. */
+  refreshMode?: string
+  /** Why the last fallback refresh ran. */
+  refreshReason?: string
+  /** Roots scanned by the last fallback refresh. */
+  refreshScannedRoots?: string[]
+  /** Healthy roots skipped by the last incremental refresh. */
+  refreshSkippedRoots?: string[]
+  /** Entries re-read by the last fallback refresh. */
+  refreshEntries?: number
+  /** Wall-clock cost of the last fallback refresh. */
+  refreshTookMs?: number
+  /** Epoch milliseconds of the last fallback refresh. */
+  refreshAt?: number
   scanning: boolean
   usn: boolean
   uptimeSec: number
@@ -105,6 +123,35 @@ export interface RuntimeStatus {
   warning?: string
   scanning?: { phase: string; entries?: number; current?: string }
   engine?: EngineStatus
+}
+
+/**
+ * Build the argv for one `indexd serve` session.
+ *
+ * Extracted so the fallback-refresh switch (`--no-incremental-refresh`) and the
+ * other flags can be asserted without spawning a process.
+ * @param config - validated plugin configuration.
+ * @param roots - resolved index roots.
+ * @param stateDir - snapshot directory.
+ * @returns the engine argv.
+ */
+export function engineServeArgs(
+  config: Pick<Config, 'excludes' | 'watch' | 'refreshIntervalMs' | 'refreshIncremental' | 'scanWorkers' | 'memoryLimitMB' | 'windowsUsn'>,
+  roots: readonly string[],
+  stateDir: string,
+): string[] {
+  const args = ['serve', '--state', stateDir]
+  for (const root of roots) args.push('--root', root)
+  for (const exclude of config.excludes) args.push('--exclude', exclude)
+  if (!config.watch) args.push('--no-watch')
+  // Default true: periodic fallback refreshes only watcher-less roots. false
+  // restores the 0.18 full-rescan behavior.
+  if (config.refreshIncremental === false) args.push('--no-incremental-refresh')
+  if (config.refreshIntervalMs > 0) args.push('--refresh', String(config.refreshIntervalMs) + 'ms')
+  if (config.scanWorkers > 0) args.push('--workers', String(config.scanWorkers))
+  if (config.memoryLimitMB > 0) args.push('--memory-limit-mb', String(config.memoryLimitMB))
+  if (config.windowsUsn) args.push('--usn')
+  return args
 }
 
 /**
@@ -160,14 +207,7 @@ export class LocatorRuntime {
         // A read-only install cannot be fixed here; spawn reports the real error.
       }
     }
-    const args = ['serve', '--state', this.stateDir]
-    for (const root of this.roots) args.push('--root', root)
-    for (const exclude of this.config.excludes) args.push('--exclude', exclude)
-    if (!this.config.watch) args.push('--no-watch')
-    if (this.config.refreshIntervalMs > 0) args.push('--refresh', `${String(this.config.refreshIntervalMs)}ms`)
-    if (this.config.scanWorkers > 0) args.push('--workers', String(this.config.scanWorkers))
-    if (this.config.memoryLimitMB > 0) args.push('--memory-limit-mb', String(this.config.memoryLimitMB))
-    if (this.config.windowsUsn) args.push('--usn')
+    const args = engineServeArgs(this.config, this.roots, this.stateDir)
 
     let child: ChildProcessWithoutNullStreams
     try {
@@ -274,6 +314,15 @@ export class LocatorRuntime {
       ...(typeof params.watchReason === 'string' ? { watchReason: params.watchReason } : {}),
       ...(typeof params.watchRoots === 'number' ? { watchRoots: params.watchRoots } : {}),
       ...(params.refreshFallback === true ? { refreshFallback: true } : {}),
+      ...(typeof params.incrementalRefresh === 'boolean' ? { incrementalRefresh: params.incrementalRefresh } : {}),
+      ...(Array.isArray(params.watchUnwatchedRoots) ? { watchUnwatchedRoots: stringList(params.watchUnwatchedRoots) } : {}),
+      ...(typeof params.refreshMode === 'string' ? { refreshMode: params.refreshMode } : {}),
+      ...(typeof params.refreshReason === 'string' ? { refreshReason: params.refreshReason } : {}),
+      ...(Array.isArray(params.refreshScannedRoots) ? { refreshScannedRoots: stringList(params.refreshScannedRoots) } : {}),
+      ...(Array.isArray(params.refreshSkippedRoots) ? { refreshSkippedRoots: stringList(params.refreshSkippedRoots) } : {}),
+      ...(typeof params.refreshEntries === 'number' ? { refreshEntries: params.refreshEntries } : {}),
+      ...(typeof params.refreshTookMs === 'number' ? { refreshTookMs: params.refreshTookMs } : {}),
+      ...(typeof params.refreshAt === 'number' ? { refreshAt: params.refreshAt } : {}),
       scanning: params.scanning === true,
       usn: params.usn === true,
       uptimeSec: numberOr(params.uptimeSec, 0),
@@ -420,4 +469,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/** Only the string entries of an engine array field. */
+function stringList(value: readonly unknown[]): string[] {
+  return value.filter((entry): entry is string => typeof entry === 'string')
 }

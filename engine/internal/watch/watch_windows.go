@@ -137,16 +137,36 @@ func (w *watcher) report(err error) {
 	}
 }
 
-// Health reports how many roots still have a live ReadDirectoryChangesW loop.
-func (w *watcher) Health() Health {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+// healthLocked builds the coverage report; the caller holds w.mu.
+func (w *watcher) healthLocked() Health {
+	watched := make(map[string]struct{}, len(w.watched))
+	for _, wr := range w.watched {
+		watched[wr.root] = struct{}{}
+	}
+	coverage := make([]RootCoverage, 0, len(w.roots))
+	for _, root := range w.roots {
+		c := RootCoverage{Path: root}
+		if _, ok := watched[root]; ok {
+			c.Watched = true
+		} else {
+			c.Reason = "no ReadDirectoryChangesW handle for this root"
+		}
+		coverage = append(coverage, c)
+	}
 	return Health{
 		Roots:    len(w.roots),
 		Watching: len(w.watched),
 		Degraded: w.degraded || len(w.watched) < len(w.roots),
 		Reason:   strings.Join(w.reasons, "; "),
+		Coverage: coverage,
 	}
+}
+
+// Health reports how many roots still have a live ReadDirectoryChangesW loop.
+func (w *watcher) Health() Health {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.healthLocked()
 }
 
 // markDegraded records incomplete coverage and notifies the daemon once, so it
@@ -168,12 +188,8 @@ func (w *watcher) markDegraded(reason string) {
 	if !dup && len(w.reasons) < 4 {
 		w.reasons = append(w.reasons, reason)
 	}
-	h := Health{
-		Roots:    len(w.roots),
-		Watching: len(w.watched),
-		Degraded: true,
-		Reason:   strings.Join(w.reasons, "; "),
-	}
+	h := w.healthLocked()
+	h.Degraded = true
 	w.mu.Unlock()
 	if first && w.onDegraded != nil {
 		w.onDegraded(h)

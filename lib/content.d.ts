@@ -17,7 +17,9 @@
  */
 import { Worker } from 'node:worker_threads';
 import { type ContentSearchOptions, type ContentSearchResult } from './content-search.ts';
+import { type CodeSymbol } from './symbols.ts';
 import type { LocatorRuntime } from './runtime.ts';
+export type { CodeSymbol, SymbolKind } from './symbols.ts';
 export interface ContentHit {
     kind: 'file' | 'session';
     path: string;
@@ -31,6 +33,12 @@ export interface ContentHit {
     line?: number;
     /** Citable evidence ref for this hit (session URI or ref://file). */
     ref?: string;
+    /**
+     * Extracted document format (`pdf`, `docx`, `xlsx`, `pptx`, `epub`) for file
+     * hits whose body came from a document. Plain text files keep it absent so
+     * existing consumers see no new field.
+     */
+    format?: string;
     score: number;
 }
 /** Which half of the content build a progress record belongs to. */
@@ -103,6 +111,36 @@ export interface ContentOptions {
     /** Index `tool/result` text as its own session document (opt-in). */
     includeToolResults?: boolean;
     /**
+     * Extract bodies from PDF/Office/EPUB documents too (default true). Off keeps
+     * only the plain-text path, for embedders that want the old behavior.
+     */
+    extractDocuments?: boolean;
+    /** Largest document handed to the extractor; 0 means unlimited (default 20 MiB). */
+    extractMaxBytes?: number;
+    /**
+     * Attach the extracted document format to file hits (default false). Only
+     * enable this once every tool that forwards content hits declares a `format`
+     * field: the host rejects undeclared tool-output properties. `docFormat()`
+     * and `formatsFor()` expose the same data without touching hits.
+     */
+    attachHitFormats?: boolean;
+    /** Index code symbols for the outline/symbol/repo-map data layer (default true). */
+    indexSymbols?: boolean;
+    /** Largest code file considered for symbol extraction (default 512 KiB). */
+    symbolMaxBytes?: number;
+    /**
+     * Optional notIndexed hook: return false to skip a path before any bytes are
+     * read (the plugin wires this to the Scope layer). Applies to documents,
+     * text bodies and symbol extraction, and is re-checked on backfills.
+     */
+    isIndexable?: (path: string) => boolean;
+    /**
+     * Optional OCR fallback for a PDF with no extractable text layer (a scan).
+     * Returns the recognized text, or undefined to leave the document out. The
+     * plugin wires this to `runOcrCommand` when the operator configures one.
+     */
+    ocr?: (path: string, format: string) => Promise<string | undefined>;
+    /**
      * Run content queries in a worker thread so a slow search never blocks the
      * DSH host event loop. Off by default so direct embedders and tests stay
      * single-threaded.
@@ -118,6 +156,22 @@ export interface ContentOptions {
      * Production never sets it.
      */
     searchWorkerFactory?: (workerPath: string) => Worker;
+}
+/** One symbol search hit from the additive `symbols` table. */
+export interface SymbolMatch {
+    path: string;
+    /** 1-based declaration line. */
+    line: number;
+    kind: string;
+    name: string;
+    language: string;
+    /** Enclosing type/namespace, when the extractor found one. */
+    scope?: string;
+}
+/** One file of a {@link ContentIndex.repoMap} result. */
+export interface RepoMapFile {
+    path: string;
+    symbols: CodeSymbol[];
 }
 export declare class ContentIndex {
     private readonly rt;
@@ -142,6 +196,8 @@ export declare class ContentIndex {
     private readonly sessionCwds;
     /** A legacy database gained `sources.cwd`; rebuild session docs to fill it. */
     private needsSessionBackfill;
+    /** A database predating the additive `symbols` table needs a one-time fill. */
+    private needsSymbolBackfill;
     private readonly pending;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
@@ -267,6 +323,13 @@ export declare class ContentIndex {
     /** Would storing a file of this size overflow the configured body budget? */
     private wouldExceed;
     private readFileDoc;
+    /** Extract one document body; its format is recorded additively in docs_meta. */
+    private readDocumentDoc;
+    /**
+     * Whether one dump entry belongs in this build. Document extraction has its
+     * own byte cap: a normal PDF or deck is larger than the text-file limit.
+     */
+    private entryIsIndexable;
     private indexSessions;
     private refreshSessions;
     /** Read and decompress one session log completely; no side effects on rows. */
@@ -286,6 +349,80 @@ export declare class ContentIndex {
     private replaceSessionRefs;
     /** Add the additive `sources.cwd` column without bumping the schema version. */
     private ensureSourcesCwdColumn;
+    /** Add the additive docs_meta.format column without bumping the schema version. */
+    private ensureDocsMetaFormatColumn;
+    /** Create the additive symbols table; true when it was missing. */
+    private ensureSymbolsTables;
+    /** Document extraction is on unless an embedder explicitly opted out. */
+    private extractDocumentsEnabled;
+    /** Effective document byte cap; 0/absent means the 20 MiB default. */
+    private documentMaxBytes;
+    /** Symbol indexing is on unless an embedder explicitly opted out. */
+    private indexSymbolsEnabled;
+    /** Effective symbol source-file byte cap; 0/absent means the 512 KiB default. */
+    private symbolMaxBytes;
+    /** Symbols for one code file, or undefined when it is not symbol-indexed. */
+    private collectFileSymbols;
+    /** Extract and store symbols for one file while its text is in hand. */
+    private writeFileSymbols;
+    /** Replace every stored symbol of one file (additive table; failures ignored). */
+    private writeSymbols;
+    /** Remove every stored symbol of one deleted file. */
+    private deleteSymbols;
+    /** Drop every stored symbol after symbol indexing is turned off. */
+    private clearSymbols;
+    /**
+     * Apply the symbol-index toggle and run the one-time fill when this database
+     * predates the additive table (or symbols were off when it was last built).
+     * Called on every incremental path, including the branches that end early,
+     * so a finish() can never record symbols=1 without the fill having run.
+     */
+    private syncSymbols;
+    /**
+     * One-time fill of the symbol table for a database built before symbols
+     * existed (or before the user enabled them). Only paths already stored in
+     * docs_meta are read, so it never walks the disk again.
+     */
+    private backfillSymbols;
+    /**
+     * Indexed document format for one file (pdf, docx, ...); undefined for plain
+     * text, unknown paths and databases built before extraction existed.
+     */
+    docFormat(path: string): string | undefined;
+    /**
+     * Every symbol stored for one path, in line order.
+     * @param path - absolute file path as stored by the file index.
+     * @returns symbols for the file; empty when it was not symbol-indexed.
+     */
+    outline(path: string): CodeSymbol[];
+    /**
+     * Find symbols by name. Exact matches rank before prefix matches, then
+     * substring matches.
+     * @param name - symbol name or fragment.
+     * @param limit - maximum rows (default 50, at most 200).
+     * @returns path/line/kind/name rows across indexed files.
+     */
+    findSymbols(name: string, limit?: number): SymbolMatch[];
+    /**
+     * Compact repository map for agent context: files ranked by symbol count,
+     * cut to a token budget that is estimated as characters / 4. A file is
+     * included whole; a file that does not fit is skipped so smaller lower-ranked
+     * files can still make it.
+     * @param roots - directory prefixes to include; empty means every indexed file.
+     * @param tokenBudget - approximate token budget; non-positive returns nothing.
+     * @returns included files with their symbols, most structural first.
+     */
+    repoMap(roots: readonly string[], tokenBudget: number): RepoMapFile[];
+    /**
+     * Stored document formats for the given file paths (only extracted
+     * documents have one). Unlike hit enrichment this is safe to call before a
+     * tool schema declares the field.
+     * @param paths - candidate file paths.
+     * @returns path to format map; plain text and unknown paths are absent.
+     */
+    formatsFor(paths: readonly string[]): Map<string, string>;
+    /** Attach formats only when the caller opted in (tool schemas must declare it). */
+    private enrichHitFormats;
     /** The session header's cwd for one indexed session, when known. */
     sessionCwd(sessionId: string): string | undefined;
     /**
@@ -325,6 +462,18 @@ export declare class ContentIndex {
      * @returns true when this call wrote a new marker, false when it was cached.
      */
     markRefMissing(refKey: string): boolean;
+    /**
+     * Merge one JSON patch into every occurrence's refs.meta (bounded, additive).
+     * Used by URL-ref freshness (ETag / Last-Modified / body sha256) so a later
+     * resolve can issue a conditional request. A patch field overwrites a stale
+     * field of the same name; the lazy missing marker is always preserved. A
+     * patch that cannot fit the bounded column is skipped for that occurrence
+     * instead of being truncated into invalid JSON.
+     * @param refKey - complete ref string whose occurrences are updated.
+     * @param patch - JSON-safe fields to store (nested objects are allowed).
+     * @returns true when at least one occurrence was updated.
+     */
+    setRefMeta(refKey: string, patch: Record<string, unknown>): boolean;
     /**
      * Stored session-event refs for one page of indexed message ids, used by
      * `locator_find` to attach the event seq/ref to session hits.

@@ -132,22 +132,35 @@ class FakeResponse {
   }
 }
 
-function fakeRuntime(roots: readonly string[] = []): LocatorRuntime {
+function fakeRuntime(roots: readonly string[] = [], hits: Array<Record<string, unknown>> = []): LocatorRuntime {
   return {
     roots: [...roots],
     stateDir: join(tmpdir(), 'locator-http-state'),
     status: { running: false },
-    config: { maxResults: 100 },
+    config: { maxResults: 100, outputBudgetChars: 8000 },
     start: () => {},
     engineStatus: async () => undefined,
-    search: async () => ({ total: 0, returned: 0, offset: 0, truncated: false, tookNs: 0, hits: [] }),
+    search: async (args: { offset: number; limit: number }) => ({
+      total: hits.length,
+      returned: hits.slice(args.offset, args.offset + args.limit).length,
+      offset: args.offset,
+      truncated: hits.length > args.offset + args.limit,
+      tookNs: 2_000_000,
+      hits: hits.slice(args.offset, args.offset + args.limit),
+    }),
   } as unknown as LocatorRuntime
 }
 
-function fakeRequest(body: unknown, headers: Record<string, string> = {}, method = 'POST'): IncomingMessage {
+/** One name hit for the HTTP route tests. */
+function httpHit(path: string): Record<string, unknown> {
+  return { path, name: path.split('/').pop() ?? path, size: 10, mtime: 1_700_000_000_000, ext: 'md', dir: false }
+}
+
+function fakeRequest(body: unknown, headers: Record<string, string> = {}, method = 'POST', url?: string): IncomingMessage {
   const text = typeof body === 'string' ? body : JSON.stringify(body)
   const request = Readable.from(text === '' ? [] : [Buffer.from(text)]) as unknown as IncomingMessage
   Reflect.set(request, 'method', method)
+  if (url !== undefined) Reflect.set(request, 'url', url)
   Reflect.set(request, 'headers', {
     host: '127.0.0.1:3081',
     'content-type': 'application/json',
@@ -503,3 +516,96 @@ describe('capability adapter route', () => {
     expect(bare.routes.some(route => route.path === '/dsh-locator/capabilities')).toBe(false)
   })
 })
+
+describe('incremental refresh status pass-through', () => {
+  it('exposes the engine fallback-refresh fields on the status route', async () => {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    const runtime = {
+      ...fakeRuntime(),
+      engineStatus: async () => ({
+        version: '0.19.0', platform: 'linux/amd64', roots: ['/tmp'], entries: 2, files: 2, dirs: 0,
+        nameBytes: 1, deleted: 0, watching: true, refreshFallback: true, incrementalRefresh: true,
+        watchUnwatchedRoots: ['/tmp'], refreshMode: 'incremental', refreshReason: 'watch-incomplete',
+        refreshScannedRoots: ['/tmp'], refreshSkippedRoots: ['/home'], refreshEntries: 5,
+        refreshTookMs: 9, refreshAt: 1_700_000_000_000, scanning: false, usn: false, uptimeSec: 1, stateDir: '/state',
+      }),
+    } as unknown as LocatorRuntime
+    registerHttp(harness.ctx, runtime)
+    const response = await callRoute(harness, '/dsh-locator/status', fakeRequest({}))
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      incrementalRefresh: true,
+      refreshMode: 'incremental',
+      refreshSkippedRoots: ['/home'],
+      refreshTookMs: 9,
+    })
+  })
+})
+
+describe('public GET search API', () => {
+  function harnessWithHits(): FakeHarness {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [httpHit('/root/a.md'), httpHit('/root/b.md')]))
+    return harness
+  }
+
+  it('serves the same results over GET query parameters', async () => {
+    const response = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?q=a&limit=1&json=1'))
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.ok).toBe(true)
+    expect(body.mode).toBe('names')
+    expect(body.totalCount).toBe(2)
+    expect(body.nextOffset).toBe(1)
+    expect((body.hits as unknown[]).length).toBe(1)
+    expect(String(response.headers.get('content-type'))).toContain('application/json')
+  })
+
+  it('accepts the query alias and boolean parameters', async () => {
+    const response = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?query=.md&desc=1&filesOnly=true&json=1'))
+    expect(response.statusCode).toBe(200)
+    expect(response.json().ok).toBe(true)
+  })
+
+  it('rejects malformed query parameters with 400', async () => {
+    for (const query of ['?limit=abc', '?offset=-1x', '?mode=weird', '?sort=bad', '?desc=maybe', '?count=many']) {
+      const response = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search' + query))
+      expect(response.statusCode, query).toBe(400)
+      expect(response.json().ok).toBe(false)
+    }
+  })
+
+  it('answers content mode with a clear error when the content index is disabled', async () => {
+    const response = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?q=needle&mode=content'))
+    expect(response.statusCode).toBe(200)
+    expect(response.json().ok).toBe(false)
+    expect(String(response.json().error)).toContain('content-index-unavailable')
+  })
+
+  it('keeps the POST body contract on the same path', async () => {
+    const response = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest({ query: 'a', limit: 1 }))
+    expect(response.statusCode).toBe(200)
+    expect(response.json().mode).toBe('names')
+    expect((response.json().hits as unknown[]).length).toBe(1)
+  })
+
+  it('applies the same trust fence and same-origin markers to GET', async () => {
+    const noConnection = fakeHarness()
+    registerHttp(noConnection.ctx, fakeRuntime())
+    const refused = await callRoute(noConnection, '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?q=a'))
+    expect(refused.statusCode).toBe(503)
+    const crossSite = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', { 'sec-fetch-site': 'cross-site' }, 'GET', '/dsh-locator/search?q=a'))
+    expect(crossSite.statusCode).toBe(403)
+    const foreign = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', { origin: 'http://evil.example' }, 'GET', '/dsh-locator/search?q=a'))
+    expect(foreign.statusCode).toBe(403)
+    const sameOrigin = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', { origin: 'http://127.0.0.1:3081', 'sec-fetch-site': 'same-origin' }, 'GET', '/dsh-locator/search?q=a'))
+    expect(sameOrigin.statusCode).toBe(200)
+  })
+
+  it('rejects other methods with a GET/POST Allow header', async () => {
+    const response = await callRoute(harnessWithHits(), '/dsh-locator/search', fakeRequest('', {}, 'DELETE', '/dsh-locator/search'))
+    expect(response.statusCode).toBe(405)
+    expect(response.headers.get('allow')).toBe('GET, POST')
+  })
+})
+

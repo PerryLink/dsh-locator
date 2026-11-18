@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.19.0 — 2026-11-18
+
+* **Chinese file names**: the name index normalises full/half-width, case and CJK compatibility characters and matches pinyin — full syllables (`guojia`), initials (`gjjy`/`gjy`) and mixed queries (`guo家`) find Chinese filenames; the snapshot format is unchanged and old snapshots build the derived pinyin keys on load.
+* **Incremental periodic rebuild**: the fallback rebuild now rescans only roots the watcher cannot cover (9p/NFS/SMB...) and reuses healthy watched roots; failures or root changes fall back to a full scan. New engine flag `--no-incremental-refresh` restores 0.18 behaviour; `locator_status` reports `incrementalRefresh`/`watchUnwatchedRoots`/`refreshMode`/`refreshReason`/`refreshScannedRoots`/`refreshSkippedRoots`/`refreshEntries`/`refreshTookMs`/`refreshAt`.
+* **Document bodies**: content search extracts PDF/Word/Excel/PowerPoint/EPUB text lazily (`contentExtractDocuments`, `contentExtractMaxBytes`); damaged or oversized files produce a warning instead of failing the build; hits expose `format`.
+* **Code symbols and repo map**: additive `symbols` table plus `docs_meta.format` (no user_version bump), populated during content indexing (`contentIndexSymbols`, `contentSymbolMaxBytes`); new tools `locator_outline`, `locator_symbol`, `locator_repo_map` (token budget, ranked by symbol count). 14 languages + Markdown headings, heuristic parser (no AST).
+* **Result budget and modes**: `locator_search` and `locator_find` accept `mode` (names/content/count), `headLimit` and `contextLines`; return `totalCount`, `nextOffset`, `truncated`, `budget` (default 8000 chars), plus `format`/`refStatus`/context on hits. Host output schemas updated.
+* **Evidence layer**: `locator_resolve` returns additive `status` (fresh/stale/missing/tombstoned), `checkedAt` and `anchor`; `locator_cite` gains `detail: exact|compact` (verbatim quote + offsets + fallback link) and `maxBytes`; file refs carry `line/cs/ce`; `locator_find` hits expose `refStatus`.
+* **URL ref freshness** (opt-in `urlFreshness`, default false): conditional GET with ETag/Last-Modified and a bounded body hash, persisted in refs metadata; 304 → fresh, 404/410 → missing, unreachable → stale.
+* **Ignore semantics**: `notIndexed` / `notSearchable` / `notReadable` (globs) separate what enters the content index, what the name index may return, and what agents may read; `locator_status` shows the effective rules.
+* **Panel**: official mention interop (bare `@path` / `@"path"`, session `@[title](dsh-session:...)`), Quick Switch from pasted refs/mentions, evidence details (`Ctrl+I` / row click) with freshness/permissions/hash/session ids, copy ref / Markdown citation, open/locate/jump; `/combined` hits now carry evidence fields; 45 new strings in all 9 languages.
+* **Public API and MCP**: `GET /dsh-locator/search?q=...` on the same trust fence; `locator-cli` (search/find/status/resolve/cite with JSON output) and `locator-mcp` (read-only MCP stdio server) are shipped and exposed as npm bins; `locator_explore` runs multi-query exploration with a token budget.
+* **Optional hooks**: `rerankCommand` (post-rank find results) and `ocrCommand` (text from scanned PDFs) as external commands, both off by default.
+* `332 tests`; six engine binaries rebuilt at 0.19.0 (darwin release binaries are rebuilt on macOS by CI).
 ## 0.18.0 — 2026-11-17
 
 * **Remote-filesystem roots are no longer walked for inotify**: NFS, SMB/CIFS, Ceph, AFS and WSL 9p/DrvFs roots cannot deliver usable inotify events. The Linux watcher now skips their per-directory walk entirely instead of installing one watch per directory and only then reporting "degraded", so a 9p root no longer costs seconds-to-minutes of startup/rebuild time or tens of thousands of kernel watch slots. Those roots keep the periodic rebuild fallback and still report `watchDegraded` with the same reason; local roots keep native watching.

@@ -91,7 +91,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       for (const dispose of disposers.reverse()) dispose()
     })
 
-    expect(tools.map(tool => tool.name).sort()).toEqual(['capability_preflight', 'capability_search', 'locator_cite', 'locator_export', 'locator_rebuild', 'locator_resolve', 'locator_search', 'locator_status'])
+    expect(tools.map(tool => tool.name).sort()).toEqual(['capability_preflight', 'capability_search', 'locator_cite', 'locator_explore', 'locator_export', 'locator_rebuild', 'locator_resolve', 'locator_search', 'locator_status'])
     const statusTool = tools.find(tool => tool.name === 'locator_status')
     await waitForIndex(statusTool)
     const search = tools.find(tool => tool.name === 'locator_search')
@@ -155,6 +155,9 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
     try {
       apply(ctx, config)
       stopEngines.push(() => { for (const dispose of disposers.reverse()) dispose() })
+      // The content half also mounts locator_find, locator_reindex and the
+      // symbol data layer (outline/symbol/repo_map).
+      expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['locator_find', 'locator_reindex', 'locator_outline', 'locator_symbol', 'locator_repo_map']))
       const statusTool = tools.find(tool => tool.name === 'locator_status') as RegisteredTool
       await waitForIndex(statusTool)
       // Nothing content-related must exist before the first content use.

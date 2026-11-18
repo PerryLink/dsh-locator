@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Config } from '../src/config.ts'
-import { LocatorRuntime } from '../src/runtime.ts'
+import { engineServeArgs, LocatorRuntime } from '../src/runtime.ts'
 
 const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, process.platform === 'win32' ? 'indexd.exe' : 'indexd')
 
@@ -55,6 +55,19 @@ async function waitForIndex(rt: LocatorRuntime): Promise<void> {
 }
 afterAll(() => {
   for (const cleanup of cleanups.reverse()) cleanup()
+})
+
+describe('engine serve arguments', () => {
+  it('passes the incremental-refresh switch only when it is explicitly off', () => {
+    const base = config()
+    const incremental = engineServeArgs(base, ['/root'], '/state')
+    expect(incremental).toEqual(['serve', '--state', '/state', '--root', '/root', '--exclude', 'node_modules', '--exclude', '.git', '--refresh', '1800000ms'])
+    expect(engineServeArgs({ ...base, watch: false }, ['/root'], '/state')).toContain('--no-watch')
+    const legacy = engineServeArgs({ ...base, refreshIncremental: false }, ['/root'], '/state')
+    expect(legacy).toContain('--no-incremental-refresh')
+    const explicit = engineServeArgs({ ...base, refreshIncremental: true }, ['/root'], '/state')
+    expect(explicit).not.toContain('--no-incremental-refresh')
+  })
 })
 
 describe.skipIf(!existsSync(binary))('locator engine integration', () => {

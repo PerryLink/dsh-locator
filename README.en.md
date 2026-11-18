@@ -404,6 +404,24 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.19.0 upgrade notes
+
+- **Chinese file names**: the name index normalises full/half-width, case and CJK compatibility characters and matches pinyin (full syllables, initials, mixed queries); the snapshot format is unchanged and old snapshots build the derived pinyin keys on load.
+- **Incremental periodic rebuild**: only roots the watcher cannot cover (9p/NFS/SMB) are rescanned; healthy watched roots are reused, with automatic fallback to a full scan. New engine flag `--no-incremental-refresh` restores 0.18 behaviour; `locator_status` reports nine new refresh fields.
+- **Document bodies**: optional PDF/Word/Excel/PowerPoint/EPUB text extraction (`contentExtractDocuments`/`contentExtractMaxBytes`, lazy loaded); damaged or oversized files only warn and never fail a build; hits expose `format`.
+- **Code symbols and repo map**: additive `symbols` table + `docs_meta.format` (no user_version bump), filled during indexing (`contentIndexSymbols`/`contentSymbolMaxBytes`); new `locator_outline`, `locator_symbol`, `locator_repo_map` (token-budgeted). 14 languages + Markdown headings, heuristic parser.
+- **Result budget and modes**: `locator_search`/`locator_find` accept `mode` (names/content/count), `headLimit` and `contextLines`, and return `totalCount`/`nextOffset`/`truncated`/`budget` (8000 chars by default) plus `format`/`refStatus`/context.
+- **Evidence layer**: `locator_resolve` gains `status` (fresh/stale/missing/tombstoned), `checkedAt`, `anchor`; `locator_cite` gains `detail: exact|compact` (verbatim quote + offsets + fallback link) and `maxBytes`; file refs carry `line/cs/ce`; find hits carry `refStatus`.
+- **URL ref freshness** (opt-in `urlFreshness`, default off): conditional requests with ETag/Last-Modified and a bounded body hash persisted in refs metadata; 304 → fresh, 404/410 → missing, unreachable → stale.
+- **Ignore semantics**: `notIndexed` / `notSearchable` / `notReadable` globs separate content-index entry, name visibility and agent readability; status shows the effective rules.
+- **Panel**: official mention interop (`@path` / `@"path"` / `@[title](dsh-session:...)`), Quick Switch from pasted refs/mentions, evidence details (row click / `Ctrl+I`) with freshness/permissions/hash/session ids, copy ref or Markdown citation, open/locate/jump; `/combined` hits carry evidence fields; 45 new strings in 9 languages.
+- **Public API and MCP**: `GET /dsh-locator/search?q=...` on the same trust fence; `locator-cli` and `locator-mcp` (read-only MCP stdio server) ship as npm bins; `locator_explore` runs multi-query exploration within a token budget.
+  ```sh
+  npx dsh-locator search "handoff ext:md" --json
+  npx dsh-locator-mcp    # stdio MCP server for external agents (Claude Code / Cursor etc.)
+  ```
+- **Optional hooks**: `rerankCommand` and `ocrCommand` external commands, both off by default.
+- **332 tests**; six engine binaries rebuilt at 0.19.0 (darwin release binaries are rebuilt on macOS by CI).
 ## 0.18.0 upgrade notes
 
 - **Remote-filesystem roots are no longer walked for inotify**: NFS, SMB/CIFS, Ceph, AFS and WSL 9p/DrvFs roots cannot deliver usable inotify events. The Linux watcher now skips their per-directory walk entirely (previously it installed one watch per directory and only then reported "degraded"), so a 9p root no longer costs seconds-to-minutes of startup/rebuild time or tens of thousands of kernel watch slots. Those roots keep the periodic rebuild fallback and still report `watchDegraded` with the same reason; local roots keep native watching.

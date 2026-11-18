@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Worker } from 'node:worker_threads'
+import { strToU8, zipSync } from 'fflate'
+import { estimateSymbolTokens } from '../src/symbols.ts'
 import { zstdCompressSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
 import { ContentIndex } from '../src/content.ts'
@@ -1517,4 +1519,333 @@ describe('content database self-healing', () => {
   })
 
 
+})
+
+/** Minimal but valid docx package whose body is one paragraph per line. */
+function minimalDocx(text: string): Uint8Array {
+  const wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+  const document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<w:document xmlns:w="' + wordNs + '"><w:body>'
+    + text.split('\n').map(paragraph => '<w:p><w:r><w:t>' + paragraph + '</w:t></w:r></w:p>').join('')
+    + '</w:body></w:document>'
+  const contentTypes = '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+  const relationships = '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+  return zipSync({
+    '[Content_Types].xml': strToU8(contentTypes),
+    '_rels/.rels': strToU8(relationships),
+    'word/document.xml': strToU8(document),
+  })
+}
+
+describe('document extraction (P1-1)', () => {
+  const baseOptions = { sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 }
+
+  it('indexes an extracted DOCX body and exposes its format on opt-in hits', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-doc-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-doc-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const docPath = join(root, 'brief.docx')
+    const textPath = join(root, 'notes.md')
+    writeFileSync(docPath, minimalDocx('quarterly locator docx marker'))
+    writeFileSync(textPath, 'plain text locator marker')
+    const entries = [docPath, textPath].map(path => ({ path, name: basename(path), size: statSync(path).size, mtime: Date.now(), ext: 'docx', dir: false }))
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state, attachHitFormats: true })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().files).toBe(2)
+    expect(content.docFormat(docPath)).toBe('docx')
+    expect(content.docFormat(textPath)).toBeUndefined()
+    expect(content.formatsFor([docPath, textPath]).get(docPath)).toBe('docx')
+    expect(content.formatsFor([textPath]).size).toBe(0)
+    const hits = await content.search('locator docx marker', 5)
+    const docHit = hits.find(hit => hit.path === docPath)
+    expect(docHit).toBeDefined()
+    expect(docHit?.format).toBe('docx')
+    const textHits = await content.search('plain text locator marker', 5)
+    const textHit = textHits.find(hit => hit.path === textPath)
+    expect(textHit).toBeDefined()
+    expect(textHit !== undefined && 'format' in textHit).toBe(false)
+    const raw = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const row = raw.prepare('SELECT format FROM docs_meta WHERE path = ?').get(docPath) as { format?: string } | undefined
+    raw.close()
+    expect(row?.format).toBe('docx')
+    // Hit enrichment is opt-in: without the flag a search carries no format, so
+    // a tool schema that does not declare it yet cannot reject the output.
+    content.close()
+    const plain = new ContentIndex(runtime, { ...baseOptions, stateDir: state })
+    cleanups.push(() => plain.close())
+    plain.boot()
+    await settle(plain)
+    const plainHit = (await plain.search('locator docx marker', 5)).find(hit => hit.path === docPath)
+    expect(plainHit).toBeDefined()
+    expect(plainHit !== undefined && 'format' in plainHit).toBe(false)
+    expect(plain.docFormat(docPath)).toBe('docx')
+  })
+
+  it('leaves documents out when extraction is disabled', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-doc-off-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-doc-off-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const docPath = join(root, 'brief.docx')
+    writeFileSync(docPath, minimalDocx('disabled locator docx marker'))
+    const entries = [{ path: docPath, name: 'brief.docx', size: statSync(docPath).size, mtime: Date.now(), ext: 'docx', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state, extractDocuments: false })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(0)
+    expect((await content.search('disabled locator docx marker', 5)).length).toBe(0)
+  })
+
+  it('skips oversized documents with a warning instead of reading them', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-doc-large-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-doc-large-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const docPath = join(root, 'brief.docx')
+    writeFileSync(docPath, minimalDocx('oversized locator docx marker'))
+    const entries = [{ path: docPath, name: 'brief.docx', size: statSync(docPath).size, mtime: Date.now(), ext: 'docx', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state, extractMaxBytes: 16 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(0)
+    expect(content.status().warnings).toContain('content-document-too-large')
+  })
+
+  it('skips paths rejected by the isIndexable scope hook before reading them', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-doc-scope-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-doc-scope-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const skipped = join(root, 'secret.go')
+    const kept = join(root, 'notes.md')
+    writeFileSync(skipped, 'package demo\n\nfunc HiddenMarker() {}\n')
+    writeFileSync(kept, 'visible locator marker')
+    const entries = [skipped, kept].map(path => ({ path, name: basename(path), size: statSync(path).size, mtime: Date.now(), ext: path.split('.').pop() ?? '', dir: false }))
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state, isIndexable: path => !path.endsWith('.go') })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(1)
+    expect((await content.search('HiddenMarker', 5)).length).toBe(0)
+    expect((await content.search('visible locator marker', 5)).length).toBeGreaterThan(0)
+    expect(content.outline(skipped)).toEqual([])
+  })
+
+  it('falls back to the OCR hook for a PDF without a text layer', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-doc-ocr-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-doc-ocr-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const pdfPath = join(root, 'scan.pdf')
+    writeFileSync(pdfPath, 'this is not really a pdf file')
+    const calls: Array<[string, string]> = []
+    const entries = [{ path: pdfPath, name: 'scan.pdf', size: statSync(pdfPath).size, mtime: Date.now(), ext: 'pdf', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, {
+      ...baseOptions,
+      stateDir: state,
+      ocr: async (path, format) => { calls.push([path, format]); return 'ocr scanned locator marker' },
+    })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(1)
+    expect(content.docFormat(pdfPath)).toBe('pdf')
+    expect(calls).toEqual([[pdfPath, 'pdf']])
+    expect((await content.search('ocr scanned locator marker', 5)).some(hit => hit.path === pdfPath)).toBe(true)
+  })
+
+  it('keeps the additive schema at user_version 3', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-doc-schema-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-doc-schema-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const docPath = join(root, 'brief.docx')
+    writeFileSync(docPath, minimalDocx('schema locator docx marker'))
+    const entries = [{ path: docPath, name: 'brief.docx', size: statSync(docPath).size, mtime: Date.now(), ext: 'docx', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const raw = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const version = raw.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
+    const formatColumns = raw.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('docs_meta') WHERE name = 'format'").get() as { n?: number } | undefined
+    const symbols = raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'symbols'").get() as { n?: number } | undefined
+    raw.close()
+    expect(Number(version?.user_version)).toBe(3)
+    expect(Number(formatColumns?.n)).toBe(1)
+    expect(Number(symbols?.n)).toBe(1)
+  })
+})
+
+describe('code symbols and repo map (P1-2)', () => {
+  const baseOptions = { sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 }
+  const fixtures: Array<[string, string]> = [
+    ['main.go', ['package demo', '', 'type Server struct {', '\tName string', '}', '', 'func (s *Server) Start(port int) error {', '\treturn nil', '}', '', 'func NewServer() *Server {', '\treturn &Server{}', '}', ''].join('\n')],
+    ['app.ts', ['export interface Point { x: number }', '', 'export class Shape {', '  move(dx: number): void {}', '}', '', 'export function area(p: Point): number { return 0 }', ''].join('\n')],
+    ['tool.py', ['class Engine:', '    def start(self):', '        return True', '', 'def helper(value):', '    return value', '', 'MAX_RETRIES = 3', ''].join('\n')],
+    ['README.md', ['# Title', '', '## Section', '', '### Deep', ''].join('\n')],
+  ]
+
+  async function buildSymbolIndex(): Promise<{ root: string; state: string; content: ContentIndex; paths: Record<string, string> }> {
+    const root = mkdtempSync(join(tmpdir(), 'locator-symbols-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-symbols-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const paths: Record<string, string> = {}
+    const entries = fixtures.map(([name, body]) => {
+      const path = join(root, name)
+      writeFileSync(path, body)
+      paths[name] = path
+      return { path, name, size: statSync(path).size, mtime: Date.now(), ext: name.split('.').pop() ?? '', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    return { root, state, content, paths }
+  }
+
+  it('stores symbols per code file and serves outline() in line order', async () => {
+    const { content, paths } = await buildSymbolIndex()
+    const go = content.outline(paths['main.go'] ?? '')
+    expect(go.map(symbol => symbol.name)).toEqual(['Server', 'Start', 'NewServer'])
+    expect(go[0]).toMatchObject({ kind: 'struct', line: 3, language: 'go' })
+    expect(go[1]).toMatchObject({ kind: 'method', scope: 'Server', line: 7 })
+    const python = content.outline(paths['tool.py'] ?? '')
+    expect(python.map(symbol => symbol.name)).toEqual(['Engine', 'start', 'helper', 'MAX_RETRIES'])
+    expect(python[1]).toMatchObject({ kind: 'method', scope: 'Engine' })
+    expect(python[3]).toMatchObject({ kind: 'constant' })
+    const markdown = content.outline(paths['README.md'] ?? '')
+    expect(markdown.map(symbol => [symbol.name, symbol.kind])).toEqual([['Title', 'heading'], ['Section', 'heading'], ['Deep', 'heading']])
+    expect(content.outline(paths['main.go'] ?? '')?.length).toBe(3)
+    expect(content.outline('/tmp/not-indexed.go')).toEqual([])
+  })
+
+  it('finds symbols by name and honours the limit', async () => {
+    const { content, paths } = await buildSymbolIndex()
+    const server = content.findSymbols('Server')
+    expect(server.length).toBeGreaterThan(0)
+    expect(server[0]).toMatchObject({ path: paths['main.go'], kind: 'struct', line: 3 })
+    const shape = content.findSymbols('Shape')
+    expect(shape[0]).toMatchObject({ path: paths['app.ts'], kind: 'class' })
+    expect(content.findSymbols('LocatorNotPresent')).toEqual([])
+    // LIKE metacharacters are escaped: a bare % must not match every symbol.
+    expect(content.findSymbols('%')).toEqual([])
+    expect(content.findSymbols('   ')).toEqual([])
+    expect(content.findSymbols('e', 1)).toHaveLength(1)
+    expect(content.findSymbols('e', 500).length).toBeLessThanOrEqual(200)
+  })
+
+  it('builds a token-budgeted repo map ranked by symbol count', async () => {
+    const { content, paths, root } = await buildSymbolIndex()
+    const all = content.repoMap([root], 100_000)
+    expect(all).toHaveLength(4)
+    expect(all[0]?.path).toBe(paths['app.ts'])
+    expect(all[0]?.symbols.length).toBe(4)
+    expect(content.repoMap([root], 0)).toEqual([])
+    const costs = all.map(entry => estimateSymbolTokens(entry.path, entry.symbols))
+    const cheapest = Math.min(...costs)
+    const tight = content.repoMap([root], cheapest)
+    expect(tight.length).toBeGreaterThanOrEqual(1)
+    expect(tight.length).toBeLessThan(4)
+    const used = tight.reduce((sum, entry) => sum + estimateSymbolTokens(entry.path, entry.symbols), 0)
+    expect(used).toBeLessThanOrEqual(cheapest)
+    expect(content.repoMap([join(root, 'elsewhere')], 100_000)).toEqual([])
+  })
+
+  it('backfills symbols for a database built before the additive table existed', async () => {
+    const { content, state, paths } = await buildSymbolIndex()
+    const indexed = content.status().files
+    content.close()
+    const raw = new DatabaseSync(join(state, 'content.db'))
+    raw.exec('DROP TABLE symbols')
+    raw.exec("UPDATE content_meta SET value = 0 WHERE key = 'symbols'")
+    raw.exec('ALTER TABLE docs_meta DROP COLUMN format')
+    raw.close()
+    const entries = fixtures.map(([name]) => {
+      const path = paths[name] ?? ''
+      return { path, name, size: statSync(path).size, mtime: statSync(path).mtimeMs, ext: name.split('.').pop() ?? '', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const reopened = new ContentIndex(runtime, { ...baseOptions, stateDir: state })
+    cleanups.push(() => reopened.close())
+    reopened.boot()
+    await settle(reopened)
+    expect(reopened.status().error).toBe('')
+    expect(reopened.status().files).toBe(indexed)
+    expect(reopened.outline(paths['main.go'] ?? '').map(symbol => symbol.name)).toEqual(['Server', 'Start', 'NewServer'])
+    expect(reopened.findSymbols('Shape').length).toBeGreaterThan(0)
+    const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const version = check.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
+    const formatColumns = check.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('docs_meta') WHERE name = 'format'").get() as { n?: number } | undefined
+    check.close()
+    expect(Number(version?.user_version)).toBe(3)
+    expect(Number(formatColumns?.n)).toBe(1)
+  })
+
+  it('does not index symbols when indexSymbols is disabled', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-symbols-off-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-symbols-off-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'main.go')
+    writeFileSync(path, 'package demo\n\nfunc main() {}\n')
+    const entries = [{ path, name: 'main.go', size: statSync(path).size, mtime: Date.now(), ext: 'go', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { ...baseOptions, stateDir: state, indexSymbols: false })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(1)
+    expect(content.outline(path)).toEqual([])
+    expect(content.findSymbols('main')).toEqual([])
+    expect(content.repoMap([root], 1000)).toEqual([])
+  })
+})
+
+describe('setRefMeta (P1-5 helper)', () => {
+  it('merges a JSON patch into refs.meta, preserves the missing marker and bounds size', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-ref-meta-sessions-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-ref-meta-state-'))
+    cleanups.push(() => rmSync(sessions, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const dir = join(sessions, '--work--', 'session-ref-meta')
+    mkdirSync(dir, { recursive: true })
+    const lines = [
+      JSON.stringify({ type: 'session', version: 4, id: 'session-ref-meta', createdAt: 1, cwd: '/work' }),
+      JSON.stringify({ type: 'assistant/message', data: { turn: 0, step: 0, message: { id: 'm-1', content: [{ type: 'text', text: 'refreshable evidence' }] } } }),
+    ].join('\n')
+    writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(lines)))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const { sessionEventRef, urlRef } = await import('../src/refs.ts')
+    const key = sessionEventRef({ sessionId: 'session-ref-meta', seq: 0 })
+    expect(content.refsFor(key)).toHaveLength(1)
+    expect(content.setRefMeta('', { etag: 'x' })).toBe(false)
+    expect(content.setRefMeta(urlRef('https://example.com/missing'), { etag: 'x' })).toBe(false)
+    expect(content.setRefMeta(key, {})).toBe(false)
+    expect(content.setRefMeta(key, { etag: 'W/"abc"', lastModified: 'Tue, 01 Jan 2030 00:00:00 GMT' })).toBe(true)
+    const stored = content.refsFor(key)[0]?.meta
+    expect(stored).toBeTruthy()
+    expect(JSON.parse(stored ?? '{}')).toMatchObject({ etag: 'W/"abc"', lastModified: 'Tue, 01 Jan 2030 00:00:00 GMT' })
+    // The lazy missing marker must survive later freshness patches.
+    expect(content.markRefMissing(key)).toBe(true)
+    expect(content.setRefMeta(key, { etag: 'W/"def"' })).toBe(true)
+    const merged = JSON.parse(content.refsFor(key)[0]?.meta ?? '{}') as Record<string, unknown>
+    expect(merged.missing).toBe(true)
+    expect(merged.etag).toBe('W/"def"')
+    expect(merged.lastModified).toBe('Tue, 01 Jan 2030 00:00:00 GMT')
+    // A patch that cannot fit the bounded column must not corrupt the stored JSON.
+    const before = content.refsFor(key)[0]?.meta
+    expect(content.setRefMeta(key, { blob: 'x'.repeat(2000) })).toBe(false)
+    expect(content.refsFor(key)[0]?.meta).toBe(before)
+    expect(JSON.parse(content.refsFor(key)[0]?.meta ?? '{}')).toBeTypeOf('object')
+  })
 })

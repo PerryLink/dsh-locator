@@ -404,6 +404,20 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
 
+## 0.19.0 अपग्रेड नोट्स
+
+- **चीनी फ़ाइल नाम**: full/half width, केस और CJK compatibility normalization के साथ pinyin मिलान (पूर्ण syllables, initials, मिश्रित query); snapshot फ़ॉर्मेट नहीं बदलता।
+- **आवधिक rebuild अब incremental**: सिर्फ वे roots दोबारा स्कैन होते हैं जिन्हें watcher कवर नहीं करता (9p/NFS/SMB); स्वस्थ watched roots का पुन: उपयोग, विफलता पर पूरा स्कैन। नई flag `--no-incremental-refresh`; `locator_status` में नौ नए refresh फ़ील्ड।
+- **दस्तावेज़正文**: PDF/Word/Excel/PowerPoint/EPUB टेक्स्ट निष्कर्षण वैकल्पिक (`contentExtractDocuments`/`contentExtractMaxBytes`, lazy); खराब/बड़ी फ़ाइलें केवल warning; hits में `format`।
+- **कोड symbols और repo map**: additive `symbols` टेबल + `docs_meta.format` (user_version नहीं बदलता); नए tools `locator_outline`, `locator_symbol`, `locator_repo_map` (token बजट)।
+- **परिणाम बजट और modes**: `locator_search`/`locator_find` में `mode` (names/content/count), `headLimit`, `contextLines`; आउटपुट `totalCount`/`nextOffset`/`truncated`/`budget` (डिफ़ॉल्ट 8000 अक्षर) + `format`/`refStatus`/context।
+- **Evidence layer**: `locator_resolve` में `status`/`checkedAt`/`anchor`; `locator_cite` में `detail: exact|compact` (शब्दश: quote + offsets + fallback link) और `maxBytes`; file refs में `line/cs/ce`।
+- **URL ref freshness** (वैकल्पिक `urlFreshness`, डिफ़ॉल्ट बंद): ETag/Last-Modified + सीमित body hash के साथ conditional requests, refs metadata में सहेजा जाता है।
+- **Ignore semantics**: `notIndexed`/`notSearchable`/`notReadable` (globs) — content index, name visibility, agent readability अलग; status प्रभावी नियम दिखाता है।
+- **Panel**: official mention interop (`@path`/`@"path"`/`@[title](dsh-session:...)`), refs/menitons पेस्ट पर Quick Switch, evidence details (row click / `Ctrl+I`) में freshness/permissions/hash/session ids, ref या Markdown citation कॉपी, open/locate/jump; `/combined` hits में evidence फ़ील्ड; 9 भाषाओं में 45 नई strings।
+- **Public API और MCP**: `GET /dsh-locator/search?q=...` उसी trust fence पर; `locator-cli` और `locator-mcp` (read-only MCP stdio server) npm bins के रूप में; `locator_explore` token बजट में multi-query exploration।
+- **Optional hooks**: `rerankCommand` और `ocrCommand`, दोनों डिफ़ॉल्ट बंद।
+- **332 tests**; छह engine binaries 0.19.0 पर rebuild (darwin macOS CI में)।
 ## 0.18.0 अपग्रेड नोट्स
 
 - **रिमोट फ़ाइलसिस्टम roots के लिए inotify walk बंद**: NFS, SMB/CIFS, Ceph, AFS और WSL 9p/DrvFs roots उपयोगी inotify events नहीं देते। Linux watcher अब इनका per-directory walk पूरी तरह छोड़ देता है (पहले हर directory पर watch लगाकर बाद में "degraded" बताता था), इसलिए 9p root अब startup/rebuild में सेकंडों-मिनटों या हज़ारों kernel watch slots नहीं लेता। ये roots periodic rebuild fallback रखते हैं और वही कारण के साथ `watchDegraded` रिपोर्ट करते हैं; local roots पर native watching बनी रहती है।

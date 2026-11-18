@@ -404,6 +404,20 @@ DeepSeek Harness
 
 O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
 
+## Notas de atualização 0.19.0
+
+- **Nomes de arquivo em chinês**: normalização de largura total/meia, maiúsculas e compatibilidade CJK, com busca por pinyin (sílabas completas, iniciais, consultas mistas); o formato do snapshot não muda.
+- **Reconstrução periódica incremental**: apenas os roots que o watcher não cobre (9p/NFS/SMB) são reescaneados; roots saudáveis são reutilizados, com fallback para varredura completa. Nova flag `--no-incremental-refresh`; `locator_status` ganha nove campos de refresh.
+- **Corpo de documentos**: extração opcional de texto PDF/Word/Excel/PowerPoint/EPUB (`contentExtractDocuments`/`contentExtractMaxBytes`, lazy); arquivos corrompidos ou grandes apenas avisam; hits expõem `format`.
+- **Símbolos de código e repo map**: tabela aditiva `symbols` + `docs_meta.format` (sem mudar user_version); novas ferramentas `locator_outline`, `locator_symbol`, `locator_repo_map` com orçamento de tokens.
+- **Orçamento e modos de resultado**: `locator_search`/`locator_find` aceitam `mode` (names/content/count), `headLimit`, `contextLines` e retornam `totalCount`/`nextOffset`/`truncated`/`budget` (8000 caracteres por padrão), além de `format`/`refStatus`/contexto.
+- **Camada de evidência**: `locator_resolve` adiciona `status`/`checkedAt`/`anchor`; `locator_cite` adiciona `detail: exact|compact` (citação literal + offsets + link alternativo) e `maxBytes`; refs de arquivo levam `line/cs/ce`.
+- **Atualidade de refs URL** (opcional `urlFreshness`, desligado por padrão): requisições condicionais com ETag/Last-Modified e hash limitado persistido na metadata de refs.
+- **Semântica de ignorados**: `notIndexed`/`notSearchable`/`notReadable` (globs) separam índice de conteúdo, visibilidade de nomes e leitura por agentes; status mostra as regras efetivas.
+- **Painel**: interoperabilidade com menções oficiais, Quick Switch ao colar refs/menções, detalhes de evidência (clique / `Ctrl+I`) com atualidade/permissões/hash/ids, copiar ref ou citação Markdown, abrir/localizar/pular; hits de `/combined` levam campos de evidência; 45 strings novas em 9 idiomas.
+- **API pública e MCP**: `GET /dsh-locator/search?q=...` no mesmo trust fence; `locator-cli` e `locator-mcp` (servidor MCP stdio somente leitura) publicados como bins npm; `locator_explore` executa exploração multi-consulta com orçamento de tokens.
+- **Hooks opcionais**: `rerankCommand` e `ocrCommand`, desligados por padrão.
+- **332 tests**; os seis binários do motor foram reconstruídos em 0.19.0 (darwin pelo CI do macOS).
 ## Notas de atualização 0.18.0
 
 - **Roots em sistemas de arquivos remotos não são mais percorridos para inotify**: NFS, SMB/CIFS, Ceph, AFS e roots 9p/DrvFs do WSL não entregam eventos inotify utilizáveis. O watcher do Linux agora ignora totalmente a varredura por diretórios (antes instalava um watch por diretório e só então marcava "degraded"), então um root 9p não custa mais segundos ou minutos de inicialização/reconstrução nem dezenas de milhares de slots de watch do kernel. Esses roots mantêm a reconstrução periódica de fallback e continuam reportando `watchDegraded` com o mesmo motivo; roots locais mantêm o monitoramento nativo.

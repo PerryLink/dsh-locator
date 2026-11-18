@@ -35,6 +35,29 @@ export interface RefFreshness {
   mtime?: number
 }
 
+/**
+ * Lifecycle status of one evidence ref, reported additively by
+ * `locator_resolve`/`locator_cite`. It is coarser than {@link RefFreshness}:
+ * `tombstoned` means a previous resolve persisted a "missing" marker in the
+ * content index, so the target is known gone instead of merely unobserved.
+ */
+export type RefStatus = 'fresh' | 'stale' | 'missing' | 'tombstoned' | 'unknown'
+
+/**
+ * Character anchor of one exact excerpt. `line` is 1-based; `charStart` and
+ * `charEnd` are 0-based character offsets (end exclusive).
+ */
+export interface RefAnchor {
+  line?: number
+  charStart?: number
+  charEnd?: number
+}
+
+/** Map a freshness state onto the lifecycle status (missing markers are caller-owned). */
+export function refStatusForFreshness(state: RefFreshness['state']): RefStatus {
+  return state === 'fresh' ? 'fresh' : state === 'stale' ? 'stale' : state === 'missing' ? 'missing' : 'unknown'
+}
+
 /** The caller's read permission as computed at resolve time (never persisted). */
 export interface RefPermissions {
   read: 'allowed' | 'denied'
@@ -89,6 +112,20 @@ export interface FileRefInput {
   mtime?: number
   size?: number
   sha256?: string | null
+  /** 1-based line of the cited match inside the file, when the hit knows it. */
+  line?: number
+  /** 0-based character start of the cited fragment on that line. */
+  charStart?: number
+  /** 0-based exclusive character end of the cited fragment on that line. */
+  charEnd?: number
+}
+
+/** One optional non-negative integer ref parameter (`line`, `cs`, `ce`). */
+function refNumberParam(params: URLSearchParams, key: string): number | undefined {
+  const raw = params.get(key)
+  if (raw === null || raw === '') return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
 }
 
 /**
@@ -103,6 +140,9 @@ export function fileRef(input: FileRefInput): string {
   if (typeof input.mtime === 'number') params.set('mtime', String(Math.trunc(input.mtime)))
   if (typeof input.size === 'number') params.set('size', String(Math.trunc(input.size)))
   if (typeof input.sha256 === 'string' && input.sha256 !== '') params.set('sha256', input.sha256)
+  if (typeof input.line === 'number' && Number.isInteger(input.line) && input.line > 0) params.set('line', String(input.line))
+  if (typeof input.charStart === 'number' && Number.isInteger(input.charStart) && input.charStart >= 0) params.set('cs', String(input.charStart))
+  if (typeof input.charEnd === 'number' && Number.isInteger(input.charEnd) && input.charEnd >= 0) params.set('ce', String(input.charEnd))
   return `ref://file?${params.toString()}`
 }
 
@@ -153,7 +193,20 @@ export function decodeSessionIdParam(value: string | null): string | undefined {
 /** One parsed ref. */
 export type ParsedRef =
   | { kind: 'session'; ref: string; sessionId: string }
-  | { kind: 'file'; ref: string; path: string; sha256?: string }
+  | {
+    kind: 'file'
+    ref: string
+    path: string
+    sha256?: string
+    /** Snapshot mtime (epoch ms) carried by the ref, when it was built from a hit. */
+    mtime?: number
+    /** Snapshot byte size carried by the ref. */
+    size?: number
+    /** 1-based cited line, when the hit that built the ref knew it. */
+    line?: number
+    charStart?: number
+    charEnd?: number
+  }
   | { kind: 'url'; ref: string; url: string; sha256?: string }
   | { kind: 'session-event'; ref: string; sessionId: string; seq: number }
   | { kind: 'spill'; ref: string; path: string; sessionId?: string; seq?: number }
@@ -178,7 +231,22 @@ export function parseRef(ref: string): ParsedRef | undefined {
     const path = url.searchParams.get('path')
     if (path === null || path === '') return undefined
     const sha256 = url.searchParams.get('sha256') ?? undefined
-    return { kind: 'file', ref, path, ...(sha256 === undefined || sha256 === '' ? {} : { sha256 }) }
+    const mtime = refNumberParam(url.searchParams, 'mtime')
+    const size = refNumberParam(url.searchParams, 'size')
+    const line = refNumberParam(url.searchParams, 'line')
+    const charStart = refNumberParam(url.searchParams, 'cs')
+    const charEnd = refNumberParam(url.searchParams, 'ce')
+    return {
+      kind: 'file',
+      ref,
+      path,
+      ...(sha256 === undefined || sha256 === '' ? {} : { sha256 }),
+      ...(mtime === undefined ? {} : { mtime: Math.trunc(mtime) }),
+      ...(size === undefined ? {} : { size: Math.trunc(size) }),
+      ...(line === undefined || !Number.isInteger(line) || line <= 0 ? {} : { line: Math.trunc(line) }),
+      ...(charStart === undefined || !Number.isInteger(charStart) || charStart < 0 ? {} : { charStart: Math.trunc(charStart) }),
+      ...(charEnd === undefined || !Number.isInteger(charEnd) || charEnd < 0 ? {} : { charEnd: Math.trunc(charEnd) }),
+    }
   }
   if (url.host === 'url') {
     const target = url.searchParams.get('url') ?? url.searchParams.get('u')
@@ -267,3 +335,282 @@ export function fileRefTitle(path: string): string {
   const name = basename(path)
   return name === '' ? path : name
 }
+
+/** Meta key used inside the additive `refs.meta` JSON column for URL freshness. */
+export const URL_FRESHNESS_META_KEY = 'urlFreshness'
+
+/**
+ * One URL freshness observation: HTTP validators plus the hash of the fetched
+ * prefix, persisted in `refs.meta` (or the in-process fallback cache) so the
+ * next resolve can use a conditional request and report a status.
+ */
+export interface UrlFreshnessRecord {
+  /** Normalized URL that was checked (empty when read back from a bounded meta row). */
+  url: string
+  status: RefStatus
+  /** Epoch ms of this observation. */
+  checkedAt: number
+  /** Strong validator returned by the server. */
+  etag?: string
+  /** Weak validator returned by the server. */
+  lastModified?: string
+  /** sha256 of the fetched prefix (bounded), used when ETag/Last-Modified are absent. */
+  contentSha256?: string
+  /** Content-Length reported by the 2xx response, when present. */
+  contentLength?: number
+  /** HTTP status of the last check (absent after a network failure). */
+  statusCode?: number
+}
+
+/** Knobs for {@link checkUrlFreshness}; both are clamped. */
+export interface UrlFreshnessCheckOptions {
+  /** Whole-request deadline in milliseconds (default 5000, min 100, max 30000). */
+  timeoutMs?: number
+  /** Cap on bytes read for the body hash (default 65536, min 1024, max 1048576). */
+  maxBytes?: number
+}
+
+/** Result of one URL freshness check. */
+export interface UrlFreshnessCheck {
+  record: UrlFreshnessRecord
+  /** Non-fatal warnings (`url-unreachable`, `url-content-changed`, ...). */
+  warnings: string[]
+}
+
+/** Default per-request deadline for a URL freshness check. */
+export const URL_FRESHNESS_TIMEOUT_MS = 5000
+
+/** Default cap on the body prefix hashed for a URL freshness check. */
+export const URL_FRESHNESS_MAX_BYTES = 64 * 1024
+
+/** In-process fallback cache used when no content index writer is available. */
+const URL_FRESHNESS_CACHE_LIMIT = 200
+const urlFreshnessCache = new Map<string, UrlFreshnessRecord>()
+
+/**
+ * Remember one URL observation for the rest of this process. Bounded LRU-ish:
+ * the oldest inserted entry is evicted once the cache is full.
+ * @param refKey - complete `ref://url` key.
+ * @param record - latest observation.
+ */
+export function rememberUrlFreshness(refKey: string, record: UrlFreshnessRecord): void {
+  if (refKey === '') return
+  urlFreshnessCache.delete(refKey)
+  urlFreshnessCache.set(refKey, record)
+  while (urlFreshnessCache.size > URL_FRESHNESS_CACHE_LIMIT) {
+    const oldest = urlFreshnessCache.keys().next().value
+    if (oldest === undefined) break
+    urlFreshnessCache.delete(oldest)
+  }
+}
+
+/**
+ * Recall the last in-process URL observation.
+ * @param refKey - complete `ref://url` key.
+ * @returns the cached observation, or undefined.
+ */
+export function recallUrlFreshness(refKey: string): UrlFreshnessRecord | undefined {
+  return urlFreshnessCache.get(refKey)
+}
+
+/**
+ * Drop one or all cached URL observations (tests and `locator_rebuild` reuse).
+ * @param refKey - omit to clear the whole cache.
+ */
+export function forgetUrlFreshness(refKey?: string): void {
+  if (refKey === undefined) urlFreshnessCache.clear()
+  else urlFreshnessCache.delete(refKey)
+}
+
+/**
+ * Read the additive URL freshness block out of one `refs.meta` JSON string.
+ * Unparseable/legacy metadata yields undefined; the block is optional.
+ * @param meta - raw `refs.meta` column value.
+ * @returns the stored observation, or undefined.
+ */
+export function parseUrlFreshnessMeta(meta: string | null | undefined): UrlFreshnessRecord | undefined {
+  if (meta === null || meta === undefined || meta === '') return undefined
+  let parsed: unknown
+  try { parsed = JSON.parse(meta) } catch { return undefined }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const block = (parsed as Record<string, unknown>)[URL_FRESHNESS_META_KEY]
+  if (typeof block !== 'object' || block === null || Array.isArray(block)) return undefined
+  const value = block as Record<string, unknown>
+  const status = value.status
+  const checkedAt = typeof value.checkedAt === 'number' && Number.isFinite(value.checkedAt) ? Math.trunc(value.checkedAt) : undefined
+  if (checkedAt === undefined) return undefined
+  if (status !== 'fresh' && status !== 'stale' && status !== 'missing' && status !== 'unknown') return undefined
+  const text = (key: string): string | undefined => typeof value[key] === 'string' && (value[key] as string) !== '' ? value[key] as string : undefined
+  const sha256 = typeof value.contentSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.contentSha256) ? value.contentSha256 : undefined
+  return {
+    url: typeof value.url === 'string' ? value.url : '',
+    status,
+    checkedAt,
+    ...(text('etag') === undefined ? {} : { etag: text('etag') as string }),
+    ...(text('lastModified') === undefined ? {} : { lastModified: text('lastModified') as string }),
+    ...(sha256 === undefined ? {} : { contentSha256: sha256 }),
+    ...(typeof value.contentLength === 'number' && Number.isFinite(value.contentLength) && value.contentLength >= 0 ? { contentLength: Math.trunc(value.contentLength) } : {}),
+    ...(typeof value.statusCode === 'number' && Number.isInteger(value.statusCode) ? { statusCode: value.statusCode } : {}),
+  }
+}
+
+/**
+ * Build the `refs.meta` patch for one URL observation. The URL itself is left
+ * out because the ref key already encodes it and `refs.meta` is capped at 400
+ * characters by the content index.
+ * @param record - observation to persist.
+ * @returns a JSON patch object ready for a `setRefMeta`-style writer.
+ */
+export function urlFreshnessMetaPatch(record: UrlFreshnessRecord): Record<string, unknown> {
+  return {
+    [URL_FRESHNESS_META_KEY]: {
+      status: record.status,
+      checkedAt: Math.trunc(record.checkedAt),
+      ...(record.etag === undefined ? {} : { etag: record.etag }),
+      ...(record.lastModified === undefined ? {} : { lastModified: record.lastModified }),
+      ...(record.contentSha256 === undefined ? {} : { contentSha256: record.contentSha256 }),
+      ...(record.contentLength === undefined ? {} : { contentLength: record.contentLength }),
+      ...(record.statusCode === undefined ? {} : { statusCode: record.statusCode }),
+    },
+  }
+}
+
+/** Clamp one optional numeric option. */
+function clampOption(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.max(min, Math.min(max, Math.trunc(value)))
+}
+
+/** Assemble one observation, carrying previous validators forward on reuse. */
+function urlRecord(
+  target: string,
+  status: RefStatus,
+  checkedAt: number,
+  previous: UrlFreshnessRecord | undefined,
+  patch: { etag?: string | null; lastModified?: string | null; contentSha256?: string; contentLength?: number; statusCode?: number } = {},
+): UrlFreshnessRecord {
+  const etag = patch.etag === null ? undefined : (patch.etag ?? previous?.etag)
+  const lastModified = patch.lastModified === null ? undefined : (patch.lastModified ?? previous?.lastModified)
+  const contentSha256 = patch.contentSha256 ?? previous?.contentSha256
+  const contentLength = patch.contentLength ?? previous?.contentLength
+  return {
+    url: target,
+    status,
+    checkedAt,
+    ...(etag === undefined ? {} : { etag }),
+    ...(lastModified === undefined ? {} : { lastModified }),
+    ...(contentSha256 === undefined ? {} : { contentSha256 }),
+    ...(contentLength === undefined ? {} : { contentLength }),
+    ...(patch.statusCode === undefined ? {} : { statusCode: patch.statusCode }),
+  }
+}
+
+/** Read at most `maxBytes` of one response body (the stream is cancelled after). */
+async function readBoundedBody(response: Response, maxBytes: number): Promise<Buffer | undefined> {
+  const body = response.body
+  if (body === null) {
+    try { return Buffer.from(await response.arrayBuffer()).subarray(0, maxBytes) } catch { return undefined }
+  }
+  const reader = body.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value === undefined) continue
+      const chunk = Buffer.from(value)
+      const slice = chunk.length > maxBytes - total ? chunk.subarray(0, maxBytes - total) : chunk
+      chunks.push(slice)
+      total += slice.length
+      if (slice.length < chunk.length) break
+    }
+    return Buffer.concat(chunks)
+  } catch {
+    return undefined
+  } finally {
+    try { await reader.cancel() } catch { /* the stream is already closed */ }
+  }
+}
+
+/**
+ * Check whether one URL still serves the same content, using an HTTP
+ * conditional GET with a bounded range. This never crawls: it only touches the
+ * exact URL the caller passed, honors HTTP validators when the server sent
+ * them, and falls back to a sha256 of the fetched prefix. Redirects are
+ * followed. Proxy, cookie and authentication behaviour is the Node fetch
+ * default; no robots.txt is fetched because this is a revalidation of one
+ * explicit citation, not a crawl.
+ *
+ * Failure mapping: network error/timeout → `stale` (the target may still be
+ * fine; it is unreachable), 404/410 → `missing`, a body-hash change → `stale`,
+ * first observation → `fresh` baseline.
+ * @param target - normalized HTTP(S) URL.
+ * @param previous - prior observation used for validators/baseline.
+ * @param options - timeout and body-prefix caps.
+ * @returns the observation plus non-fatal warnings.
+ */
+export async function checkUrlFreshness(target: string, previous?: UrlFreshnessRecord, options: UrlFreshnessCheckOptions = {}): Promise<UrlFreshnessCheck> {
+  const checkedAt = Date.now()
+  let parsedUrl: URL
+  try { parsedUrl = new URL(target) } catch {
+    return { record: urlRecord(target, 'unknown', checkedAt, previous), warnings: ['url-invalid'] }
+  }
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    return { record: urlRecord(target, 'unknown', checkedAt, previous), warnings: ['url-scheme-unsupported'] }
+  }
+  const timeoutMs = clampOption(options.timeoutMs, URL_FRESHNESS_TIMEOUT_MS, 100, 30_000)
+  const maxBytes = clampOption(options.maxBytes, URL_FRESHNESS_MAX_BYTES, 1024, 1024 * 1024)
+  const headers: Record<string, string> = {
+    accept: '*/*',
+    range: `bytes=0-${String(maxBytes - 1)}`,
+    'user-agent': 'dsh-locator/url-freshness',
+    ...(previous?.etag === undefined ? {} : { 'if-none-match': previous.etag }),
+    ...(previous?.lastModified === undefined ? {} : { 'if-modified-since': previous.lastModified }),
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => { controller.abort() }, timeoutMs)
+  try {
+    const response = await fetch(parsedUrl, { method: 'GET', headers, redirect: 'follow', signal: controller.signal })
+    const statusCode = response.status
+    if (statusCode === 304) {
+      return { record: urlRecord(target, 'fresh', checkedAt, previous, { statusCode }), warnings: [] }
+    }
+    if (statusCode === 404 || statusCode === 410) {
+      return { record: urlRecord(target, 'missing', checkedAt, previous, { statusCode }), warnings: ['url-gone'] }
+    }
+    if (statusCode < 200 || statusCode >= 300) {
+      // 401/403/405/5xx: reachable but unverifiable; report stale, never missing.
+      return { record: urlRecord(target, 'stale', checkedAt, previous, { statusCode }), warnings: [`url-check-status-${String(statusCode)}`] }
+    }
+    const body = await readBoundedBody(response, maxBytes)
+    if (body === undefined) {
+      return { record: urlRecord(target, 'stale', checkedAt, previous, { statusCode }), warnings: ['url-check-body-unavailable'] }
+    }
+    const contentSha256 = createHash('sha256').update(body).digest('hex')
+    const etag = response.headers.get('etag')
+    const lastModified = response.headers.get('last-modified')
+    const contentLengthRaw = Number(response.headers.get('content-length') ?? '')
+    const patch = {
+      ...(etag === null || etag === '' ? {} : { etag }),
+      ...(lastModified === null || lastModified === '' ? {} : { lastModified }),
+      contentSha256,
+      ...(Number.isFinite(contentLengthRaw) && contentLengthRaw > 0 ? { contentLength: contentLengthRaw } : {}),
+      statusCode,
+    }
+    if (previous?.contentSha256 === undefined) {
+      return { record: urlRecord(target, 'fresh', checkedAt, previous, patch), warnings: ['url-freshness-baseline'] }
+    }
+    const unchanged = previous.contentSha256 === contentSha256
+    return {
+      record: urlRecord(target, unchanged ? 'fresh' : 'stale', checkedAt, previous, patch),
+      warnings: unchanged ? [] : ['url-content-changed'],
+    }
+  } catch (error) {
+    const timedOut = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')
+    return { record: urlRecord(target, 'stale', checkedAt, previous), warnings: [timedOut ? 'url-check-timeout' : 'url-unreachable'] }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+

@@ -165,6 +165,29 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
   background:var(--dsw-alias-bg-layer-2,rgba(120,125,135,.14));font-size:11px;white-space:nowrap}
 .dsh-locator-findbar-chip button{border:0;background:transparent;color:inherit;cursor:pointer;padding:0 1px;font:inherit;font-size:12px}
 .dsh-locator-findbar kbd{border:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.3));border-radius:4px;padding:0 3px;font-size:10px;opacity:.6}
+.dsh-locator-quickswitch{display:flex;align-items:center;gap:8px;padding:6px 14px;font-size:12px;
+  border-bottom:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.14));
+  background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#4f7cff) 7%,transparent)}
+.dsh-locator-quickswitch[data-quick-switch=invalid]{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d33) 8%,transparent);
+  color:var(--dsw-alias-state-error-primary,#c62828)}
+.dsh-locator-quickswitch-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-locator-evidence{border-top:1px solid var(--dsw-alias-border-base,rgba(120,125,135,.2));padding:8px 14px;font-size:12px;
+  max-height:min(34vh,260px);overflow:auto;background:var(--dsw-alias-bg-layer-2,rgba(120,125,135,.05))}
+.dsh-locator-evidence-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dsh-locator-evidence-head .grow{flex:1}
+.dsh-locator-evidence-title{font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46%}
+.dsh-locator-fresh{flex:none;font-size:10.5px;line-height:16px;padding:0 6px;border-radius:999px;
+  background:var(--dsw-alias-bg-layer-2,rgba(120,125,135,.16));text-transform:lowercase}
+.dsh-locator-fresh-fresh{color:var(--dsw-alias-state-success-primary,#2e7d32);background:rgba(46,125,50,.14)}
+.dsh-locator-fresh-stale{color:var(--dsw-alias-state-warn-primary,#b45309);background:rgba(180,83,9,.16)}
+.dsh-locator-fresh-missing{color:var(--dsw-alias-state-error-primary,#c62828);background:rgba(198,40,40,.16)}
+.dsh-locator-fresh.denied{color:var(--dsw-alias-state-error-primary,#c62828)}
+.dsh-locator-badge-deny{background:rgba(198,40,40,.16);color:var(--dsw-alias-state-error-primary,#c62828)}
+.dsh-locator-evidence-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:4px 16px;margin-top:6px}
+.dsh-locator-evidence-field{display:flex;gap:6px;min-width:0}
+.dsh-locator-evidence-label{opacity:.55;flex:none}
+.dsh-locator-evidence-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-locator-evidence-hint{margin-top:6px;opacity:.7}
 `
     function ensureStyles() {
       if (typeof document === 'undefined') return
@@ -222,7 +245,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         capabilityPreflightFailed: 'Preflight {id} failed: {error}',
         copiedPath: 'Path copied', revealed: 'Revealed in file manager', opened: 'Opened', inserted: 'Inserted @file',
         insertFailed: 'Insert failed; @file copied', jumped: 'Opened session', jumpFailed: 'Opened the session but could not locate the match',
-        footer: '↑↓ select · Enter open/jump · Ctrl+Shift+C copy path · Ctrl+O open · Alt+1–3 scopes · Esc close',
+        footer: '↑↓ select · Enter open/jump · Ctrl+Enter insert @ mention · Ctrl+I evidence · Ctrl+Shift+C copy path · Ctrl+O open · Alt+1–3 scopes · Esc close',
         results: 'content {content} · files {files} · folders {dirs} · {ms} ms',
         launcher: 'Local file search (Ctrl+Shift+F)',
         justNow: 'just now', minutesAgo: '{n} min ago', hoursAgo: '{n} h ago',
@@ -253,6 +276,31 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         panelFilter: 'Filter loaded results…', filterEmpty: 'No loaded result matches this filter', panelLoadMore: 'Load more', panelHistory: 'Recent searches', panelHistoryClear: 'Clear',
         rootFilter: 'Root', allRoots: 'All roots', exportTitle: 'Export results', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exported', exportFailed: 'Export failed',
         includeArchived: "Archived sessions", contentToolResultsIndex: "tool-results-indexed",
+        insertFile: 'Insert @file', insertSession: 'Insert @session mention',
+        insertedSession: 'Inserted @session mention', insertSessionFailed: 'Insert failed; @session mention copied',
+        mentionUnsupported: 'This path cannot be written as an @file mention; the path was copied',
+        copyMarkdown: 'Copy Markdown citation', copiedMarkdown: 'Markdown citation copied', copyRefShort: 'Copy ref',
+        evidenceTitle: 'Evidence details', evidenceClose: 'Close evidence details',
+        evidenceHint: 'Click a result or press Ctrl+I to inspect its ref, freshness and permissions.',
+        evidenceKind: 'Kind', evidenceRef: 'Ref', evidenceTitleField: 'Title', evidenceFreshness: 'Freshness',
+        evidencePermissions: 'Permissions', evidenceHash: 'Hash', evidenceNoHash: 'not reported',
+        evidenceSession: 'Session ID', evidenceMessage: 'Message ID', evidenceMention: 'Insert mention',
+        evidenceObserved: 'observed {time}',
+        freshnessFresh: 'fresh', freshnessStale: 'stale', freshnessMissing: 'missing', freshnessUnknown: 'unknown',
+        permissionAllowed: 'allowed', permissionDenied: 'denied',
+        evidenceStaleHint: 'This evidence changed after it was indexed; re-run the search before citing it.',
+        evidenceMissingHint: 'The indexed target no longer exists; open and locate will fail.',
+        evidenceDeniedHint: 'The current workspace is not authorized to read this evidence; actions are disabled.',
+        evidenceUnknownHint: 'The host reported no freshness for this hit; it reflects the index snapshot only.',
+        evidenceOpenFile: 'Open file', evidenceOpenSession: 'Open session', evidenceReveal: 'Locate',
+        quickSwitchTitle: 'Quick switch',
+        quickSwitchHint: 'Paste an evidence ref (ref://…) or an @path / @session mention: Enter opens or jumps to it.',
+        quickSwitchInvalid: 'Not a valid evidence ref or mention: {value}',
+        quickSwitchUnsupported: 'This ref kind cannot be opened from the panel: {kind}',
+        openAction: 'Open',
+        errorMissingTarget: 'the target no longer exists', errorOutsideRoots: 'the path is outside the indexed roots',
+        errorNotAFile: 'the target is not a regular file',
+        openFailed: 'Open failed: {reason}', revealFailed: 'Locate failed: {reason}',
       },
       zh: {
         scopeContent: '内容', scopeFiles: '文件', scopeDirs: '目录',
@@ -283,7 +331,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         capabilityPreflightFailed: '预检 {id} 失败：{error}', requestFailed: '请求失败',
         copiedPath: '已复制路径', revealed: '已在文件管理器中定位', opened: '已打开', inserted: '已插入 @file',
         insertFailed: '插入失败，已复制 @file', jumped: '已打开会话', jumpFailed: '已打开会话，但未定位到该消息',
-        footer: '↑↓ 选择 · Enter 打开/跳转 · Ctrl+Shift+C 复制路径 · Ctrl+O 打开 · Alt+1–3 切换范围 · Esc 关闭',
+        footer: '↑↓ 选择 · Enter 打开/跳转 · Ctrl+Enter 插入 @ 提及 · Ctrl+I 证据 · Ctrl+Shift+C 复制路径 · Ctrl+O 打开 · Alt+1–3 切换范围 · Esc 关闭',
         results: '内容 {content} · 文件 {files} · 目录 {dirs} · {ms} ms',
         launcher: '本地文件搜索 (Ctrl+Shift+F)',
         justNow: '刚刚', minutesAgo: '{n} 分钟前', hoursAgo: '{n} 小时前',
@@ -314,6 +362,31 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         panelFilter: '过滤当前结果…', filterEmpty: '已加载结果中没有符合过滤条件的内容', panelLoadMore: '加载更多', panelHistory: '最近搜索', panelHistoryClear: '清空',
         rootFilter: '根目录', allRoots: '全部根目录', exportTitle: '导出结果', exportCsv: 'CSV', exportJson: 'JSON', exportDone: '已导出', exportFailed: '导出失败',
         includeArchived: "包含归档会话", contentToolResultsIndex: "含工具结果",
+        insertFile: '插入 @file', insertSession: '插入 @session 提及',
+        insertedSession: '已插入 @session 提及', insertSessionFailed: '插入失败，已复制 @session 提及',
+        mentionUnsupported: '该路径无法写成 @file 提及，已复制路径',
+        copyMarkdown: '复制 Markdown 引用', copiedMarkdown: 'Markdown 引用已复制', copyRefShort: '复制引用',
+        evidenceTitle: '证据详情', evidenceClose: '关闭证据详情',
+        evidenceHint: '点击结果或按 Ctrl+I 查看该条证据的引用、新鲜度与权限。',
+        evidenceKind: '类型', evidenceRef: '引用', evidenceTitleField: '标题', evidenceFreshness: '新鲜度',
+        evidencePermissions: '权限', evidenceHash: '哈希', evidenceNoHash: '未提供',
+        evidenceSession: '会话 ID', evidenceMessage: '消息 ID', evidenceMention: '插入提及',
+        evidenceObserved: '观测于 {time}',
+        freshnessFresh: '新鲜', freshnessStale: '已过期', freshnessMissing: '缺失', freshnessUnknown: '未知',
+        permissionAllowed: '允许', permissionDenied: '拒绝',
+        evidenceStaleHint: '该证据在索引后已变化；引用前请重新搜索确认。',
+        evidenceMissingHint: '索引目标已不存在，打开与定位将会失败。',
+        evidenceDeniedHint: '当前工作区无权读取该证据，相关操作已禁用。',
+        evidenceUnknownHint: '宿主未报告该命中的新鲜度，仅代表索引快照。',
+        evidenceOpenFile: '打开文件', evidenceOpenSession: '打开会话', evidenceReveal: '定位',
+        quickSwitchTitle: '快速切换',
+        quickSwitchHint: '粘贴证据引用（ref://…）或 @路径 / @会话 提及；回车即可打开或跳转。',
+        quickSwitchInvalid: '不是有效的证据引用或提及：{value}',
+        quickSwitchUnsupported: '面板无法打开此类型的引用：{kind}',
+        openAction: '打开',
+        errorMissingTarget: '目标已不存在', errorOutsideRoots: '路径不在已索引根目录内',
+        errorNotAFile: '目标不是普通文件',
+        openFailed: '打开失败：{reason}', revealFailed: '定位失败：{reason}',
       },
       es: {
         scopeContent: 'Contenido', scopeFiles: 'Archivos', scopeDirs: 'Carpetas',
@@ -344,7 +417,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         capabilityPreflightFailed: 'Falló la verificación de {id}: {error}', requestFailed: 'solicitud fallida',
         copiedPath: 'Ruta copiada', revealed: 'Mostrado en el gestor de archivos', opened: 'Abierto', inserted: '@file insertado',
         insertFailed: 'No se pudo insertar; @file copiado', jumped: 'Sesión abierta', jumpFailed: 'Sesión abierta, pero no se localizó el mensaje',
-        footer: '↑↓ elegir · Enter abrir/ir · Ctrl+Shift+C copiar ruta · Ctrl+O abrir · Alt+1–3 ámbitos · Esc cerrar',
+        footer: '↑↓ elegir · Enter abrir/ir · Ctrl+Enter insertar mención @ · Ctrl+I evidencia · Ctrl+Shift+C copiar ruta · Ctrl+O abrir · Alt+1–3 ámbitos · Esc cerrar',
         results: 'contenido {content} · archivos {files} · carpetas {dirs} · {ms} ms',
         launcher: 'Búsqueda local (Ctrl+Shift+F)',
         justNow: 'ahora', minutesAgo: 'hace {n} min', hoursAgo: 'hace {n} h',
@@ -375,6 +448,31 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         panelFilter: 'Filtrar resultados cargados…', filterEmpty: 'Ningún resultado cargado coincide con el filtro', panelLoadMore: 'Cargar más', panelHistory: 'Búsquedas recientes', panelHistoryClear: 'Borrar',
         rootFilter: 'Raíz', allRoots: 'Todas las raíces', exportTitle: 'Exportar resultados', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exportado', exportFailed: 'Error al exportar',
         includeArchived: "Sesiones archivadas", contentToolResultsIndex: "resultados de herramientas",
+        insertFile: 'Insertar @file', insertSession: 'Insertar mención @session',
+        insertedSession: 'Mención @session insertada', insertSessionFailed: 'No se pudo insertar; mención @session copiada',
+        mentionUnsupported: 'Esta ruta no se puede escribir como mención @file; se copió la ruta',
+        copyMarkdown: 'Copiar cita Markdown', copiedMarkdown: 'Cita Markdown copiada', copyRefShort: 'Copiar referencia',
+        evidenceTitle: 'Detalles de la evidencia', evidenceClose: 'Cerrar detalles de la evidencia',
+        evidenceHint: 'Haz clic en un resultado o pulsa Ctrl+I para inspeccionar su referencia, frescura y permisos.',
+        evidenceKind: 'Tipo', evidenceRef: 'Referencia', evidenceTitleField: 'Título', evidenceFreshness: 'Frescura',
+        evidencePermissions: 'Permisos', evidenceHash: 'Huella', evidenceNoHash: 'no informada',
+        evidenceSession: 'ID de sesión', evidenceMessage: 'ID de mensaje', evidenceMention: 'Insertar mención',
+        evidenceObserved: 'observado {time}',
+        freshnessFresh: 'vigente', freshnessStale: 'desactualizado', freshnessMissing: 'ausente', freshnessUnknown: 'desconocida',
+        permissionAllowed: 'permitido', permissionDenied: 'denegado',
+        evidenceStaleHint: 'Esta evidencia cambió después de indexarse; vuelve a buscar antes de citarla.',
+        evidenceMissingHint: 'El destino indexado ya no existe; abrir y localizar fallarán.',
+        evidenceDeniedHint: 'El espacio de trabajo actual no puede leer esta evidencia; las acciones están desactivadas.',
+        evidenceUnknownHint: 'El host no informó la frescura de este resultado; solo refleja la instantánea del índice.',
+        evidenceOpenFile: 'Abrir archivo', evidenceOpenSession: 'Abrir sesión', evidenceReveal: 'Localizar',
+        quickSwitchTitle: 'Cambio rápido',
+        quickSwitchHint: 'Pega una referencia de evidencia (ref://…) o una mención @ruta / @sesión: Enter la abre o salta a ella.',
+        quickSwitchInvalid: 'No es una referencia o mención válida: {value}',
+        quickSwitchUnsupported: 'El panel no puede abrir este tipo de referencia: {kind}',
+        openAction: 'Abrir',
+        errorMissingTarget: 'el destino ya no existe', errorOutsideRoots: 'la ruta está fuera de las raíces indexadas',
+        errorNotAFile: 'el destino no es un archivo normal',
+        openFailed: 'Error al abrir: {reason}', revealFailed: 'Error al localizar: {reason}',
       },
       pt: {
         scopeContent: 'Conteúdo', scopeFiles: 'Arquivos', scopeDirs: 'Pastas',
@@ -405,7 +503,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         capabilityPreflightFailed: 'Falha na pré-verificação de {id}: {error}', requestFailed: 'solicitação falhou',
         copiedPath: 'Caminho copiado', revealed: 'Mostrado no gerenciador de arquivos', opened: 'Aberto', inserted: '@file inserido',
         insertFailed: 'Falha ao inserir; @file copiado', jumped: 'Sessão aberta', jumpFailed: 'Sessão aberta, mas a mensagem não foi localizada',
-        footer: '↑↓ escolher · Enter abrir/ir · Ctrl+Shift+C copiar caminho · Ctrl+O abrir · Alt+1–3 escopos · Esc fechar',
+        footer: '↑↓ escolher · Enter abrir/ir · Ctrl+Enter inserir menção @ · Ctrl+I evidência · Ctrl+Shift+C copiar caminho · Ctrl+O abrir · Alt+1–3 escopos · Esc fechar',
         results: 'conteúdo {content} · arquivos {files} · pastas {dirs} · {ms} ms',
         launcher: 'Busca local (Ctrl+Shift+F)',
         justNow: 'agora', minutesAgo: 'há {n} min', hoursAgo: 'há {n} h',
@@ -436,6 +534,31 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         panelFilter: 'Filtrar resultados carregados…', filterEmpty: 'Nenhum resultado carregado corresponde ao filtro', panelLoadMore: 'Carregar mais', panelHistory: 'Buscas recentes', panelHistoryClear: 'Limpar',
         rootFilter: 'Raiz', allRoots: 'Todas as raízes', exportTitle: 'Exportar resultados', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'Exportado', exportFailed: 'Falha ao exportar',
         includeArchived: "Sessões arquivadas", contentToolResultsIndex: "resultados de ferramentas",
+        insertFile: 'Inserir @file', insertSession: 'Inserir menção @session',
+        insertedSession: 'Menção @session inserida', insertSessionFailed: 'Falha ao inserir; menção @session copiada',
+        mentionUnsupported: 'Este caminho não pode ser escrito como menção @file; o caminho foi copiado',
+        copyMarkdown: 'Copiar citação Markdown', copiedMarkdown: 'Citação Markdown copiada', copyRefShort: 'Copiar referência',
+        evidenceTitle: 'Detalhes da evidência', evidenceClose: 'Fechar detalhes da evidência',
+        evidenceHint: 'Clique em um resultado ou pressione Ctrl+I para inspecionar a referência, o frescor e as permissões.',
+        evidenceKind: 'Tipo', evidenceRef: 'Referência', evidenceTitleField: 'Título', evidenceFreshness: 'Frescor',
+        evidencePermissions: 'Permissões', evidenceHash: 'Resumo', evidenceNoHash: 'não informado',
+        evidenceSession: 'ID da sessão', evidenceMessage: 'ID da mensagem', evidenceMention: 'Inserir menção',
+        evidenceObserved: 'observado em {time}',
+        freshnessFresh: 'atual', freshnessStale: 'desatualizado', freshnessMissing: 'ausente', freshnessUnknown: 'desconhecido',
+        permissionAllowed: 'permitido', permissionDenied: 'negado',
+        evidenceStaleHint: 'Esta evidência mudou depois de ser indexada; pesquise novamente antes de citá-la.',
+        evidenceMissingHint: 'O destino indexado não existe mais; abrir e localizar vão falhar.',
+        evidenceDeniedHint: 'O workspace atual não tem autorização para ler esta evidência; as ações estão desativadas.',
+        evidenceUnknownHint: 'O host não informou o frescor deste resultado; ele reflete apenas o instantâneo do índice.',
+        evidenceOpenFile: 'Abrir arquivo', evidenceOpenSession: 'Abrir sessão', evidenceReveal: 'Localizar',
+        quickSwitchTitle: 'Troca rápida',
+        quickSwitchHint: 'Cole uma referência de evidência (ref://…) ou uma menção @caminho / @sessão: Enter abre ou salta para ela.',
+        quickSwitchInvalid: 'Não é uma referência ou menção válida: {value}',
+        quickSwitchUnsupported: 'O painel não pode abrir este tipo de referência: {kind}',
+        openAction: 'Abrir',
+        errorMissingTarget: 'o destino não existe mais', errorOutsideRoots: 'o caminho está fora das raízes indexadas',
+        errorNotAFile: 'o destino não é um arquivo normal',
+        openFailed: 'Falha ao abrir: {reason}', revealFailed: 'Falha ao localizar: {reason}',
       },
       hi: {
         scopeContent: 'सामग्री', scopeFiles: 'फ़ाइलें', scopeDirs: 'फ़ोल्डर',
@@ -466,7 +589,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         capabilityPreflightFailed: '{id} की पूर्व-जाँच विफल: {error}', requestFailed: 'अनुरोध विफल',
         copiedPath: 'पथ कॉपी हुआ', revealed: 'फ़ाइल मैनेजर में दिखाया', opened: 'खोला गया', inserted: '@file डाला गया',
         insertFailed: 'डालना विफल; @file कॉपी हुआ', jumped: 'सत्र खुला', jumpFailed: 'सत्र खुला, पर संदेश नहीं मिला',
-        footer: '↑↓ चुनें · Enter खोलें/जाएँ · Ctrl+Shift+C पथ कॉपी · Ctrl+O खोलें · Alt+1–3 क्षेत्र · Esc बंद',
+        footer: '↑↓ चुनें · Enter खोलें/जाएँ · Ctrl+Enter @ उल्लेख डालें · Ctrl+I प्रमाण · Ctrl+Shift+C पथ कॉपी · Ctrl+O खोलें · Alt+1–3 क्षेत्र · Esc बंद',
         results: 'सामग्री {content} · फ़ाइलें {files} · फ़ोल्डर {dirs} · {ms} ms',
         launcher: 'स्थानीय फ़ाइल खोज (Ctrl+Shift+F)',
         justNow: 'अभी', minutesAgo: '{n} मिनट पहले', hoursAgo: '{n} घंटे पहले',
@@ -497,6 +620,31 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         panelFilter: 'लोड किए गए परिणाम छाँटें…', filterEmpty: 'लोड किए गए परिणामों में फ़िल्टर से मेल नहीं', panelLoadMore: 'और लोड करें', panelHistory: 'हाल की खोजें', panelHistoryClear: 'साफ़ करें',
         rootFilter: 'रूट', allRoots: 'सभी रूट', exportTitle: 'परिणाम निर्यात करें', exportCsv: 'CSV', exportJson: 'JSON', exportDone: 'निर्यात हुआ', exportFailed: 'निर्यात विफल',
         includeArchived: "संग्रहीत सत्र", contentToolResultsIndex: "टूल परिणाम इंडेक्स",
+        insertFile: '@file डालें', insertSession: '@session उल्लेख डालें',
+        insertedSession: '@session उल्लेख डाला गया', insertSessionFailed: 'डालना विफल; @session उल्लेख कॉपी हुआ',
+        mentionUnsupported: 'यह पथ @file उल्लेख के रूप में नहीं लिखा जा सकता; पथ कॉपी कर दिया गया',
+        copyMarkdown: 'Markdown उद्धरण कॉपी करें', copiedMarkdown: 'Markdown उद्धरण कॉपी हुआ', copyRefShort: 'रेफ़ कॉपी करें',
+        evidenceTitle: 'प्रमाण विवरण', evidenceClose: 'प्रमाण विवरण बंद करें',
+        evidenceHint: 'किसी परिणाम पर क्लिक करें या Ctrl+I दबाएँ: उसका रेफ़, ताज़गी और अनुमतियाँ देखें।',
+        evidenceKind: 'प्रकार', evidenceRef: 'रेफ़', evidenceTitleField: 'शीर्षक', evidenceFreshness: 'ताज़गी',
+        evidencePermissions: 'अनुमतियाँ', evidenceHash: 'हैश', evidenceNoHash: 'रिपोर्ट नहीं',
+        evidenceSession: 'सत्र आईडी', evidenceMessage: 'संदेश आईडी', evidenceMention: 'उल्लेख डालें',
+        evidenceObserved: '{time} पर देखा गया',
+        freshnessFresh: 'ताज़ा', freshnessStale: 'पुराना', freshnessMissing: 'अनुपस्थित', freshnessUnknown: 'अज्ञात',
+        permissionAllowed: 'अनुमत', permissionDenied: 'अस्वीकृत',
+        evidenceStaleHint: 'यह प्रमाण इंडेक्स होने के बाद बदल गया है; उद्धृत करने से पहले फिर से खोजें।',
+        evidenceMissingHint: 'इंडेक्स किया गया लक्ष्य अब मौजूद नहीं है; खोलना और ढूँढना विफल होगा।',
+        evidenceDeniedHint: 'वर्तमान वर्कस्पेस इस प्रमाण को पढ़ने के लिए अधिकृत नहीं है; क्रियाएँ अक्षम हैं।',
+        evidenceUnknownHint: 'होस्ट ने इस हिट की ताज़गी नहीं बताई; यह केवल इंडेक्स स्नैपशॉट दर्शाता है।',
+        evidenceOpenFile: 'फ़ाइल खोलें', evidenceOpenSession: 'सत्र खोलें', evidenceReveal: 'स्थान दिखाएँ',
+        quickSwitchTitle: 'त्वरित स्विच',
+        quickSwitchHint: 'प्रमाण रेफ़ (ref://…) या @पथ / @सत्र उल्लेख चिपकाएँ: Enter खोलता या उस पर जाता है।',
+        quickSwitchInvalid: 'यह वैध प्रमाण रेफ़ या उल्लेख नहीं है: {value}',
+        quickSwitchUnsupported: 'पैनल इस प्रकार का रेफ़ नहीं खोल सकता: {kind}',
+        openAction: 'खोलें',
+        errorMissingTarget: 'लक्ष्य अब मौजूद नहीं है', errorOutsideRoots: 'पथ इंडेक्स किए गए रूट के बाहर है',
+        errorNotAFile: 'लक्ष्य सामान्य फ़ाइल नहीं है',
+        openFailed: 'खोलना विफल: {reason}', revealFailed: 'स्थान दिखाना विफल: {reason}',
       },
       ja: {
         scopeContent: "内容",
@@ -563,7 +711,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         insertFailed: "挿入に失敗しました。@file をコピーしました",
         jumped: "セッションを開きました",
         jumpFailed: "セッションは開きましたが、一致箇所を特定できませんでした",
-        footer: "↑↓ 選択 · Enter 開く/ジャンプ · Ctrl+Shift+C パスをコピー · Ctrl+O 開く · Alt+1–3 範囲 · Esc 閉じる",
+        footer: "↑↓ 選択 · Enter 開く/ジャンプ · Ctrl+Enter @ メンション挿入 · Ctrl+I 証拠 · Ctrl+Shift+C パスをコピー · Ctrl+O 開く · Alt+1–3 範囲 · Esc 閉じる",
         results: "内容 {content} · ファイル {files} · フォルダ {dirs} · {ms} ms",
         launcher: "ローカルファイル検索 (Ctrl+Shift+F)",
         justNow: "たった今",
@@ -641,6 +789,31 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportDone: "エクスポートしました",
         exportFailed: "エクスポートに失敗しました",
         includeArchived: "アーカイブ済みセッション", contentToolResultsIndex: "ツール結果インデックス",
+        insertFile: "@file を挿入", insertSession: "@session メンションを挿入",
+        insertedSession: "@session メンションを挿入しました", insertSessionFailed: "挿入に失敗しました。@session メンションをコピーしました",
+        mentionUnsupported: "このパスは @file メンションにできません。パスをコピーしました",
+        copyMarkdown: "Markdown 引用をコピー", copiedMarkdown: "Markdown 引用をコピーしました", copyRefShort: "参照をコピー",
+        evidenceTitle: "証拠の詳細", evidenceClose: "証拠の詳細を閉じる",
+        evidenceHint: "結果をクリックするか Ctrl+I で、参照・鮮度・権限を確認できます。",
+        evidenceKind: "種類", evidenceRef: "参照", evidenceTitleField: "タイトル", evidenceFreshness: "鮮度",
+        evidencePermissions: "権限", evidenceHash: "ハッシュ", evidenceNoHash: "未報告",
+        evidenceSession: "セッション ID", evidenceMessage: "メッセージ ID", evidenceMention: "メンションを挿入",
+        evidenceObserved: "{time} に観測",
+        freshnessFresh: "最新", freshnessStale: "古い", freshnessMissing: "欠落", freshnessUnknown: "不明",
+        permissionAllowed: "許可", permissionDenied: "拒否",
+        evidenceStaleHint: "この証拠はインデックス後に変更されています。引用する前に再検索してください。",
+        evidenceMissingHint: "インデックスされた対象はもう存在しません。開く・位置表示は失敗します。",
+        evidenceDeniedHint: "現在のワークスペースにはこの証拠を読む権限がありません。操作は無効です。",
+        evidenceUnknownHint: "ホストはこのヒットの鮮度を報告していません。インデックスのスナップショットのみを反映します。",
+        evidenceOpenFile: "ファイルを開く", evidenceOpenSession: "セッションを開く", evidenceReveal: "位置を表示",
+        quickSwitchTitle: "クイック切り替え",
+        quickSwitchHint: "証拠参照（ref://…）または @パス / @セッション メンションを貼り付け、Enter で開くか移動します。",
+        quickSwitchInvalid: "有効な証拠参照またはメンションではありません: {value}",
+        quickSwitchUnsupported: "この種類の参照はパネルから開けません: {kind}",
+        openAction: "開く",
+        errorMissingTarget: "対象はもう存在しません", errorOutsideRoots: "パスがインデックス済みルートの外にあります",
+        errorNotAFile: "対象は通常のファイルではありません",
+        openFailed: "開けませんでした: {reason}", revealFailed: "位置を表示できませんでした: {reason}",
       },
       fr: {
         scopeContent: "Contenu",
@@ -707,7 +880,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         insertFailed: "Échec de l’insertion ; @file copié",
         jumped: "Session ouverte",
         jumpFailed: "Session ouverte, mais correspondance introuvable",
-        footer: "↑↓ sélectionner · Entrée ouvrir/aller à · Ctrl+Shift+C copier le chemin · Ctrl+O ouvrir · Alt+1–3 portées · Échap fermer",
+        footer: "↑↓ sélectionner · Entrée ouvrir/aller à · Ctrl+Entrée insérer une mention @ · Ctrl+I preuve · Ctrl+Maj+C copier le chemin · Ctrl+O ouvrir · Alt+1–3 portées · Échap fermer",
         results: "contenu {content} · fichiers {files} · dossiers {dirs} · {ms} ms",
         launcher: "Recherche de fichiers locale (Ctrl+Shift+F)",
         justNow: "à l’instant",
@@ -785,6 +958,31 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportDone: "Exporté",
         exportFailed: "Échec de l’export",
         includeArchived: "Sessions archivées", contentToolResultsIndex: "résultats d’outils indexés",
+        insertFile: "Insérer @file", insertSession: "Insérer une mention @session",
+        insertedSession: "Mention @session insérée", insertSessionFailed: "Échec de l’insertion ; mention @session copiée",
+        mentionUnsupported: "Ce chemin ne peut pas être écrit comme mention @file ; le chemin a été copié",
+        copyMarkdown: "Copier la citation Markdown", copiedMarkdown: "Citation Markdown copiée", copyRefShort: "Copier la réf.",
+        evidenceTitle: "Détails de la preuve", evidenceClose: "Fermer les détails de la preuve",
+        evidenceHint: "Cliquez sur un résultat ou appuyez sur Ctrl+I pour inspecter sa réf., sa fraîcheur et ses permissions.",
+        evidenceKind: "Type", evidenceRef: "Réf.", evidenceTitleField: "Titre", evidenceFreshness: "Fraîcheur",
+        evidencePermissions: "Autorisations", evidenceHash: "Empreinte", evidenceNoHash: "non signalée",
+        evidenceSession: "ID de session", evidenceMessage: "ID de message", evidenceMention: "Insérer la mention",
+        evidenceObserved: "observé {time}",
+        freshnessFresh: "à jour", freshnessStale: "périmée", freshnessMissing: "absente", freshnessUnknown: "inconnue",
+        permissionAllowed: "autorisé", permissionDenied: "refusé",
+        evidenceStaleHint: "Cette preuve a changé après son indexation ; relancez la recherche avant de la citer.",
+        evidenceMissingHint: "La cible indexée n’existe plus ; l’ouverture et la localisation échoueront.",
+        evidenceDeniedHint: "L’espace de travail actuel n’est pas autorisé à lire cette preuve ; les actions sont désactivées.",
+        evidenceUnknownHint: "L’hôte n’a pas signalé la fraîcheur de ce résultat ; il ne reflète que l’instantané de l’index.",
+        evidenceOpenFile: "Ouvrir le fichier", evidenceOpenSession: "Ouvrir la session", evidenceReveal: "Localiser",
+        quickSwitchTitle: "Bascule rapide",
+        quickSwitchHint: "Collez une référence de preuve (ref://…) ou une mention @chemin / @session : Entrée l’ouvre ou y accède.",
+        quickSwitchInvalid: "Référence ou mention invalide : {value}",
+        quickSwitchUnsupported: "Le panneau ne peut pas ouvrir ce type de référence : {kind}",
+        openAction: "Ouvrir",
+        errorMissingTarget: "la cible n’existe plus", errorOutsideRoots: "le chemin est hors des racines indexées",
+        errorNotAFile: "la cible n’est pas un fichier ordinaire",
+        openFailed: "Échec de l’ouverture : {reason}", revealFailed: "Échec de la localisation : {reason}",
       },
       de: {
         scopeContent: "Inhalt",
@@ -851,7 +1049,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         insertFailed: "Einfügen fehlgeschlagen; @file kopiert",
         jumped: "Sitzung geöffnet",
         jumpFailed: "Sitzung geöffnet, Treffer aber nicht gefunden",
-        footer: "↑↓ auswählen · Enter öffnen/springen · Ctrl+Shift+C Pfad kopieren · Ctrl+O öffnen · Alt+1–3 Bereiche · Esc schließen",
+        footer: "↑↓ auswählen · Enter öffnen/springen · Ctrl+Enter @-Erwähnung einfügen · Ctrl+I Evidenz · Ctrl+Shift+C Pfad kopieren · Ctrl+O öffnen · Alt+1–3 Bereiche · Esc schließen",
         results: "Inhalt {content} · Dateien {files} · Ordner {dirs} · {ms} ms",
         launcher: "Lokale Dateisuche (Ctrl+Shift+F)",
         justNow: "gerade eben",
@@ -929,6 +1127,31 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportDone: "Exportiert",
         exportFailed: "Export fehlgeschlagen",
         includeArchived: "Archivierte Sitzungen", contentToolResultsIndex: "Tool-Ergebnisse indiziert",
+        insertFile: "@file einfügen", insertSession: "@session-Erwähnung einfügen",
+        insertedSession: "@session-Erwähnung eingefügt", insertSessionFailed: "Einfügen fehlgeschlagen; @session-Erwähnung kopiert",
+        mentionUnsupported: "Dieser Pfad lässt sich nicht als @file-Erwähnung schreiben; der Pfad wurde kopiert",
+        copyMarkdown: "Markdown-Zitat kopieren", copiedMarkdown: "Markdown-Zitat kopiert", copyRefShort: "Referenz kopieren",
+        evidenceTitle: "Evidenzdetails", evidenceClose: "Evidenzdetails schließen",
+        evidenceHint: "Klicke ein Ergebnis an oder drücke Ctrl+I, um Referenz, Frische und Berechtigungen zu prüfen.",
+        evidenceKind: "Art", evidenceRef: "Referenz", evidenceTitleField: "Titel", evidenceFreshness: "Frische",
+        evidencePermissions: "Berechtigungen", evidenceHash: "Prüfsumme", evidenceNoHash: "nicht gemeldet",
+        evidenceSession: "Sitzungs-ID", evidenceMessage: "Nachrichten-ID", evidenceMention: "Erwähnung einfügen",
+        evidenceObserved: "beobachtet {time}",
+        freshnessFresh: "aktuell", freshnessStale: "veraltet", freshnessMissing: "fehlend", freshnessUnknown: "unbekannt",
+        permissionAllowed: "erlaubt", permissionDenied: "verweigert",
+        evidenceStaleHint: "Diese Evidenz hat sich nach der Indexierung geändert; suche vor dem Zitieren erneut.",
+        evidenceMissingHint: "Das indexierte Ziel existiert nicht mehr; Öffnen und Anzeigen werden fehlschlagen.",
+        evidenceDeniedHint: "Der aktuelle Arbeitsbereich darf diese Evidenz nicht lesen; Aktionen sind deaktiviert.",
+        evidenceUnknownHint: "Der Host meldet für diesen Treffer keine Frische; er spiegelt nur den Index-Snapshot wider.",
+        evidenceOpenFile: "Datei öffnen", evidenceOpenSession: "Sitzung öffnen", evidenceReveal: "Anzeigen",
+        quickSwitchTitle: "Schnellwechsel",
+        quickSwitchHint: "Füge eine Evidenzreferenz (ref://…) oder eine @Pfad- / @Sitzung-Erwähnung ein: Enter öffnet sie.",
+        quickSwitchInvalid: "Keine gültige Evidenzreferenz oder Erwähnung: {value}",
+        quickSwitchUnsupported: "Diese Referenzart kann das Panel nicht öffnen: {kind}",
+        openAction: "Öffnen",
+        errorMissingTarget: "das Ziel existiert nicht mehr", errorOutsideRoots: "der Pfad liegt außerhalb der indizierten Wurzeln",
+        errorNotAFile: "das Ziel ist keine reguläre Datei",
+        openFailed: "Öffnen fehlgeschlagen: {reason}", revealFailed: "Anzeigen fehlgeschlagen: {reason}",
       },
       ru: {
         scopeContent: "Содержимое",
@@ -995,7 +1218,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         insertFailed: "Вставка не удалась; @file скопирован",
         jumped: "Сессия открыта",
         jumpFailed: "Сессия открыта, но совпадение не найдено",
-        footer: "↑↓ выбрать · Enter открыть/перейти · Ctrl+Shift+C копировать путь · Ctrl+O открыть · Alt+1–3 области · Esc закрыть",
+        footer: "↑↓ выбрать · Enter открыть/перейти · Ctrl+Enter вставить упоминание @ · Ctrl+I доказательство · Ctrl+Shift+C копировать путь · Ctrl+O открыть · Alt+1–3 области · Esc закрыть",
         results: "содержимое {content} · файлы {files} · папки {dirs} · {ms} мс",
         launcher: "Локальный поиск файлов (Ctrl+Shift+F)",
         justNow: "только что",
@@ -1073,6 +1296,31 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         exportDone: "Экспортировано",
         exportFailed: "Не удалось экспортировать",
         includeArchived: "Архивные сессии", contentToolResultsIndex: "результаты инструментов",
+        insertFile: "Вставить @file", insertSession: "Вставить упоминание @session",
+        insertedSession: "Упоминание @session вставлено", insertSessionFailed: "Вставка не удалась; упоминание @session скопировано",
+        mentionUnsupported: "Этот путь нельзя записать как упоминание @file; путь скопирован",
+        copyMarkdown: "Копировать цитату Markdown", copiedMarkdown: "Цитата Markdown скопирована", copyRefShort: "Копировать ссылку",
+        evidenceTitle: "Детали доказательства", evidenceClose: "Закрыть детали доказательства",
+        evidenceHint: "Нажмите на результат или Ctrl+I, чтобы увидеть ссылку, актуальность и права.",
+        evidenceKind: "Тип", evidenceRef: "Ссылка", evidenceTitleField: "Заголовок", evidenceFreshness: "Актуальность",
+        evidencePermissions: "Права", evidenceHash: "Хеш", evidenceNoHash: "не сообщается",
+        evidenceSession: "ID сессии", evidenceMessage: "ID сообщения", evidenceMention: "Вставить упоминание",
+        evidenceObserved: "наблюдалось {time}",
+        freshnessFresh: "актуально", freshnessStale: "устарело", freshnessMissing: "отсутствует", freshnessUnknown: "неизвестно",
+        permissionAllowed: "разрешено", permissionDenied: "запрещено",
+        evidenceStaleHint: "Доказательство изменилось после индексации; повторите поиск перед цитированием.",
+        evidenceMissingHint: "Проиндексированный объект больше не существует; открытие и поиск не удадутся.",
+        evidenceDeniedHint: "Текущее рабочее пространство не имеет права читать это доказательство; действия отключены.",
+        evidenceUnknownHint: "Хост не сообщил актуальность для этого результата; показан только снимок индекса.",
+        evidenceOpenFile: "Открыть файл", evidenceOpenSession: "Открыть сессию", evidenceReveal: "Показать в папке",
+        quickSwitchTitle: "Быстрый переход",
+        quickSwitchHint: "Вставьте ссылку на доказательство (ref://…) или упоминание @путь / @сессия: Enter откроет или перейдёт.",
+        quickSwitchInvalid: "Это не допустимая ссылка или упоминание: {value}",
+        quickSwitchUnsupported: "Панель не может открыть этот тип ссылки: {kind}",
+        openAction: "Открыть",
+        errorMissingTarget: "объект больше не существует", errorOutsideRoots: "путь вне проиндексированных корней",
+        errorNotAFile: "объект не является обычным файлом",
+        openFailed: "Не удалось открыть: {reason}", revealFailed: "Не удалось показать: {reason}",
       },
     }
     const LANG = (() => {
@@ -1146,19 +1394,358 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
       })
     }
 
+    // ── evidence refs: official @file/@session interop ──────────────────────
+    // The host composer owns fixed mention grammars (file-reference: `@path` /
+    // `@"path with spaces"`; session-reference: `@[label](dsh-session:<b64url>)`).
+    // These helpers reproduce them byte-for-byte, map `ref://file` back to the
+    // `@path` grammar, and turn one hit (or one pasted ref) into the evidence
+    // model the detail pane and Quick Switch render.
+    /** Encode a session id exactly like the host's `encodeSessionReferenceUri`. */
+    function encodeSessionRefId(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return null
+      try {
+        const bytes = new TextEncoder().encode(JSON.stringify(sessionId))
+        let binary = ''
+        for (let index = 0; index < bytes.length; index++) binary += String.fromCharCode(bytes[index])
+        if (typeof btoa !== 'function') return null
+        const encoded = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+        return encoded === '' ? null : 'dsh-session:' + encoded
+      } catch { return null }
+    }
+
+    /** Decode a canonical `dsh-session:` URI back to its id (null when not canonical). */
+    function decodeSessionRefId(ref) {
+      if (typeof ref !== 'string' || !ref.startsWith('dsh-session:')) return null
+      const payload = ref.slice('dsh-session:'.length)
+      if (payload === '' || !/^[A-Za-z0-9_-]+$/.test(payload)) return null
+      try {
+        const padded = payload.replace(/-/g, '+').replace(/_/g, '/')
+        const full = padded + '='.repeat((4 - padded.length % 4) % 4)
+        const binary = typeof atob === 'function' ? atob(full) : ''
+        const bytes = new Uint8Array(binary.length)
+        for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+        const sessionId = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+        if (typeof sessionId !== 'string' || sessionId === '') return null
+        return encodeSessionRefId(sessionId) === ref ? sessionId : null
+      } catch { return null }
+    }
+
+    /** Decode one base64url JSON string parameter (`sid` in event/spill refs). */
+    function decodeSessionIdParamValue(value) {
+      if (typeof value !== 'string' || value === '' || !/^[A-Za-z0-9_-]+$/.test(value)) return null
+      try {
+        const padded = value.replace(/-/g, '+').replace(/_/g, '/')
+        const full = padded + '='.repeat((4 - padded.length % 4) % 4)
+        const binary = typeof atob === 'function' ? atob(full) : ''
+        const bytes = new Uint8Array(binary.length)
+        for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+        const sessionId = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+        return typeof sessionId === 'string' && sessionId !== '' ? sessionId : null
+      } catch { return null }
+    }
+
+    /** Format one file path with the host's official `@file` grammar. */
+    function fileMentionFor(path) {
+      if (typeof path !== 'string' || path === '') return null
+      if (/[\u0000-\u001f\u007f-\u009f"]/u.test(path)) return null
+      return /\s/u.test(path) ? '@"' + path + '"' : '@' + path
+    }
+
+    /** Format one directory with the host's `@folder` grammar (trailing slash). */
+    function folderMentionFor(path) {
+      if (typeof path !== 'string' || path === '') return null
+      const directory = /[\\/]$/.test(path) ? path : path + '/'
+      if (/[\u0000-\u001f\u007f-\u009f"]/u.test(directory)) return null
+      return /\s/u.test(directory) ? '@"' + directory + '"' : '@' + directory
+    }
+
+    /** Parse a complete `@path`/`@"path"` mention (null outside that grammar). */
+    function parseFileMention(text) {
+      const value = typeof text === 'string' ? text.trim() : ''
+      if (value.length < 2 || value.charAt(0) !== '@' || value.startsWith('@[')) return null
+      if (value.charAt(1) === '"') {
+        if (value.length < 4 || !value.endsWith('"')) return null
+        const inner = value.slice(2, -1)
+        if (inner === '' || inner.includes('"') || /[\u0000-\u001f\u007f-\u009f]/u.test(inner)) return null
+        return inner
+      }
+      // The host strips sentence punctuation after an unquoted path token.
+      const token = value.slice(1).replace(/[.,;:!?\u3002\u3001\uff1b\uff1a\uff01\uff1f]+$/u, '')
+      return token === '' || /\s/u.test(token) || /[\u0000-\u001f\u007f-\u009f]/u.test(token) ? null : token
+    }
+
+    /** Parse a complete official `@[label](dsh-session:…)` session mention. */
+    function parseSessionMention(text) {
+      const value = typeof text === 'string' ? text.trim() : ''
+      const match = /^@\[((?:\\.|[^\\\]])*)\]\((dsh-session:[^\s)]*)\)$/u.exec(value)
+      if (match === null) return null
+      const sessionId = decodeSessionRefId(match[2])
+      if (sessionId === null) return null
+      return { ref: match[2], sessionId, label: match[1].replace(/\\(.)/gu, '$1') }
+    }
+
+    /** Build the canonical `ref://file` URI for one path (mirrors src/refs.ts fileRef). */
+    function fileRefForPath(path) {
+      if (typeof path !== 'string' || path === '') return null
+      return 'ref://file?' + new URLSearchParams({ path }).toString()
+    }
+
+    /** Parse one evidence ref URI into its identity fields (null when unsupported). */
+    function parseRefUri(ref) {
+      if (typeof ref !== 'string' || ref === '') return null
+      const sessionId = decodeSessionRefId(ref)
+      if (sessionId !== null) return { kind: 'session', ref, sessionId }
+      if (!ref.startsWith('ref://')) return null
+      let url
+      try { url = new URL(ref) } catch { return null }
+      const digest = () => {
+        const value = (url.searchParams.get('sha256') || '').toLowerCase()
+        return /^[0-9a-f]{64}$/.test(value) ? value : ''
+      }
+      if (url.host === 'file') {
+        const path = url.searchParams.get('path') || ''
+        if (path === '') return null
+        const sha256 = digest()
+        return { kind: 'file', ref, path, ...(sha256 === '' ? {} : { sha256 }) }
+      }
+      if (url.host === 'url') {
+        const target = url.searchParams.get('url') || url.searchParams.get('u') || ''
+        if (target === '') return null
+        const sha256 = digest()
+        return { kind: 'url', ref, url: target, ...(sha256 === '' ? {} : { sha256 }) }
+      }
+      if (url.host === 'session-event') {
+        // Mirror src/refs.ts: a missing seq parameter reads as 0 there too.
+        const sid = decodeSessionIdParamValue(url.searchParams.get('sid'))
+        const seq = Number(url.searchParams.get('seq') ?? '')
+        if (sid === null || !Number.isInteger(seq) || seq < 0) return null
+        return { kind: 'session-event', ref, sessionId: sid, seq }
+      }
+      if (url.host === 'spill') {
+        // Mirror src/refs.ts: a missing seq is omitted, not zero.
+        const path = url.searchParams.get('path') || ''
+        if (path === '') return null
+        const sid = decodeSessionIdParamValue(url.searchParams.get('sid'))
+        const seqRaw = url.searchParams.get('seq')
+        const seq = seqRaw === null ? -1 : Number(seqRaw)
+        return { kind: 'spill', ref, path, ...(sid === null ? {} : { sessionId: sid }), ...(Number.isInteger(seq) && seq >= 0 ? { seq } : {}) }
+      }
+      if (url.host === 'attachment') {
+        const sha256 = (url.searchParams.get('sha256') || '').toLowerCase()
+        if (!/^[0-9a-f]{64}$/.test(sha256)) return null
+        return { kind: 'attachment', ref, sha256 }
+      }
+      return null
+    }
+
+    /** Last path segment, for a readable evidence title. */
+    function baseNameOf(path) {
+      const parts = String(path).split(/[\\/]/u).filter(part => part !== '')
+      return parts.length === 0 ? '' : parts[parts.length - 1]
+    }
+
+    /** Render one session mention with the host's label escaping. */
+    function sessionMentionFor(ref, label) {
+      if (typeof ref !== 'string' || !ref.startsWith('dsh-session:')) return null
+      const value = typeof label === 'string' && label !== '' ? label : ref.slice('dsh-session:'.length)
+      return '@[' + value.replace(/[\\\]]/gu, match => '\\' + match) + '](' + ref + ')'
+    }
+
+    /** Validate/read the additive `freshness` block a hit may carry. */
+    function normalizeFreshness(value) {
+      if (value === null || typeof value !== 'object') return null
+      const state = value.state
+      if (state !== 'fresh' && state !== 'stale' && state !== 'missing' && state !== 'unknown') return null
+      return {
+        state,
+        ...(typeof value.observedAt === 'number' && Number.isFinite(value.observedAt) ? { observedAt: value.observedAt } : {}),
+        ...(typeof value.mtime === 'number' && Number.isFinite(value.mtime) ? { mtime: value.mtime } : {}),
+      }
+    }
+
+    /** Validate/read the additive `permissions` block a hit may carry. */
+    function normalizePermissions(value) {
+      if (value === null || typeof value !== 'object') return null
+      if (value.read !== 'allowed' && value.read !== 'denied') return null
+      const visibility = value.visibility
+      if (visibility !== 'workspace' && visibility !== 'roots' && visibility !== 'session' && visibility !== 'external') return null
+      return { read: value.read, visibility, reason: typeof value.reason === 'string' ? value.reason : '' }
+    }
+
+    /** Permissions implied by the scope a hit was returned from (no server block). */
+    function defaultPermissionsFor(kind) {
+      if (kind === 'session' || kind === 'session-event') return { read: 'allowed', visibility: 'session', reason: '' }
+      if (kind === 'file' || kind === 'dir' || kind === 'spill') return { read: 'allowed', visibility: 'roots', reason: '' }
+      return { read: 'allowed', visibility: 'external', reason: '' }
+    }
+
+    /** One-line Markdown citation for an evidence model ('' when it has no address). */
+    function markdownCitationFor(model) {
+      if (model === null || typeof model !== 'object') return ''
+      const target = model.kind === 'url' && typeof model.url === 'string' && model.url !== ''
+        ? model.url
+        : typeof model.sessionRef === 'string' && model.sessionRef !== '' ? model.sessionRef : model.ref
+      if (typeof target !== 'string' || target === '') return ''
+      const label = (typeof model.title === 'string' && model.title !== '' ? model.title : target).replace(/[\\\]]/gu, match => '\\' + match)
+      return '[' + label + '](' + target + ')'
+    }
+
+    /**
+     * Normalize one panel hit into the evidence detail model. Server-reported
+     * freshness/permissions/hash win; when the host does not report them the
+     * model still exposes a derived view (scope permissions, unknown freshness).
+     */
+    function evidenceForHit(group, hit) {
+      const record = hit !== null && typeof hit === 'object' ? hit : {}
+      const ref = typeof record.ref === 'string' ? record.ref : ''
+      const parsed = parseRefUri(ref)
+      const parsedSession = parsed !== null && (parsed.kind === 'session' || parsed.kind === 'session-event')
+      const isSession = parsed !== null ? parsedSession : group === 'content' && record.kind === 'session'
+      const kind = parsed !== null
+        ? parsed.kind
+        : isSession ? 'session'
+          : record.dir === true || group === 'dirs' ? 'dir'
+            : group === 'files' || group === 'content' ? 'file' : 'unknown'
+      const path = typeof record.path === 'string' && record.path !== ''
+        ? record.path
+        : parsed !== null && (parsed.kind === 'file' || parsed.kind === 'spill') ? parsed.path : ''
+      const url = parsed !== null && parsed.kind === 'url' ? parsed.url : ''
+      const sessionId = parsedSession ? parsed.sessionId : typeof record.sessionId === 'string' ? record.sessionId : ''
+      const sessionRef = parsed !== null && parsed.kind === 'session'
+        ? ref
+        : sessionId === '' ? '' : (encodeSessionRefId(sessionId) || '')
+      const hashValue = typeof record.hash === 'string'
+        ? record.hash
+        : record.hash !== null && typeof record.hash === 'object' && typeof record.hash.value === 'string' ? record.hash.value : ''
+      const reportedHash = /^[0-9a-fA-F]{64}$/.test(hashValue) ? hashValue.toLowerCase() : ''
+      const refHash = parsed !== null && typeof parsed.sha256 === 'string' ? parsed.sha256 : ''
+      const hash = reportedHash !== '' ? reportedHash : refHash
+      const title = typeof record.title === 'string' && record.title !== ''
+        ? record.title
+        : typeof record.name === 'string' && record.name !== ''
+          ? record.name
+          : path !== '' ? baseNameOf(path) : sessionId !== '' ? sessionId : url !== '' ? url : ref
+      const mention = isSession
+        ? (sessionRef === '' ? null : sessionMentionFor(sessionRef, title))
+        : path === '' ? null : kind === 'dir' ? folderMentionFor(path) : fileMentionFor(path)
+      const reportedFreshness = normalizeFreshness(record.freshness)
+      const reportedPermissions = normalizePermissions(record.permissions)
+      const freshness = reportedFreshness === null ? { state: 'unknown' } : reportedFreshness
+      const permissions = reportedPermissions === null ? defaultPermissionsFor(kind) : reportedPermissions
+      const denied = permissions.read === 'denied'
+      const messageId = typeof record.messageId === 'string' ? record.messageId : ''
+      const model = {
+        ref, kind, title, path, url, sessionId, sessionRef, messageId, hash, hashShort: hash.slice(0, 12),
+        freshness, permissions, mention, denied,
+        freshnessReported: reportedFreshness !== null,
+        permissionsReported: reportedPermissions !== null,
+        canOpen: kind === 'file' && path !== '' && !denied,
+        canReveal: (kind === 'file' || kind === 'dir') && path !== '' && !denied,
+        canJump: isSession && sessionId !== '',
+      }
+      model.cite = markdownCitationFor(model)
+      return model
+    }
+
+    /**
+     * Recognize a pasted evidence token instead of a search query: a supported
+     * ref URI, an official `@path` mention, or a `@[label](dsh-session:…)`
+     * mention. Ordinary queries return null so search behaviour is unchanged.
+     */
+    function parseQuickSwitch(query) {
+      const value = typeof query === 'string' ? query.trim() : ''
+      if (value === '') return null
+      const sessionMention = parseSessionMention(value)
+      if (sessionMention !== null) {
+        return { mode: 'session', ref: sessionMention.ref, sessionId: sessionMention.sessionId, label: sessionMention.label }
+      }
+      const path = parseFileMention(value)
+      if (path !== null) return { mode: 'file', ref: fileRefForPath(path) || '', path }
+      const parsed = parseRefUri(value)
+      if (parsed !== null) {
+        if (parsed.kind === 'file' || parsed.kind === 'spill') return { mode: 'file', ref: value, path: parsed.path }
+        if (parsed.kind === 'session' || parsed.kind === 'session-event') return { mode: 'session', ref: value, sessionId: parsed.sessionId, label: '' }
+        if (parsed.kind === 'url') return { mode: 'url', ref: value, url: parsed.url }
+        return { mode: 'unsupported', ref: value, kind: parsed.kind }
+      }
+      if (/^ref:\/\//iu.test(value) || /^dsh-session:/iu.test(value) || /^@\[/u.test(value)) {
+        return { mode: 'invalid', ref: value }
+      }
+      return null
+    }
+    /** Resolve the live composer input, preferring the host's composer seat. */
+    function composerTarget() {
+      const selectors = [
+        '[data-composer-seat] [data-composer-input]',
+        '[data-composer-seat] [contenteditable="true"]',
+        '[data-composer-seat] [role="textbox"]',
+        '[data-composer-input]',
+        '[contenteditable="true"][role="textbox"]',
+      ]
+      for (const selector of selectors) {
+        const element = document.querySelector(selector)
+        if (element !== null && element.closest('.dsh-locator-panel') === null) return element
+      }
+      // Older hosts have no composer-seat marker; any editable surface outside
+      // this panel is still a better target than the panel's own search box.
+      const candidates = document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]')
+      for (const element of candidates) {
+        if (element.closest('.dsh-locator-panel') !== null || element.closest('.dsh-locator-findbar') !== null) continue
+        if (element.disabled === true || element.readOnly === true) continue
+        return element
+      }
+      return null
+    }
+
+    /** Put a collapsed caret at the end when the composer has no usable selection. */
+    function ensureCaret(element) {
+      if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
+        if (typeof element.selectionStart !== 'number') return null
+        return { start: element.selectionStart, end: typeof element.selectionEnd === 'number' ? element.selectionEnd : element.selectionStart }
+      }
+      const selection = typeof window.getSelection === 'function' ? window.getSelection() : null
+      if (selection === null) return null
+      if (selection.rangeCount > 0 && element.contains(selection.getRangeAt(0).commonAncestorContainer)) return null
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      range.collapse(false)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      return null
+    }
+
     function insertIntoComposer(text) {
-      const element = document.querySelector('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]')
-      if (!element) return false
+      const element = composerTarget()
+      if (element === null) return false
       element.focus()
       if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
-        const start = typeof element.selectionStart === 'number' ? element.selectionStart : element.value.length
-        const end = typeof element.selectionEnd === 'number' ? element.selectionEnd : start
+        const range = ensureCaret(element)
+        const start = range === null ? element.value.length : range.start
+        const end = range === null ? start : range.end
         if (typeof element.setRangeText === 'function') element.setRangeText(text, start, end, 'end')
         else element.value = element.value.slice(0, start) + text + element.value.slice(end)
         element.dispatchEvent(new Event('input', { bubbles: true }))
         return true
       }
-      return document.execCommand('insertText', false, text)
+      ensureCaret(element)
+      if (typeof document.execCommand === 'function' && document.execCommand('insertText', false, text)) return true
+      // Fallback for engines without execCommand: insert the text node into the
+      // current range and let the host's input listener reconcile the draft.
+      const selection = typeof window.getSelection === 'function' ? window.getSelection() : null
+      if (selection === null || selection.rangeCount === 0) return false
+      const range = selection.getRangeAt(0)
+      const node = document.createTextNode(text)
+      range.deleteContents()
+      range.insertNode(node)
+      range.setStartAfter(node)
+      range.collapse(true)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      const inputEvent = typeof InputEvent === 'function'
+        ? new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+        : new Event('input', { bubbles: true })
+      element.dispatchEvent(inputEvent)
+      return true
     }
 
     function formatSize(bytes) {
@@ -2491,6 +3078,7 @@ self.onmessage = event => {
       const [toast, setToast] = useState('')
       const [refreshTick, setRefreshTick] = useState(0)
       const [view, setView] = useState('search')
+      const [evidenceOpen, setEvidenceOpen] = useState(false)
       const [capIntent, setCapIntent] = useState('')
       const [capBusy, setCapBusy] = useState(false)
       const [capResult, setCapResult] = useState(null)
@@ -2669,6 +3257,26 @@ self.onmessage = event => {
         return out
       }, [groups, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs, filter])
       const rowIndexByKey = useMemo(() => new Map(rows.map((entry, index) => [panelHitKey(entry.group, entry.hit), index])), [rows])
+      // A pasted evidence token in the search box turns into a one-line Quick
+      // Switch instead of being sent to the name/content engines unchanged.
+      const quickSwitch = useMemo(() => parseQuickSwitch(query), [query])
+      const quickEvidence = useMemo(() => {
+        if (quickSwitch === null) return null
+        if (quickSwitch.mode === 'session') {
+          return evidenceForHit('content', {
+            kind: 'session', ref: quickSwitch.ref, sessionId: quickSwitch.sessionId,
+            title: quickSwitch.label || quickSwitch.sessionId,
+          })
+        }
+        if (quickSwitch.mode === 'url') return evidenceForHit('content', { ref: quickSwitch.ref, title: quickSwitch.url, url: quickSwitch.url })
+        if (quickSwitch.mode !== 'file') return null
+        return evidenceForHit('files', { ref: quickSwitch.ref, path: quickSwitch.path, title: baseNameOf(quickSwitch.path) })
+      }, [quickSwitch])
+      const evidence = useMemo(() => {
+        if (!evidenceOpen || rows.length === 0) return null
+        const entry = rows[Math.min(Math.max(0, selected), rows.length - 1)]
+        return evidenceForHit(entry.group, entry.hit)
+      }, [evidenceOpen, rows, selected])
 
       useEffect(() => {
         setSelected(value => Math.min(Math.max(0, value), Math.max(0, rows.length - 1)))
@@ -2692,8 +3300,81 @@ self.onmessage = event => {
 
       const copy = useCallback(hit => {
         if (!hit) return
-        copyText(hit.path).then(() => notify(t('copiedPath'))).catch(() => {})
+        const value = typeof hit.path === 'string' && hit.path !== ''
+          ? hit.path
+          : typeof hit.sessionId === 'string' ? hit.sessionId : ''
+        if (value === '') return
+        copyText(value).then(() => notify(t('copiedPath'))).catch(() => {})
       }, [notify])
+
+      // The panel never invents an error string for a failed open/locate: known
+      // route errors get the localized reason, anything else stays verbatim.
+      const actionErrorText = useCallback(cause => {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        if (message === 'path does not exist') return t('errorMissingTarget')
+        if (message === 'path is outside the indexed roots') return t('errorOutsideRoots')
+        if (message === 'not a file' || message === 'not a file or directory') return t('errorNotAFile')
+        return message
+      }, [])
+      const openPath = useCallback((path, line) => post('/dsh-locator/open', { path, line }).then(() => true).catch(cause => {
+        showNotice(t('openFailed', { reason: actionErrorText(cause) }))
+        return false
+      }), [actionErrorText])
+      const revealPath = useCallback(path => post('/dsh-locator/reveal', { path }).then(() => true).catch(cause => {
+        showNotice(t('revealFailed', { reason: actionErrorText(cause) }))
+        return false
+      }), [actionErrorText])
+      const insertMention = useCallback((mention, successKey, failureKey) => {
+        if (typeof mention !== 'string' || mention === '') return
+        close()
+        clearTimeout(insertTimerRef.current)
+        insertTimerRef.current = setTimeout(() => {
+          if (insertIntoComposer(mention + ' ')) showNotice(t(successKey))
+          else copyText(mention).then(() => showNotice(t(failureKey))).catch(() => {})
+        }, 80)
+      }, [close])
+      // Session evidence uses the host's Markdown mention; a denied target or a
+      // path the grammar cannot represent falls back to copying, never to a
+      // malformed token.
+      const insertEvidence = useCallback(model => {
+        if (model === null || model === undefined) return
+        if (model.mention === null) {
+          // The grammar cannot represent this path (quote/control characters);
+          // copy the address so the action still produces something usable.
+          const fallback = model.path !== '' ? model.path : model.ref
+          if (fallback === '') { notify(t('mentionUnsupported')); return }
+          copyText(fallback).then(() => notify(t('mentionUnsupported'))).catch(() => notify(t('mentionUnsupported')))
+          return
+        }
+        const session = model.kind === 'session' || model.kind === 'session-event'
+        insertMention(model.mention, session ? 'insertedSession' : 'inserted', session ? 'insertSessionFailed' : 'insertFailed')
+      }, [insertMention, notify])
+      const openEvidence = useCallback(model => {
+        if (model === null || model === undefined) return
+        if (model.denied) { notify(t('evidenceDeniedHint')); return }
+        if (model.canJump) {
+          if (!workspaceService || typeof workspaceService.openSession !== 'function') { notify(t('jumpFailed')); return }
+          close()
+          try {
+            workspaceService.openSession(model.sessionId)
+            showNotice(t('jumped'))
+          } catch { showNotice(t('jumpFailed')) }
+          return
+        }
+        if (model.canOpen) { openPath(model.path).then(ok => { if (ok) notify(t('opened')) }); return }
+        if (model.canReveal) { revealPath(model.path).then(ok => { if (ok) notify(t('revealed')) }); return }
+        notify(t('quickSwitchUnsupported', { kind: model.kind }))
+      }, [close, notify, openPath, revealPath])
+      const activateQuickSwitch = useCallback(() => {
+        if (quickEvidence !== null) { openEvidence(quickEvidence); return }
+        if (quickSwitch !== null && quickSwitch.mode === 'unsupported') {
+          notify(t('quickSwitchUnsupported', { kind: quickSwitch.kind }))
+          return
+        }
+        if (quickSwitch !== null && quickSwitch.mode === 'invalid') {
+          notify(t('quickSwitchInvalid', { value: quickSwitch.ref }))
+        }
+      }, [notify, openEvidence, quickEvidence, quickSwitch])
 
       const runCapabilitySearch = useCallback(async () => {
         const intent = capIntent.trim()
@@ -2819,19 +3500,24 @@ self.onmessage = event => {
       }, [notify, rows])
 
       const reveal = useCallback(hit => {
-        if (!hit || loading) return
-        post('/dsh-locator/reveal', { path: hit.path }).then(() => notify(t('revealed'))).catch(() => copy(hit))
-      }, [copy, loading, notify])
+        if (!hit || loading || typeof hit.path !== 'string' || hit.path === '') return
+        if (evidenceForHit('files', hit).denied) { notify(t('evidenceDeniedHint')); return }
+        revealPath(hit.path).then(ok => { if (ok) notify(t('revealed')) })
+      }, [loading, notify, revealPath])
 
       const openFile = useCallback(hit => {
-        if (!hit || hit.dir || loading) return
+        if (!hit || hit.dir || loading || typeof hit.path !== 'string' || hit.path === '') return
+        if (evidenceForHit('files', hit).denied) { notify(t('evidenceDeniedHint')); return }
         const line = typeof hit.line === 'number' ? hit.line : undefined
-        post('/dsh-locator/open', { path: hit.path, line }).then(() => notify(t('opened'))).catch(() => copy(hit))
-      }, [copy, loading, notify])
+        openPath(hit.path, line).then(ok => { if (ok) notify(t('opened')) })
+      }, [loading, notify, openPath])
 
       const activate = useCallback(hit => {
         if (!hit || loading) return
+        const model = evidenceForHit(hit.kind === 'session' ? 'content' : hit.dir ? 'dirs' : 'files', hit)
+        if (model.denied) { notify(t('evidenceDeniedHint')); return }
         if (hit.kind === 'session' && hit.sessionId) {
+          if (!workspaceService || typeof workspaceService.openSession !== 'function') { notify(t('jumpFailed')); return }
           close()
           void jumpToContentHit(hit, query, notify)
           return
@@ -2840,15 +3526,11 @@ self.onmessage = event => {
       }, [close, loading, notify, query, reveal])
 
       const insert = useCallback(hit => {
-        if (!hit || hit.kind === 'session' || loading) return
-        const mention = '@"' + hit.path.replace(/"/g, '') + '" '
-        close()
-        clearTimeout(insertTimerRef.current)
-        insertTimerRef.current = setTimeout(() => {
-          if (insertIntoComposer(mention)) notify(t('inserted'))
-          else copyText(mention).then(() => notify(t('insertFailed'))).catch(() => {})
-        }, 80)
-      }, [close, loading, notify])
+        if (!hit || loading) return
+        const isSession = hit.kind === 'session'
+        const model = evidenceForHit(isSession ? 'content' : hit.dir ? 'dirs' : 'files', hit)
+        insertEvidence(model)
+      }, [insertEvidence, loading])
 
       const toggleScope = useCallback(key => {
         if (key === 'content' && !availableContent) return
@@ -2858,7 +3540,9 @@ self.onmessage = event => {
       const onKeyDown = useCallback(event => {
         if (event.key === 'Escape') {
           event.preventDefault()
-          close()
+          // Esc unwinds one layer at a time: evidence details first, panel second.
+          if (evidenceOpen) setEvidenceOpen(false)
+          else close()
           return
         }
         if (event.key === 'Tab') {
@@ -2908,10 +3592,23 @@ self.onmessage = event => {
         }
         if (event.key === 'Enter' && !event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey) {
           event.preventDefault()
-          activate(rows[selected]?.hit)
+          // A pasted ref/mention is a command, not a query: with no result rows
+          // Enter switches to it instead of doing nothing.
+          if (rows.length === 0 && quickSwitch !== null) activateQuickSwitch()
+          else activate(rows[selected]?.hit)
+          return
+        }
+        if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === 'Enter' && !event.isComposing) {
+          event.preventDefault()
+          activateQuickSwitch()
           return
         }
         const modifier = event.ctrlKey || event.metaKey
+        if (modifier && !event.shiftKey && String(event.key).toLowerCase() === 'i') {
+          event.preventDefault()
+          setEvidenceOpen(value => !value)
+          return
+        }
         if (modifier && event.shiftKey && String(event.key).toLowerCase() === 'c') {
           event.preventDefault()
           copy(rows[selected]?.hit)
@@ -2931,7 +3628,7 @@ self.onmessage = event => {
           event.preventDefault()
           insert(rows[selected]?.hit)
         }
-      }, [activate, close, copy, insert, loading, openFile, reveal, rows, selected, toggleScope])
+      }, [activate, activateQuickSwitch, close, copy, evidenceOpen, insert, loading, openFile, quickSwitch, reveal, rows, selected, toggleScope])
 
       useEffect(() => {
         const list = listRef.current
@@ -3077,6 +3774,13 @@ self.onmessage = event => {
         // URL refs are metadata-only evidence; show the readable URL instead of
         // the opaque "ref" label and keep origin/title in the tooltip.
         const urlRef = typeof hit.ref === 'string' ? parseUrlRefInfo(hit.ref) : null
+        const model = evidenceForHit(group, hit)
+        const stateBadge = model.denied
+          ? h('span', { className: 'dsh-locator-badge dsh-locator-badge-deny' }, t('permissionDenied'))
+          : model.freshness.state === 'stale' || model.freshness.state === 'missing'
+            ? h('span', { className: 'dsh-locator-fresh dsh-locator-fresh-' + model.freshness.state },
+              t(model.freshness.state === 'stale' ? 'freshnessStale' : 'freshnessMissing'))
+            : null
         const urlTitle = urlRef !== null && typeof hit.title === 'string' && hit.title !== '' ? hit.title : ''
         const refTitle = urlRef === null
           ? t('copyRef')
@@ -3089,13 +3793,16 @@ self.onmessage = event => {
           'data-index': index,
           className: 'dsh-locator-row' + (isContent ? ' dsh-locator-rowcontent' : '') + (index === selected ? ' sel' : ''),
           title: hit.path,
-          onClick: () => setSelected(index),
+          // Row click opens the evidence details; the same inspector is on
+          // Ctrl+I so keyboard-only users can reach it without the mouse.
+          onClick: () => { setSelected(index); setEvidenceOpen(true) },
           onMouseDown: event => event.preventDefault(),
           onDoubleClick: () => activate(hit),
         },
           h('div', { className: 'dsh-locator-title' },
             h('span', { className: 'dsh-locator-badge' + (isSession ? ' chat' : '') }, String(badge).slice(0, 6)),
             h('span', { className: 'dsh-locator-name' }, isSession ? name : highlight(name, query)),
+            stateBadge,
             h('span', { className: 'dsh-locator-meta', style: { marginLeft: 'auto' } }, meta),
           ),
           isContent && hit.snippet
@@ -3117,6 +3824,117 @@ self.onmessage = event => {
                 }, urlRef === null ? 'ref' : shortUrlLabel(urlRef.url))
               : null,
           ),
+        )
+      }
+
+      const freshnessLabel = state => {
+        if (state === 'fresh') return t('freshnessFresh')
+        if (state === 'stale') return t('freshnessStale')
+        if (state === 'missing') return t('freshnessMissing')
+        return t('freshnessUnknown')
+      }
+
+      // One-line command row for a pasted ref/mention; invalid input is a
+      // readable error instead of a silent empty result list.
+      const renderQuickSwitch = () => {
+        if (quickSwitch === null) return null
+        if (quickSwitch.mode === 'invalid') {
+          return h('div', { className: 'dsh-locator-quickswitch', role: 'alert', 'data-quick-switch': 'invalid' },
+            h('span', { className: 'dsh-locator-badge' }, t('quickSwitchTitle')),
+            h('span', { className: 'dsh-locator-quickswitch-text', title: quickSwitch.ref },
+              t('quickSwitchInvalid', { value: quickSwitch.ref })))
+        }
+        if (quickSwitch.mode === 'unsupported') {
+          return h('div', { className: 'dsh-locator-quickswitch', role: 'status', 'data-quick-switch': 'unsupported' },
+            h('span', { className: 'dsh-locator-badge' }, t('quickSwitchTitle')),
+            h('span', { className: 'dsh-locator-quickswitch-text' },
+              t('quickSwitchUnsupported', { kind: quickSwitch.kind })))
+        }
+        const target = quickEvidence === null
+          ? quickSwitch.ref
+          : (quickEvidence.path || quickEvidence.sessionId || quickEvidence.url || quickEvidence.title)
+        const actionable = quickEvidence !== null && (quickEvidence.canOpen || quickEvidence.canJump || quickEvidence.canReveal)
+        return h('div', { className: 'dsh-locator-quickswitch', role: 'group', 'aria-label': t('quickSwitchTitle'), 'data-quick-switch': quickSwitch.mode, title: t('quickSwitchHint') },
+          h('span', { className: 'dsh-locator-badge' }, t('quickSwitchTitle')),
+          quickEvidence === null ? null : h('span', { className: 'dsh-locator-badge' + (quickEvidence.kind === 'session' ? ' chat' : '') }, quickEvidence.kind),
+          // The tooltip carries the canonical address so ref://file <-> @path
+          // mapping is inspectable from the Quick Switch row itself.
+          h('span', {
+            className: 'dsh-locator-quickswitch-text',
+            title: quickEvidence !== null && quickEvidence.ref !== '' ? quickEvidence.ref : undefined,
+          }, String(target)),
+          quickEvidence !== null && quickEvidence.denied ? h('span', { className: 'dsh-locator-fresh denied' }, t('permissionDenied')) : null,
+          h('span', { className: 'grow' }),
+          actionable ? h('span', { className: 'dsh-locator-kbd' }, 'Enter') : null,
+          actionable
+            ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => openEvidence(quickEvidence) },
+              quickEvidence.canJump ? t('evidenceOpenSession') : quickEvidence.canOpen ? t('openAction') : t('evidenceReveal'))
+            : null,
+          quickEvidence !== null && quickEvidence.mention !== null
+            ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => insertEvidence(quickEvidence), title: quickEvidence.kind === 'session' ? t('insertSession') : t('insertFile') }, t('evidenceMention'))
+            : null,
+          quickEvidence !== null && quickEvidence.ref !== ''
+            ? h('button', { className: 'dsh-locator-dirbtn', title: t('copyRef'), onClick: () => copyText(quickEvidence.ref).then(() => notify(t('copiedRef'))).catch(() => {}) }, t('copyRefShort'))
+            : null,
+        )
+      }
+
+      // The evidence inspector: the selected row's normalized ref, freshness,
+      // permissions, hash prefix and session/message anchors, plus the three
+      // actions that make a hit actionable (copy ref, copy cite, insert mention).
+      const renderEvidence = () => {
+        if (evidence === null) return null
+        const fresh = freshnessLabel(evidence.freshness.state)
+        const hint = evidence.denied ? t('evidenceDeniedHint')
+          : evidence.freshness.state === 'stale' ? t('evidenceStaleHint')
+            : evidence.freshness.state === 'missing' ? t('evidenceMissingHint')
+              : evidence.freshnessReported ? '' : t('evidenceUnknownHint')
+        const observed = typeof evidence.freshness.observedAt === 'number'
+          ? t('evidenceObserved', { time: formatTime(evidence.freshness.observedAt) })
+          : ''
+        const field = (label, value, title) => h('div', { className: 'dsh-locator-evidence-field' },
+          h('span', { className: 'dsh-locator-evidence-label' }, label),
+          h('span', { className: 'dsh-locator-evidence-value', ...(title === undefined ? {} : { title }) }, value))
+        const action = evidence.denied ? null
+          : evidence.canOpen ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => openEvidence(evidence) }, t('evidenceOpenFile'))
+            : evidence.canJump ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => openEvidence(evidence) }, t('evidenceOpenSession'))
+              : evidence.canReveal ? h('button', { className: 'dsh-locator-dirbtn', onClick: () => openEvidence(evidence) }, t('evidenceReveal'))
+                : null
+        return h('div', {
+          className: 'dsh-locator-evidence',
+          id: 'dsh-locator-evidence',
+          role: 'region',
+          'aria-label': t('evidenceTitle'),
+          'data-evidence-kind': evidence.kind,
+          'data-evidence-freshness': evidence.freshness.state,
+          'data-evidence-permission': evidence.permissions.read,
+        },
+          h('div', { className: 'dsh-locator-evidence-head' },
+            h('span', { className: 'dsh-locator-badge' }, evidence.kind),
+            h('span', { className: 'dsh-locator-evidence-title', title: evidence.title }, evidence.title),
+            h('span', { className: 'dsh-locator-fresh dsh-locator-fresh-' + evidence.freshness.state + (evidence.denied ? ' denied' : '') }, fresh),
+            evidence.denied ? h('span', { className: 'dsh-locator-fresh denied' }, t('permissionDenied')) : null,
+            h('span', { className: 'grow' }),
+            evidence.ref === '' ? null : h('button', { className: 'dsh-locator-dirbtn', title: t('copyRef'), onClick: () => copyText(evidence.ref).then(() => notify(t('copiedRef'))).catch(() => {}) }, t('copyRefShort')),
+            evidence.cite === '' ? null : h('button', { className: 'dsh-locator-dirbtn', title: t('copyMarkdown'), onClick: () => copyText(evidence.cite).then(() => notify(t('copiedMarkdown'))).catch(() => {}) }, t('copyMarkdown')),
+            evidence.mention === null ? null : h('button', { className: 'dsh-locator-dirbtn', title: evidence.kind === 'session' ? t('insertSession') : t('insertFile'), onClick: () => insertEvidence(evidence) }, t('evidenceMention')),
+            action,
+            h('button', { className: 'dsh-locator-close', title: t('evidenceClose'), 'aria-label': t('evidenceClose'), onClick: () => setEvidenceOpen(false) }, '×'),
+          ),
+          h('div', { className: 'dsh-locator-evidence-grid' },
+            evidence.ref === '' ? null : field(t('evidenceRef'), evidence.ref),
+            field(t('evidenceTitleField'), evidence.title),
+            field(t('evidenceKind'), evidence.kind),
+            field(t('evidenceFreshness'), fresh + (observed === '' ? '' : ' · ' + observed)),
+            field(t('evidencePermissions'),
+              (evidence.permissions.read === 'denied' ? t('permissionDenied') : t('permissionAllowed')) + ' · ' + evidence.permissions.visibility,
+              evidence.permissions.reason === '' ? undefined : evidence.permissions.reason),
+            field(t('evidenceHash'), evidence.hashShort === '' ? t('evidenceNoHash') : evidence.hashShort,
+              evidence.hash === '' ? undefined : evidence.hash),
+            evidence.sessionId === '' ? null : field(t('evidenceSession'), evidence.sessionId),
+            evidence.messageId === '' ? null : field(t('evidenceMessage'), evidence.messageId),
+          ),
+          hint === '' ? null : h('div', { className: 'dsh-locator-evidence-hint', role: 'status' }, hint),
         )
       }
 
@@ -3315,6 +4133,7 @@ self.onmessage = event => {
           filter.trim() === '' ? null : h('span', { className: 'dsh-locator-count' }, String(rows.length)),
         ),
         sessionOnly ? h('div', { className: 'dsh-locator-groupempty' }, t('panelSessionHint')) : null,
+        renderQuickSwitch(),
         h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },
           view === 'capabilities'
             ? renderCapabilityView()
@@ -3332,6 +4151,7 @@ self.onmessage = event => {
                   renderGroup('dirs', t('groupDirs'), dirs),
                 ],
         ),
+        renderEvidence(),
         h('div', { className: 'dsh-locator-foot' },
           h('span', null, (loading ? t('loading') + ' · ' : '') + t('results', {
             content: contentCountText || '0',
@@ -3342,6 +4162,15 @@ self.onmessage = event => {
             + (status && status.scanning ? ' · ' + t('indexing') : '')
             + (contentBuilding ? ' · ' + t('indexing') : '')),
           h('span', { className: 'grow' }),
+          rows.length > 0
+            ? h('button', {
+                className: 'dsh-locator-dirbtn',
+                title: t('evidenceHint'),
+                'aria-pressed': evidenceOpen ? 'true' : 'false',
+                'aria-controls': 'dsh-locator-evidence',
+                onClick: () => setEvidenceOpen(value => !value),
+              }, t('evidenceTitle'))
+            : null,
           rows.length > 0
             ? h('button', { className: 'dsh-locator-dirbtn', onClick: copyAll, title: t('copyAll') }, t('copyAll'))
             : null,

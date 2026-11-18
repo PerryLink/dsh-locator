@@ -72,7 +72,8 @@ usage:
                  [--whole-word] QUERY...
   indexd status  --state DIR [--json]
   indexd serve   --state DIR [--root PATH...] [--exclude GLOB...] [--no-watch]
-                 [--refresh DUR] [--save-debounce DUR] [--save-max-interval DUR]
+                 [--refresh DUR] [--no-incremental-refresh]
+                 [--save-debounce DUR] [--save-max-interval DUR]
   indexd usn-probe [--volume C:] [--root 'C:\\Users\\me'] [--limit 10]
                    [--enumerate=false] [--json]
 
@@ -260,6 +261,7 @@ func cmdServe(args []string) error {
 	fs.Var(&excludes, "exclude", "base-name glob to skip (repeatable)")
 	noWatch := fs.Bool("no-watch", false, "disable filesystem watching")
 	refresh := fs.Duration("refresh", 0, "rebuild interval when no native watcher exists (0 disables; the plugin passes its configured value)")
+	noIncremental := fs.Bool("no-incremental-refresh", false, "rebuild the whole index on every periodic refresh instead of rescanning only unwatched roots")
 	saveDebounce := fs.Duration("save-debounce", 0, "write the snapshot after the index is quiet this long (0 = 60s)")
 	saveMax := fs.Duration("save-max-interval", 0, "force a snapshot write at most this long after changes (0 = 5m)")
 	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
@@ -297,11 +299,14 @@ func cmdServe(args []string) error {
 		Excludes:        excludes,
 		Watch:           !*noWatch,
 		RefreshInterval: *refresh,
-		SaveDebounce:    *saveDebounce,
-		SaveMaxInterval: *saveMax,
-		ScanWorkers:     *workers,
-		USN:             *useUSN,
-		Version:         version,
+		// Incremental refreshes are on by default; --no-incremental-refresh
+		// restores the pre-0.19.0 full rebuild behaviour.
+		DisableIncrementalRefresh: *noIncremental,
+		SaveDebounce:              *saveDebounce,
+		SaveMaxInterval:           *saveMax,
+		ScanWorkers:               *workers,
+		USN:                       *useUSN,
+		Version:                   version,
 	})
 	return srv.Run(ctx, os.Stdin, os.Stdout)
 }

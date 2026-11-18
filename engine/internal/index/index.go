@@ -23,6 +23,15 @@ type Index struct {
 	nDelet int
 	built  int64
 	gen    uint64
+
+	// py indexes the pinyin forms of names containing Han characters. It is
+	// derived state: the on-disk snapshot format is unchanged and the table is
+	// rebuilt from records on Load and after Compact.
+	py pinyinTable
+	// folded holds the NFKC + lower-case form of names that do not match their
+	// raw bytes (full-width forms, compatibility ideographs, non-ASCII case).
+	folded   map[int32]string
+	foldBits []uint64 // one bit per record id: folded[id] exists
 }
 
 // New creates an empty index.
@@ -126,7 +135,79 @@ func (ix *Index) appendLocked(name string, parent int32, info FileInfo, frn uint
 	ix.recs = append(ix.recs, rec)
 	// Insert after append: Path(id) must be resolvable during collision checks.
 	ix.table.set(nameForKey(ix.pathLocked(id)), id, ix)
+	ix.addDerivedLocked(id, name)
 	return id
+}
+
+// addDerivedLocked indexes the search-only forms of one newly appended record.
+// The caller holds the write lock (or is Load building the index before it is
+// published). The function is intentionally cheap for ASCII names: pinyin work
+// only happens when the name contains a Han character.
+func (ix *Index) addDerivedLocked(id int32, name string) {
+	ix.py.grow(len(ix.recs))
+	if full, initials, ok := pinyinKeys(name); ok {
+		ix.py.set(id, full, initials)
+	}
+	if folded, ok := foldedName(name); ok {
+		if ix.folded == nil {
+			ix.folded = make(map[int32]string)
+		}
+		bit := int(id) >> 6
+		if bit >= len(ix.foldBits) {
+			ix.foldBits = append(ix.foldBits, make([]uint64, bit+1-len(ix.foldBits))...)
+		}
+		ix.foldBits[bit] |= 1 << uint(id&63)
+		ix.folded[id] = folded
+	}
+}
+
+// buildDerivedLocked rebuilds every search-only structure from the record
+// arena. It is used after Load and after Compact renumbered the records.
+func (ix *Index) buildDerivedLocked() {
+	ix.py.reset()
+	// Preallocate the offset table: growing it one uint32 at a time for a
+	// multi-million-record snapshot reallocated the slice thousands of times
+	// and added tens of megabytes to the peak RSS of Load.
+	ix.py.offs = make([]uint32, len(ix.recs))
+	ix.folded = nil
+	ix.foldBits = nil
+	for i := range ix.recs {
+		if ix.recs[i].Deleted() {
+			continue
+		}
+		ix.addDerivedLocked(int32(i), ix.nameLocked(int32(i)))
+	}
+}
+
+// foldedName returns the precomputed normalized name for a record. The caller
+// holds the index read lock.
+func (ix *Index) foldedName(id int32) (string, bool) {
+	if int(id) < 0 {
+		return "", false
+	}
+	bit := int(id) >> 6
+	if bit >= len(ix.foldBits) || ix.foldBits[bit]&(1<<uint(id&63)) == 0 {
+		return "", false
+	}
+	name, ok := ix.folded[id]
+	return name, ok
+}
+
+// pinyinOf returns the record's pinyin keys. The caller holds the index read
+// lock.
+func (ix *Index) pinyinOf(id int32) (full, initials string, ok bool) {
+	if ix.py.empty() {
+		return "", "", false
+	}
+	return ix.py.get(id)
+}
+
+// HasPinyin reports whether the index holds any transliterated name. It lets
+// callers skip the pinyin fallback entirely on an ASCII-only index.
+func (ix *Index) HasPinyin() bool {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return !ix.py.empty()
 }
 
 func (ix *Index) extLocked(ext string) uint16 {
@@ -284,6 +365,10 @@ func (ix *Index) Compact() {
 			ix.roots[i] = remap[ix.roots[i]]
 		}
 	}
+	// Record ids changed, so the id-addressed pinyin and folded-name tables
+	// must be rebuilt. This is O(entries) and only runs when tombstones
+	// dominate, right before a snapshot write.
+	ix.buildDerivedLocked()
 	ix.gen++
 }
 
@@ -367,6 +452,16 @@ func (ix *Index) RemoveSubtree(path string) int {
 		}
 	}
 	if removed > 0 {
+		// Dropping a root's record must also drop it from the roots list; a
+		// later scan re-adds it with a fresh id. Without this the list would
+		// keep pointing at the tombstone and Roots() would report duplicates.
+		kept := ix.roots[:0]
+		for _, id := range ix.roots {
+			if int(id) < len(ix.recs) && !ix.recs[id].Deleted() {
+				kept = append(kept, id)
+			}
+		}
+		ix.roots = kept
 		ix.gen++
 	}
 	return removed

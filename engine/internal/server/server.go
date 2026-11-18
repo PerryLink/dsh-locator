@@ -44,6 +44,11 @@ type Options struct {
 	// available, or while the watcher only covers part of the roots. Zero
 	// disables the fallback.
 	RefreshInterval time.Duration
+	// DisableIncrementalRefresh makes every periodic refresh rescan all roots
+	// instead of reusing the entries of roots that have a healthy live watcher.
+	// The default (false) rescans only degraded or unwatched roots and falls
+	// back to a full rebuild when coverage cannot be attributed per root.
+	DisableIncrementalRefresh bool
 	// ScanWorkers is the directory reader concurrency; zero uses GOMAXPROCS.
 	ScanWorkers int
 	// USN tries the NTFS USN/MFT enumeration before the portable walk.
@@ -70,6 +75,10 @@ type Server struct {
 	// running. refreshSeq identifies the current loop. Guarded by mu.
 	refreshCancel context.CancelFunc
 	refreshSeq    uint64
+	// lastRefresh describes the most recent periodic refresh decision and is
+	// reported by status so the host can show what was (not) rescanned.
+	// Guarded by mu.
+	lastRefresh *refreshReport
 
 	// saveMu serialises snapshot writes and the dirty bookkeeping they update.
 	saveMu sync.Mutex
@@ -266,7 +275,7 @@ func (s *Server) initialScan(ctx context.Context, ix *index.Index) {
 		s.markDirty()
 		s.emitStats()
 	}()
-	if err := s.scanInto(ctx, ix, s.opt.Roots); err != nil {
+	if _, err := s.scanRoots(ctx, ix, s.opt.Roots, s.opt.USN); err != nil {
 		s.logf("initial scan failed: %v", err)
 		s.event("error", map[string]string{"message": "initial scan failed: " + err.Error()})
 		return
@@ -283,13 +292,18 @@ func (s *Server) initialScan(ctx context.Context, ix *index.Index) {
 	s.event("scan", map[string]any{"phase": "done", "entries": ix.Stats().Entries})
 }
 
-func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) error {
+// scanRoots scans roots into ix and folds the result into the server metadata.
+// It returns the scan statistics so a periodic incremental refresh can report
+// how much it actually did. useUSN is false for partial rescans: a volume MFT
+// enumeration would cover more than the refreshed roots and starts its own
+// change watcher, which a partial refresh must not do next to the live watcher.
+func (s *Server) scanRoots(ctx context.Context, ix *index.Index, roots []string, useUSN bool) (scan.Stats, error) {
 	s.event("scan", map[string]any{"phase": "start", "roots": roots})
 	st, err := scan.Run(ctx, ix, scan.Options{
 		Roots:      roots,
 		Excludes:   s.opt.Excludes,
 		Workers:    s.opt.ScanWorkers,
-		WindowsUSN: s.opt.USN,
+		WindowsUSN: useUSN,
 		Warn: func(err error) {
 			s.logf("usn: %v (using directory walk)", err)
 			s.event("warning", map[string]string{"message": "USN unavailable: " + err.Error()})
@@ -301,7 +315,7 @@ func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) 
 		OnUSNState:    s.saveUSNState,
 	})
 	if err != nil {
-		return err
+		return st, err
 	}
 	s.mu.Lock()
 	s.usnActive = st.USN
@@ -319,7 +333,7 @@ func (s *Server) scanInto(ctx context.Context, ix *index.Index, roots []string) 
 	}
 	s.logf("scanned %d entries in %s", st.Entries, st.Took.Round(time.Millisecond))
 	s.event("scan", map[string]any{"phase": "done", "entries": st.Entries, "tookMs": st.Took.Milliseconds()})
-	return nil
+	return st, nil
 }
 
 // startWatcher starts the native watcher for the current index. It returns
@@ -567,7 +581,7 @@ func (s *Server) rebuild(ctx context.Context, p RebuildParams) (any, error) {
 		defer s.rebuildMu.Unlock()
 		s.stopWatcher()
 		ix := index.New()
-		if err := s.scanInto(ctx, ix, roots); err != nil {
+		if _, err := s.scanRoots(ctx, ix, roots, s.opt.USN); err != nil {
 			s.logf("rebuild failed: %v", err)
 			s.event("error", map[string]string{"message": "rebuild failed: " + err.Error()})
 			if !s.startWatcher(ctx) {
@@ -597,17 +611,19 @@ func (s *Server) rebuild(ctx context.Context, p RebuildParams) (any, error) {
 }
 
 // rebuildWith replaces the index with a fresh scan. It is called with rebuildMu
-// held, from an explicit rebuild or the refresh fallback.
-func (s *Server) rebuildWith(ctx context.Context, roots, excludes []string) {
+// held, from an explicit rebuild or the refresh fallback, and returns the scan
+// statistics (zero on failure) so the refresh report can show what it did.
+func (s *Server) rebuildWith(ctx context.Context, roots, excludes []string) scan.Stats {
 	s.stopWatcher()
 	ix := index.New()
-	if err := s.scanInto(ctx, ix, roots); err != nil {
+	st, err := s.scanRoots(ctx, ix, roots, s.opt.USN)
+	if err != nil {
 		s.logf("rebuild failed: %v", err)
 		s.event("error", map[string]string{"message": "rebuild failed: " + err.Error()})
 		if s.opt.Watch && !s.startWatcher(ctx) {
 			s.startRefreshFallback(ctx)
 		}
-		return
+		return st
 	}
 	s.adoptIndex(ix)
 	s.mu.Lock()
@@ -626,6 +642,7 @@ func (s *Server) rebuildWith(ctx context.Context, roots, excludes []string) {
 	}
 	s.emitStats()
 	s.event("rebuilt", s.statusPayload())
+	return st
 }
 
 // startRefreshFallback starts the single periodic rebuild loop used when no
@@ -646,7 +663,11 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 	s.refreshSeq++
 	seq := s.refreshSeq
 	s.mu.Unlock()
-	s.logf("no complete native watcher; refreshing every %s", s.opt.RefreshInterval)
+	if s.opt.DisableIncrementalRefresh {
+		s.logf("no complete native watcher; rebuilding the whole index every %s (incremental refresh disabled)", s.opt.RefreshInterval)
+	} else {
+		s.logf("no complete native watcher; refreshing every %s (only unwatched/degraded roots are rescanned)", s.opt.RefreshInterval)
+	}
 	go func() {
 		defer func() {
 			s.mu.Lock()
@@ -665,13 +686,9 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 				if !s.rebuildMu.TryLock() {
 					continue
 				}
-				s.mu.RLock()
-				roots := append([]string(nil), s.opt.Roots...)
-				excludes := append([]string(nil), s.opt.Excludes...)
-				s.mu.RUnlock()
 				go func() {
 					defer s.rebuildMu.Unlock()
-					s.rebuildWith(rctx, roots, excludes)
+					s.periodicRefresh(rctx)
 				}()
 			}
 		}
@@ -699,28 +716,55 @@ func (s *Server) statusPayload() map[string]any {
 	usnActive := s.usnActive
 	refresh := s.refreshCancel != nil
 	scanning := s.scanning
+	lastRefresh := s.lastRefresh
+	incremental := !s.opt.DisableIncrementalRefresh
 	s.mu.RUnlock()
+	refreshMode := ""
+	refreshReason := ""
+	refreshScanned := []string{}
+	refreshSkipped := []string{}
+	var refreshEntries int64
+	var refreshTookMs int64
+	var refreshAt int64
+	if lastRefresh != nil {
+		refreshMode = lastRefresh.Mode
+		refreshReason = lastRefresh.Reason
+		refreshScanned = append(refreshScanned, lastRefresh.Scanned...)
+		refreshSkipped = append(refreshSkipped, lastRefresh.Skipped...)
+		refreshEntries = lastRefresh.Entries
+		refreshTookMs = lastRefresh.Took.Milliseconds()
+		refreshAt = lastRefresh.At.UnixMilli()
+	}
 	return map[string]any{
-		"version":         s.opt.Version,
-		"platform":        meta.Platform,
-		"roots":           ix.Roots(),
-		"entries":         st.Entries,
-		"files":           st.Files,
-		"dirs":            st.Dirs,
-		"nameBytes":       st.NameBytes,
-		"deleted":         st.Deleted,
-		"generation":      st.Generation,
-		"builtAt":         st.BuiltAt,
-		"watching":        watching || usnActive,
-		"watchDegraded":   health.Degraded,
-		"watchReason":     health.Reason,
-		"watchRoots":      health.Watching,
-		"refreshFallback": refresh,
-		"usnActive":       usnActive,
-		"scanning":        scanning,
-		"usn":             meta.Stats.USN,
-		"uptimeSec":       int(time.Since(s.started).Seconds()),
-		"stateDir":        s.opt.StateDir,
+		"version":             s.opt.Version,
+		"platform":            meta.Platform,
+		"roots":               ix.Roots(),
+		"entries":             st.Entries,
+		"files":               st.Files,
+		"dirs":                st.Dirs,
+		"nameBytes":           st.NameBytes,
+		"deleted":             st.Deleted,
+		"generation":          st.Generation,
+		"builtAt":             st.BuiltAt,
+		"watching":            watching || usnActive,
+		"watchDegraded":       health.Degraded,
+		"watchReason":         health.Reason,
+		"watchRoots":          health.Watching,
+		"watchUnwatchedRoots": unwatchedRoots(health),
+		"refreshFallback":     refresh,
+		"incrementalRefresh":  incremental,
+		"refreshMode":         refreshMode,
+		"refreshReason":       refreshReason,
+		"refreshScannedRoots": refreshScanned,
+		"refreshSkippedRoots": refreshSkipped,
+		"refreshEntries":      refreshEntries,
+		"refreshTookMs":       refreshTookMs,
+		"refreshAt":           refreshAt,
+		"usnActive":           usnActive,
+		"scanning":            scanning,
+		"usn":                 meta.Stats.USN,
+		"uptimeSec":           int(time.Since(s.started).Seconds()),
+		"stateDir":            s.opt.StateDir,
 	}
 }
 

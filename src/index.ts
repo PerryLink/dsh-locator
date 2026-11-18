@@ -5,9 +5,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { Config as ConfigSchema, contentLimits } from './config.ts'
+import { Config as ConfigSchema, contentLimits, outputBudgetChars } from './config.ts'
 import type { Config } from './config.ts'
 import { ContentIndex } from './content.ts'
+import { makeExploreTool } from './explore.ts'
 import { makeExportTool } from './export.ts'
 import { makeFindTool } from './find.ts'
 import { makeReindexTool } from './reindex.ts'
@@ -16,7 +17,8 @@ import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
 import { makeCapabilityTools, preflightCapabilityCard, searchCapabilityCards, type CapabilitySources } from './capabilities.ts'
 import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
-import { makeRebuildTool, makeSearchTool, makeStatusTool } from './tools.ts'
+import { runOcrCommand, scopeFromConfig } from './scope.ts'
+import { makeOutlineTool, makeRebuildTool, makeRepoMapTool, makeSearchTool, makeStatusTool, makeSymbolTool } from './tools.ts'
 
 export { ConfigSchema as Config }
 
@@ -77,6 +79,10 @@ export function apply(ctx: Context, config: Config): void {
   const binary = resolveBinary(config, cwd)
   const logger = ctx.logger('dsh-locator')
   const rt = new LocatorRuntime(config, roots, stateDir, binary, cwd)
+  // Layered ignore rules and the shared result budget are compiled once and
+  // handed to every tool, the HTTP surface and the status report.
+  const scope = scopeFromConfig(config)
+  const budgetChars = outputBudgetChars(config)
   const content = config.contentIndex
     ? new ContentIndex(rt, {
         stateDir,
@@ -91,6 +97,29 @@ export function apply(ctx: Context, config: Config): void {
         includeReasoning: config.contentIndexReasoning,
         includeToolResults: config.contentIndexToolResults,
         maxSessions: config.contentMaxSessions,
+        extractDocuments: config.contentExtractDocuments ?? true,
+        extractMaxBytes: config.contentExtractMaxBytes ?? 20_000_000,
+        indexSymbols: config.contentIndexSymbols ?? true,
+        symbolMaxBytes: config.contentSymbolMaxBytes ?? 524_288,
+        // locator_find/locator_search declare the additive format field, so the
+        // content layer may attach extracted document formats to hits.
+        attachHitFormats: true,
+        // The indexable layer: glob matches never enter the content index, so
+        // extractors skip their bytes entirely.
+        isIndexable: (path: string) => scope.isIndexable(path),
+        // P2 OCR hook: the extraction layer calls it only for a PDF with no
+        // text layer, and only when the operator configured a command.
+        ...(config.ocrCommand === undefined || config.ocrCommand.trim() === ''
+          ? {}
+          : {
+              ocr: async (path: string, format: string): Promise<string | undefined> => {
+                const result = await runOcrCommand(config.ocrCommand as string, { path, mime: format }, {
+                  timeoutMs: config.requestTimeoutMs,
+                  maxChars: config.contentMaxFileBytes,
+                })
+                return result.ok ? result.text : undefined
+              },
+            }),
       })
     : undefined
   const timer = optionalTimer(ctx)
@@ -163,12 +192,32 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  ctx.tools.register(makeSearchTool(rt))
-  ctx.tools.register(makeStatusTool(rt, content))
+  ctx.tools.register(makeSearchTool(rt, {
+    ...(content === undefined ? {} : { content }),
+    ensure: ensureContent,
+    scope,
+    budgetChars,
+  }))
+  ctx.tools.register(makeStatusTool(rt, content, scope))
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
-  ctx.tools.register(makeResolveTool(rt, content))
-  ctx.tools.register(makeCiteTool())
+  ctx.tools.register(makeResolveTool(rt, content, { urlFreshness: config.urlFreshness === true }))
+  // Cite detail mode reads session/file anchors through the same stores; pass
+  // them explicitly so a ref carrying a line can quote that line verbatim.
+  ctx.tools.register(makeCiteTool({
+    ...(content === undefined ? {} : { content }),
+    roots,
+  }))
+  // locator_explore works with the name index alone; the content half is added
+  // when the profile enables it (same lazy boot hook as locator_find).
+  ctx.tools.register(makeExploreTool(rt, {
+    ...(content === undefined ? {} : { content }),
+    ensure: ensureContent,
+    roots,
+    allowCrossWorkspaceSessions: config.allowCrossWorkspaceSessions,
+    scope,
+    budgetChars,
+  }))
   // Capability adapter: read the host's tool registry and skill catalog instead
   // of duplicating discovery. Optional services stay optional.
   const skillsService = (ctx as unknown as { get?: (name: string) => unknown }).get?.('skills')
@@ -178,8 +227,18 @@ export function apply(ctx: Context, config: Config): void {
   }
   for (const tool of makeCapabilityTools(capabilitySources)) ctx.tools.register(tool)
   if (content !== undefined) {
-    ctx.tools.register(makeFindTool(content, ensureContent, roots, config.allowCrossWorkspaceSessions))
+    ctx.tools.register(makeFindTool(content, ensureContent, roots, config.allowCrossWorkspaceSessions, {
+      rt,
+      scope,
+      budgetChars,
+      ...(config.rerankCommand === undefined ? {} : { rerankCommand: config.rerankCommand }),
+    }))
     ctx.tools.register(makeReindexTool(content, ensureContent))
+    // Symbol data layer (P1-2): outline/symbol/repo_map are read-only views over
+    // the additive symbols table and share the same scope + budget rules.
+    ctx.tools.register(makeOutlineTool(content, ensureContent, roots, scope, budgetChars))
+    ctx.tools.register(makeSymbolTool(content, ensureContent, scope, budgetChars))
+    ctx.tools.register(makeRepoMapTool(content, ensureContent, roots, scope, budgetChars))
   }
 
   // The Web GUI panel is optional: profiles without a Web server keep the
@@ -187,5 +246,5 @@ export function apply(ctx: Context, config: Config): void {
   registerHttp(ctx, rt, content, ensureContent, { connectionOptional: config.httpConnectionOptional }, {
     search: async (intent, limit) => await searchCapabilityCards(capabilitySources, intent, limit === undefined ? {} : { limit }),
     preflight: async (capability, args) => await preflightCapabilityCard(capabilitySources, capability, args),
-  })
+  }, scope)
 }

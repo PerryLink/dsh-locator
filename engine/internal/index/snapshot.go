@@ -170,5 +170,9 @@ func Load(path string) (*Index, error) {
 		built:  built,
 	}
 	ix.table.reset(slots, count)
+	// The snapshot stores names only; the pinyin and folded-name search forms
+	// are derived in memory here. The format version stays 1, so snapshots
+	// written by older releases keep loading.
+	ix.buildDerivedLocked()
 	return ix, nil
 }
