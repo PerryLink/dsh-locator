@@ -385,13 +385,26 @@ export declare class ContentIndex {
      */
     private backfillSymbols;
     /**
+     * Every stored spelling one indexed path may have: exactly as given, its
+     * canonical real path, and the configured root's raw spelling. The engine
+     * indexes files in the spelling of the configured root, which is not always
+     * the real path (macOS `/var` → `/private/var`, a Windows short name, an
+     * operator-configured symlink), while tools authorize and report canonical
+     * paths. Symbols and docs_meta lookups accept any spelling, so a caller can
+     * pass either one and databases written before this resolution stay readable.
+     */
+    private pathSpellings;
+    /** A `column IN (…)` fragment and its values covering every spelling of one path. */
+    private pathMatch;
+    /**
      * Indexed document format for one file (pdf, docx, ...); undefined for plain
      * text, unknown paths and databases built before extraction existed.
      */
     docFormat(path: string): string | undefined;
     /**
      * Every symbol stored for one path, in line order.
-     * @param path - absolute file path as stored by the file index.
+     * @param path - absolute file path as stored by the file index, or any other
+     *   spelling of it (canonical real path / configured-root path).
      * @returns symbols for the file; empty when it was not symbol-indexed.
      */
     outline(path: string): CodeSymbol[];
@@ -434,7 +447,12 @@ export declare class ContentIndex {
      * @returns allowed session ids; empty when the caller has no identity.
      */
     authorizedSessionIds(callerCwd: string | undefined, callerSessionId: string | undefined): Set<string>;
-    /** The mtime the index stored for one document (file or session message). */
+    /**
+     * The mtime the index stored for one document (file or session message).
+     * File paths are matched under every spelling of the path, so a caller that
+     * authorized a canonical path still finds a row stored with the
+     * configured-root spelling.
+     */
     indexedMtime(kind: 'file' | 'session', path: string, messageId?: string): number | undefined;
     /** The stored (≤8KB) body for one indexed session message. */
     sessionBody(sessionId: string, messageId: string): string | undefined;

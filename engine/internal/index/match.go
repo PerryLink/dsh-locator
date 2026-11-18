@@ -118,7 +118,7 @@ func mixedHan(s string) bool {
 
 func (m *matcher) matches(ix *Index, id int32) bool {
 	r := &ix.recs[id]
-	name := ix.nameLocked(id)
+	name := ix.matchNameLocked(id)
 	ext := ix.extOfID(r.Ext)
 	if m.exts != nil && !m.exts[ext] {
 		return false

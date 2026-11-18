@@ -143,6 +143,57 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = process.env): { status:
   return { status: result.status, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
 }
 
+/**
+ * Poll a value-producing call until the predicate holds.
+ *
+ * The engine now waits for its first scan, but a CI filesystem can still be
+ * slower than one attempt (cold snapshot, antivirus on Windows); the tests
+ * assert the converged state instead of the timing of the first attempt.
+ */
+async function eventually<T>(read: () => T | Promise<T>, predicate: (value: T) => boolean, timeoutMs = 20_000, intervalMs = 100): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const value = await read()
+    if (predicate(value) || Date.now() >= deadline) return value
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+}
+
+/**
+ * Write a fake engine whose first scan finishes after `scanMs`: it announces
+ * `scanning: true`, answers status/search accordingly, and only returns the
+ * hit once the scan is done. Used to pin the CLI's wait-for-scan contract
+ * without depending on real filesystem timing.
+ */
+function writeScanMock(root: string): string {
+  const mock = join(root, 'mock-indexd')
+  const lines = [
+    '#!/usr/bin/env node',
+    "const readline = require('node:readline')",
+    "const scanMs = Number(process.env.DSH_LOCATOR_MOCK_SCAN_MS ?? '0')",
+    'const started = Date.now()',
+    "process.stdout.write(JSON.stringify({ event: 'ready', params: { scanning: true, roots: [], entries: 0 } }) + String.fromCharCode(10))",
+    "const rl = readline.createInterface({ input: process.stdin })",
+    "rl.on('line', line => {",
+    '  let message',
+    '  try { message = JSON.parse(line) } catch { return }',
+    "  if (message.method === 'shutdown') process.exit(0)",
+    '  const scanning = Date.now() - started < scanMs',
+    "  if (message.method === 'status') {",
+    '    process.stdout.write(JSON.stringify({ id: message.id, result: { scanning, entries: scanning ? 0 : 1 } }) + String.fromCharCode(10))',
+    '    return',
+    '  }',
+    "  if (message.method !== 'search') return",
+    "  const hit = { path: process.env.DSH_LOCATOR_MOCK_PATH, name: 'mock.md', size: 1, mtime: 1700000000000, ext: 'md', dir: false }",
+    '  const hits = scanning ? [] : [hit]',
+    '  process.stdout.write(JSON.stringify({ id: message.id, result: { total: hits.length, returned: hits.length, offset: 0, truncated: false, tookNs: 1000, indexing: scanning, hits } }) + String.fromCharCode(10))',
+    '})',
+  ]
+  writeFileSync(mock, lines.join('\n'))
+  chmodSync(mock, 0o755)
+  return mock
+}
+
 describe('MCP protocol model', () => {
   it('initializes with read-only capabilities, serves tools/list and rejects unknown methods', async () => {
     const root = tempDir('locator-mcp-root-')
@@ -227,9 +278,13 @@ describe('MCP protocol model', () => {
     writeFileSync(join(root, 'alpha.md'), 'x')
     const client = new McpClient({ DSH_LOCATOR_ROOTS: root, DSH_LOCATOR_STATE: join(root, 'state') })
     try {
-      const search = await client.request('tools/call', { name: 'locator_search', arguments: { query: 'alpha', limit: 5 } })
-      expect((search.result as { isError?: boolean }).isError).toBe(false)
-      const payload = toolPayload(search) as { ok?: boolean; total?: number; hits?: Array<{ path: string }> }
+      // One-shot name searches start a fresh engine session, so a cold scan may
+      // still be running when the first call lands; assert the converged state.
+      const payload = await eventually(async () => {
+        const search = await client.request('tools/call', { name: 'locator_search', arguments: { query: 'alpha', limit: 5 } })
+        expect((search.result as { isError?: boolean }).isError).toBe(false)
+        return toolPayload(search) as { ok?: boolean; total?: number; hits?: Array<{ path: string }> }
+      }, value => value.total === 1)
       expect(payload.ok).toBe(true)
       expect(payload.total).toBe(1)
       expect(payload.hits?.[0]?.path).toBe(join(root, 'alpha.md'))
@@ -291,13 +346,17 @@ describe('locator-cli', () => {
     expect((JSON.parse(missing.stdout) as { error: { code: string } }).error.code).toBe('content-index-missing')
   })
 
-  it.skipIf(!existsSync(engineBinary))('runs a real name search through the bundled engine', () => {
+  it.skipIf(!existsSync(engineBinary))('runs a real name search through the bundled engine', async () => {
     const root = tempDir('locator-cli-search-')
     writeFileSync(join(root, 'alpha.md'), 'x')
     const state = join(root, 'state')
-    const result = runCli(['search', 'alpha', '--root', root, '--state', state, '--json', '--limit', '5'])
-    expect(result.status).toBe(0)
-    const payload = JSON.parse(result.stdout) as { ok: boolean; mode: string; total: number; hits: Array<{ path: string }> }
+    // The CLI waits for the engine's first scan itself; the poll keeps the
+    // assertion independent of a cold filesystem on Windows/macOS CI.
+    const payload = await eventually(() => {
+      const result = runCli(['search', 'alpha', '--root', root, '--state', state, '--json', '--limit', '5'])
+      expect(result.status).toBe(0)
+      return JSON.parse(result.stdout) as { ok: boolean; mode: string; total: number; hits: Array<{ path: string }> }
+    }, value => value.total === 1)
     expect(payload.ok).toBe(true)
     expect(payload.mode).toBe('names')
     expect(payload.total).toBe(1)
@@ -315,6 +374,41 @@ describe('locator-cli', () => {
     expect(payload.engine.ok).toBe(true)
     expect(payload.content.available).toBe(true)
     expect(payload.content.files).toBe(1)
+  })
+
+  it.skipIf(process.platform === 'win32')('waits for the engine initial scan before a one-shot search', () => {
+    const root = tempDir('locator-cli-scan-')
+    const mock = writeScanMock(root)
+    const file = join(root, 'mock.md')
+    const result = runCli(['search', 'mock', '--root', root, '--state', join(root, 'state'), '--json'], {
+      DSH_LOCATOR_BIN: mock,
+      DSH_LOCATOR_MOCK_PATH: file,
+      DSH_LOCATOR_MOCK_SCAN_MS: '120',
+    })
+    expect(result.status).toBe(0)
+    const payload = JSON.parse(result.stdout) as { ok: boolean; total: number; indexing?: boolean; warnings?: string[]; hits: Array<{ path: string }> }
+    expect(payload.ok).toBe(true)
+    expect(payload.total).toBe(1)
+    expect(payload.indexing).toBe(false)
+    expect(payload.warnings).toBeUndefined()
+    expect(payload.hits[0]?.path).toBe(file)
+  })
+
+  it.skipIf(process.platform === 'win32')('returns a partial result plus a warning when the scan outlasts the wait', () => {
+    const root = tempDir('locator-cli-scan-timeout-')
+    const mock = writeScanMock(root)
+    const result = runCli(['search', 'mock', '--root', root, '--state', join(root, 'state'), '--json'], {
+      DSH_LOCATOR_BIN: mock,
+      DSH_LOCATOR_MOCK_PATH: join(root, 'mock.md'),
+      DSH_LOCATOR_MOCK_SCAN_MS: '60000',
+      DSH_LOCATOR_SCAN_TIMEOUT: '150',
+    })
+    expect(result.status).toBe(0)
+    const payload = JSON.parse(result.stdout) as { ok: boolean; total: number; indexing?: boolean; warnings?: string[] }
+    expect(payload.ok).toBe(true)
+    expect(payload.total).toBe(0)
+    expect(payload.indexing).toBe(true)
+    expect(payload.warnings).toContain('initial-scan-incomplete')
   })
 
   it.skipIf(process.platform === 'win32')('honours DSH_LOCATOR_BIN for a custom engine build', () => {

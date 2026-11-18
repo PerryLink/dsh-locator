@@ -986,6 +986,43 @@ describe('symbol data layer tools', () => {
     expect(outside.ok).toBe(false)
     expect(outside.error).toBe('content-path-denied')
   })
+
+  it('queries the store with the caller spelling when the root is a symlink', async () => {
+    const real = dir()
+    const holder = dir()
+    mkdirSync(join(real, 'src'))
+    const realFile = join(real, 'src', 'a.ts')
+    writeFileSync(realFile, 'export function parseConfig() {}\n')
+    const link = join(holder, 'link')
+    try {
+      symlinkSync(real, link, 'dir')
+    } catch {
+      // Windows without the symlink privilege: nothing to verify here.
+      return
+    }
+    // The engine indexes through the configured root, so the store keeps the
+    // symlink spelling while the tool authorizes the canonical real path. The
+    // tool must hand the store the caller's spelling (it used to pass the
+    // realpath, which is why the outline came back empty on macOS temp dirs).
+    const indexed = join(link, 'src', 'a.ts')
+    const content = fakeSymbolContent([
+      { path: indexed, name: 'parseConfig', kind: 'function', line: 1, language: 'ts' },
+    ])
+    const outline = await makeOutlineTool(content, undefined, [link]).execute({ path: indexed }, {} as never) as { ok: boolean; totalCount?: number; path?: string }
+    expect(outline.ok).toBe(true)
+    expect(outline.totalCount).toBe(1)
+    const map = await makeRepoMapTool(content, undefined, [link]).execute({ tokenBudget: 500, roots: [join(link, 'src')] }, {} as never) as { ok: boolean; files?: Array<{ path: string }> }
+    expect(map.ok).toBe(true)
+    expect(map.files?.map(file => file.path)).toEqual([indexed])
+    // A root that is already the real path behaves identically.
+    const realContent = fakeSymbolContent([
+      { path: realFile, name: 'parseConfig', kind: 'function', line: 1, language: 'ts' },
+    ])
+    const realOutline = await makeOutlineTool(realContent, undefined, [real]).execute({ path: realFile }, {} as never) as { totalCount?: number }
+    expect(realOutline.totalCount).toBe(1)
+    const narrowed = await makeRepoMapTool(realContent, undefined, [real]).execute({ tokenBudget: 500, roots: [join(real, 'src')] }, {} as never) as { files?: Array<{ path: string }> }
+    expect(narrowed.files?.map(file => file.path)).toEqual([realFile])
+  })
 })
 
 

@@ -16,10 +16,10 @@
  * @module dsh-locator/content
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, extname, join } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { zstdDecompress } from 'node:zlib'
 import { scheduler } from 'node:timers/promises'
@@ -1513,26 +1513,71 @@ export class ContentIndex {
   }
 
   /**
+   * Every stored spelling one indexed path may have: exactly as given, its
+   * canonical real path, and the configured root's raw spelling. The engine
+   * indexes files in the spelling of the configured root, which is not always
+   * the real path (macOS `/var` → `/private/var`, a Windows short name, an
+   * operator-configured symlink), while tools authorize and report canonical
+   * paths. Symbols and docs_meta lookups accept any spelling, so a caller can
+   * pass either one and databases written before this resolution stay readable.
+   */
+  private pathSpellings(path: string): string[] {
+    const spellings: string[] = []
+    const add = (value: string | undefined): void => {
+      if (typeof value !== 'string' || value === '') return
+      if (!spellings.includes(value)) spellings.push(value)
+    }
+    add(path)
+    const canonical = canonicalFsPath(path)
+    add(canonical)
+    const rawRoots = (this.rt as { roots?: unknown }).roots
+    if (!Array.isArray(rawRoots)) return spellings
+    for (const rawRoot of rawRoots) {
+      if (typeof rawRoot !== 'string' || rawRoot === '') continue
+      const canonicalRoot = canonicalFsPath(rawRoot)
+      if (canonicalRoot === canonical) {
+        add(rawRoot)
+        continue
+      }
+      if (!pathUnderRoot(canonicalRoot, canonical)) continue
+      const suffix = canonical.slice(canonicalRoot.length).replace(/^[\\/]+/, '')
+      add(suffix === '' ? rawRoot : join(rawRoot, suffix))
+    }
+    return spellings
+  }
+
+  /** A `column IN (…)` fragment and its values covering every spelling of one path. */
+  private pathMatch(column: string, path: string): { sql: string; values: string[] } {
+    const spellings = this.pathSpellings(path)
+    // An empty path has no spelling; `= NULL` is valid SQL and matches nothing.
+    if (spellings.length === 0) return { sql: column + ' = NULL', values: [] }
+    return { sql: column + ' IN (' + spellings.map(() => '?').join(', ') + ')', values: spellings }
+  }
+
+  /**
    * Indexed document format for one file (pdf, docx, ...); undefined for plain
    * text, unknown paths and databases built before extraction existed.
    */
   docFormat(path: string): string | undefined {
     if (this.db === null || path === '') return undefined
     try {
-      const row = this.db.prepare('SELECT format FROM docs_meta WHERE path = ? AND format IS NOT NULL LIMIT 1').get(path) as { format?: string | null } | undefined
+      const match = this.pathMatch('path', path)
+      const row = this.db.prepare('SELECT format FROM docs_meta WHERE ' + match.sql + ' AND format IS NOT NULL LIMIT 1').get(...match.values) as { format?: string | null } | undefined
       return typeof row?.format === 'string' && row.format !== '' ? row.format : undefined
     } catch { return undefined }
   }
 
   /**
    * Every symbol stored for one path, in line order.
-   * @param path - absolute file path as stored by the file index.
+   * @param path - absolute file path as stored by the file index, or any other
+   *   spelling of it (canonical real path / configured-root path).
    * @returns symbols for the file; empty when it was not symbol-indexed.
    */
   outline(path: string): CodeSymbol[] {
     if (this.db === null || path === '') return []
     try {
-      const rows = this.db.prepare('SELECT name, kind, line, language, scope FROM symbols WHERE path = ? ORDER BY line, name').all(path) as SymbolRow[]
+      const match = this.pathMatch('path', path)
+      const rows = this.db.prepare('SELECT DISTINCT name, kind, line, language, scope FROM symbols WHERE ' + match.sql + ' ORDER BY line, name').all(...match.values) as SymbolRow[]
       return toSymbols(rows)
     } catch { return [] }
   }
@@ -1589,10 +1634,36 @@ export class ContentIndex {
     try {
       rows = this.db.prepare('SELECT path, name, kind, line, language, scope FROM symbols ORDER BY path, line').all() as Array<SymbolRow & { path?: string }>
     } catch { return [] }
+    // Both sides of the containment check are canonicalized: the stored path
+    // may use the configured-root spelling (symlinked temp dir, Windows short
+    // name) while the requested root may be its real path, or the other way
+    // around. Rows that match on the raw spelling skip the realpath syscall.
+    const rootSpellings: string[] = []
+    const addRootSpelling = (root: string): void => {
+      if (typeof root !== 'string' || root === '' || rootSpellings.includes(root)) return
+      rootSpellings.push(root)
+    }
+    for (const root of roots) {
+      if (typeof root !== 'string' || root === '') continue
+      addRootSpelling(root)
+      addRootSpelling(canonicalFsPath(root))
+    }
+    const canonicalPaths = new Map<string, string>()
+    const inRoots = (storedPath: string): boolean => {
+      if (roots.length === 0) return true
+      if (rootSpellings.length === 0) return false
+      if (pathWithinRoots(storedPath, rootSpellings)) return true
+      let canonical = canonicalPaths.get(storedPath)
+      if (canonical === undefined) {
+        canonical = canonicalFsPath(storedPath)
+        canonicalPaths.set(storedPath, canonical)
+      }
+      return canonical !== storedPath && pathWithinRoots(canonical, rootSpellings)
+    }
     const byPath = new Map<string, CodeSymbol[]>()
     for (const row of rows) {
       const path = row.path
-      if (typeof path !== 'string' || path === '' || !pathWithinRoots(path, roots)) continue
+      if (typeof path !== 'string' || path === '' || !inRoots(path)) continue
       const symbol = toSymbols([row])[0]
       if (symbol === undefined) continue
       const symbols = byPath.get(path)
@@ -1623,11 +1694,25 @@ export class ContentIndex {
     if (this.db === null) return formats
     const unique = [...new Set(paths.filter(path => path !== ''))]
     if (unique.length === 0) return formats
+    // Query every spelling of each requested path and answer under the caller's
+    // own spelling too, so `formatsFor([canonical]).get(canonical)` works even
+    // when the row was stored with the configured-root spelling.
+    const callerBySpelling = new Map<string, string>()
+    const spellings: string[] = []
+    for (const path of unique) {
+      for (const spelling of this.pathSpellings(path)) {
+        if (!spellings.includes(spelling)) spellings.push(spelling)
+        if (!callerBySpelling.has(spelling)) callerBySpelling.set(spelling, path)
+      }
+    }
     try {
-      const placeholders = unique.map(() => '?').join(', ')
-      const rows = this.db.prepare('SELECT path, format FROM docs_meta WHERE path IN (' + placeholders + ') AND format IS NOT NULL').all(...unique) as Array<{ path?: string; format?: string | null }>
+      const placeholders = spellings.map(() => '?').join(', ')
+      const rows = this.db.prepare('SELECT path, format FROM docs_meta WHERE path IN (' + placeholders + ') AND format IS NOT NULL').all(...spellings) as Array<{ path?: string; format?: string | null }>
       for (const row of rows) {
-        if (typeof row.path === 'string' && row.path !== '' && typeof row.format === 'string' && row.format !== '') formats.set(row.path, row.format)
+        if (typeof row.path !== 'string' || row.path === '' || typeof row.format !== 'string' || row.format === '') continue
+        formats.set(row.path, row.format)
+        const callerPath = callerBySpelling.get(row.path)
+        if (callerPath !== undefined) formats.set(callerPath, row.format)
       }
     } catch { /* older databases keep an empty map */ }
     return formats
@@ -1678,16 +1763,25 @@ export class ContentIndex {
     return allowed
   }
 
-  /** The mtime the index stored for one document (file or session message). */
+  /**
+   * The mtime the index stored for one document (file or session message).
+   * File paths are matched under every spelling of the path, so a caller that
+   * authorized a canonical path still finds a row stored with the
+   * configured-root spelling.
+   */
   indexedMtime(kind: 'file' | 'session', path: string, messageId?: string): number | undefined {
     if (this.db === null) return undefined
     if (kind === 'session' && (messageId === undefined || messageId === '')) return undefined
     const messageKey = messageId ?? ''
     try {
-      const row = kind === 'file'
-        ? this.db.prepare('SELECT mtime FROM docs_meta WHERE kind = ? AND path = ? LIMIT 1').get(kind, path) as { mtime?: number } | undefined
-        : this.db.prepare(`SELECT m.mtime AS mtime FROM docs_meta m JOIN docs d ON d.rowid = m.rowid
+      let row: { mtime?: number } | undefined
+      if (kind === 'file') {
+        const match = this.pathMatch('path', path)
+        row = this.db.prepare('SELECT mtime FROM docs_meta WHERE kind = ? AND ' + match.sql + ' LIMIT 1').get(kind, ...match.values) as { mtime?: number } | undefined
+      } else {
+        row = this.db.prepare(`SELECT m.mtime AS mtime FROM docs_meta m JOIN docs d ON d.rowid = m.rowid
             WHERE m.kind = 'session' AND d.session_id = ? AND d.message_id = ? LIMIT 1`).get(basename(dirname(path)), messageKey) as { mtime?: number } | undefined
+      }
       return row?.mtime === undefined ? undefined : Number(row.mtime)
     } catch {
       return undefined
@@ -2166,15 +2260,51 @@ function docKeyPath(key: string): string | null {
   return key.startsWith('file:') ? key.slice(5) : null
 }
 
-/** Whether a path is inside one of the roots (slash and backslash accepted). */
+const WINDOWS_PATHS = process.platform === 'win32'
+
+/**
+ * Canonical real path so every comparison uses one spelling: a symlinked
+ * temporary directory (`/var` → `/private/var` on macOS), a Windows short
+ * name (`RUNNER~1`) or a differently-cased drive path cannot make the same
+ * file look like two different files. A missing target (deleted file, dangling
+ * symlink) falls back to a lexical `resolve`, which keeps lookups usable
+ * without inventing a match.
+ */
+function canonicalFsPath(path: string): string {
+  if (typeof path !== 'string' || path === '') return ''
+  try { return realpathSync.native(path) } catch { /* missing target: compare lexically */ }
+  try { return resolve(path) } catch { return path }
+}
+
+/** Slash-normalized path for comparison; Windows folds case like the filesystem. */
+function comparablePath(path: string): string {
+  const slashed = path.replace(/\\/g, '/')
+  const trimmed = slashed.length > 1 ? slashed.replace(/\/+$/, '') : slashed
+  const normalized = trimmed === '' ? '/' : trimmed
+  return WINDOWS_PATHS ? normalized.toLowerCase() : normalized
+}
+
+/** Whether `target` is `root` itself or lives below it (filesystem comparison rules). */
+function pathUnderRoot(root: string, target: string): boolean {
+  const normalizedRoot = comparablePath(root)
+  if (normalizedRoot === '') return false
+  const normalizedTarget = comparablePath(target)
+  if (normalizedTarget === normalizedRoot) return true
+  if (normalizedRoot === '/') return normalizedTarget.startsWith('/')
+  return normalizedTarget.startsWith(normalizedRoot + '/')
+}
+
+/**
+ * Whether a path is inside one of the roots. Slash and backslash are
+ * interchangeable and Windows compares case-insensitively, matching what the
+ * filesystem itself does; callers may pass either the raw or the canonical
+ * spelling of a root.
+ */
 function pathWithinRoots(path: string, roots: readonly string[]): boolean {
   if (roots.length === 0) return true
   for (const root of roots) {
-    const trimmed = root.replace(/[\\/]+$/, '')
-    if (trimmed === '') continue
-    for (const variant of [trimmed, trimmed.replace(/\//g, '\\')]) {
-      if (path === variant || path.startsWith(variant + '/') || path.startsWith(variant + '\\')) return true
-    }
+    if (typeof root !== 'string' || root === '') continue
+    if (pathUnderRoot(root, path)) return true
   }
   return false
 }

@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -1805,6 +1805,49 @@ describe('code symbols and repo map (P1-2)', () => {
     expect(content.outline(path)).toEqual([])
     expect(content.findSymbols('main')).toEqual([])
     expect(content.repoMap([root], 1000)).toEqual([])
+  })
+})
+
+describe('symbol lookups across a symlinked root', () => {
+  it('serves outline/repoMap by the configured-root spelling and by the real path', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'locator-symlink-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-symlink-state-'))
+    const realRoot = join(base, 'real-root')
+    const linkRoot = join(base, 'link-root')
+    mkdirSync(realRoot)
+    try {
+      symlinkSync(realRoot, linkRoot, 'dir')
+    } catch {
+      // Windows without the symlink privilege: nothing to verify on this host.
+      rmSync(base, { recursive: true, force: true })
+      rmSync(state, { recursive: true, force: true })
+      return
+    }
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    // The engine indexes through the configured root, so every stored row keeps
+    // the symlink spelling even though the tool layer authorizes real paths.
+    const indexed = join(linkRoot, 'main.go')
+    writeFileSync(indexed, 'package demo\n\ntype Server struct{}\n\nfunc Start() error { return nil }\n')
+    const entries = [{ path: indexed, name: 'main.go', size: statSync(indexed).size, mtime: Date.now(), ext: 'go', dir: false }]
+    const runtime = { roots: [linkRoot], dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, stateDir: state })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const realFile = join(realRoot, 'main.go')
+    // Both spellings resolve to the same stored rows.
+    expect(content.outline(indexed).map(symbol => symbol.name)).toEqual(['Server', 'Start'])
+    expect(content.outline(realFile).map(symbol => symbol.name)).toEqual(['Server', 'Start'])
+    expect(content.findSymbols('Server').map(hit => hit.path)).toEqual([indexed])
+    expect(content.indexedMtime('file', realFile)).toBe(entries[0]?.mtime)
+    // repoMap canonicalizes both sides: a real root finds the symlink-spelled
+    // rows, and a sibling directory still selects nothing.
+    expect(content.repoMap([realRoot], 100_000).map(file => file.path)).toEqual([indexed])
+    expect(content.repoMap([linkRoot], 100_000).map(file => file.path)).toEqual([indexed])
+    expect(content.repoMap([join(realRoot, 'elsewhere')], 100_000)).toEqual([])
+    // The same lookups keep working through a plain (non-symlink) real path.
+    const plain = join(realpathSync.native(base), 'real-root')
+    expect(content.outline(join(plain, 'main.go')).map(symbol => symbol.name)).toEqual(['Server', 'Start'])
   })
 })
 

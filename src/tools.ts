@@ -754,9 +754,14 @@ export function makeOutlineTool(content: ContentIndex, ensure?: () => void, root
         return { ok: false as const, path: resolved.path, symbols: [], error: 'content-scope-denied', warnings: ['scope-filtered'], ...(state === undefined ? {} : { state }) }
       }
       const limit = Math.max(1, Math.min(200, Math.trunc(args.maxSymbols ?? 200)))
-      const all = content.outline(resolved.path)
+      // The store keeps the configured-root spelling the engine indexed, while
+      // `resolved.path` is the canonical real path used for authorization.
+      // Query with the caller's own spelling; the store resolves the canonical
+      // variants itself (macOS symlinks, Windows short names), so neither the
+      // tool nor the test seam has to canonicalize before a lookup.
+      const all = content.outline(path)
       const budgeted = applyOutputBudget(all.slice(0, limit).map(symbolRow), budgetChars)
-      const format = content.formatsFor([resolved.path]).get(resolved.path)
+      const format = content.formatsFor([path]).get(path)
       return {
         ok: true as const,
         path: resolved.path,
@@ -873,11 +878,15 @@ export function makeRepoMapTool(content: ContentIndex, ensure?: () => void, root
           if (typeof root !== 'string' || root.trim() === '') {
             return { ok: false as const, files: [], error: 'content-path-denied', warnings: ['invalid-root'], ...(state === undefined ? {} : { state }) }
           }
-          const resolved = resolveWithinRoots(root.trim(), roots)
+          const spelling = root.trim()
+          const resolved = resolveWithinRoots(spelling, roots)
           if (resolved === undefined) {
             return { ok: false as const, files: [], error: 'content-path-denied', warnings: ['path-outside-roots'], ...(state === undefined ? {} : { state }) }
           }
-          if (!requested.includes(resolved.path)) requested.push(resolved.path)
+          // Keep the caller's spelling: authorization used the canonical real
+          // path, but the symbol rows are keyed by the configured-root spelling
+          // the engine indexed and the store compares both sides canonically.
+          if (!requested.includes(spelling)) requested.push(spelling)
         }
         narrowed = requested
       }

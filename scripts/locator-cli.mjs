@@ -108,6 +108,22 @@ export function resolveStateDir(flag, env = process.env) {
   return defaultStateDir()
 }
 
+/** Default wait for the engine's background first scan before a one-shot search. */
+export const INITIAL_SCAN_TIMEOUT_MS = 10_000
+
+/** Status-poll interval while waiting for the initial scan. */
+const INITIAL_SCAN_POLL_MS = 25
+
+/** How long one scan-status probe may take before the engine counts as unresponsive. */
+const SCAN_STATUS_PROBE_TIMEOUT_MS = 1_000
+
+/** Effective first-scan wait: DSH_LOCATOR_SCAN_TIMEOUT overrides the 10 s default. */
+export function scanTimeoutFrom(env = process.env) {
+  const raw = env.DSH_LOCATOR_SCAN_TIMEOUT
+  const value = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : INITIAL_SCAN_TIMEOUT_MS
+}
+
 /** Build the settings object every core function takes. */
 export function makeSettings(overrides = {}, env = process.env) {
   return {
@@ -115,6 +131,7 @@ export function makeSettings(overrides = {}, env = process.env) {
     stateDir: resolveStateDir(overrides.state ?? overrides.stateDir, env),
     binary: typeof overrides.binary === 'string' && overrides.binary !== '' ? overrides.binary : resolveEngineBinary(env),
     timeoutMs: Number.isFinite(overrides.timeoutMs) ? Math.trunc(overrides.timeoutMs) : 15_000,
+    scanTimeoutMs: Number.isFinite(overrides.scanTimeoutMs) ? Math.max(0, Math.trunc(overrides.scanTimeoutMs)) : scanTimeoutFrom(env),
     contentDb: join(resolveStateDir(overrides.state ?? overrides.stateDir, env), 'content.db'),
   }
 }
@@ -160,6 +177,23 @@ export function startEngine(settings) {
     pending.clear()
     for (const waiter of waiterList.splice(0)) waiter.reject(error)
   }
+  // The engine emits ready *before* the background root scan starts, so track
+  // what the events say about the first scan: 'unknown' when the engine does
+  // not report a scanning flag at all (then waiting would be guesswork),
+  // 'scanning' or 'idle' otherwise. waitForInitialScan() also polls status in
+  // case an event is missed.
+  let initialScanState = 'unknown'
+  const noteEngineEvent = (event, params) => {
+    if (params === null || typeof params !== 'object') return
+    if (event === 'scan') {
+      if (params.phase === 'done') initialScanState = 'idle'
+      else if (typeof params.phase === 'string' && initialScanState !== 'idle') initialScanState = 'scanning'
+      return
+    }
+    if (event !== 'ready' && event !== 'stats') return
+    if (params.scanning === false) initialScanState = 'idle'
+    else if (params.scanning === true && initialScanState !== 'idle') initialScanState = 'scanning'
+  }
   const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
     const text = line.trim()
@@ -168,6 +202,7 @@ export function startEngine(settings) {
     try { message = JSON.parse(text) } catch { return }
     if (message === null || typeof message !== 'object') return
     if (typeof message.event === 'string') {
+      noteEngineEvent(message.event, message.params)
       if (message.event === 'ready' || message.event === 'stats') settle(undefined)
       return
     }
@@ -202,15 +237,20 @@ export function startEngine(settings) {
   }, settings.timeoutMs)
   ready.then(() => { clearTimeout(readyTimer) }, () => { clearTimeout(readyTimer) })
 
-  /** One engine request after readiness. */
-  async function request(method, params = {}) {
+  /**
+   * One engine request after readiness.
+   * @param method - RPC method name.
+   * @param params - request payload.
+   * @param timeoutMs - per-request timeout (defaults to the CLI timeout).
+   */
+  async function request(method, params = {}, timeoutMs = settings.timeoutMs) {
     await ready
     const id = nextId++
     return await new Promise((resolvePromise, rejectPromise) => {
       const timer = setTimeout(() => {
         pending.delete(id)
         rejectPromise(new CliError('engine-timeout', 'engine request ' + method + ' timed out', EXIT_UNAVAILABLE))
-      }, settings.timeoutMs)
+      }, timeoutMs)
       pending.set(id, { resolve: resolvePromise, reject: rejectPromise, timer })
       try {
         child.stdin.write(JSON.stringify({ id, method, params }) + '\n')
@@ -220,6 +260,44 @@ export function startEngine(settings) {
         rejectPromise(new CliError('engine-unavailable', String(error && error.message ? error.message : error), EXIT_UNAVAILABLE))
       }
     })
+  }
+
+  /**
+   * Wait until the engine's background initial scan has finished.
+   *
+   * A one-shot search sent right after `ready` can legitimately see zero
+   * entries on a slow or cold filesystem (Windows/macOS CI runners are much
+   * slower than a warm Linux tmpdir), so poll the `status` RPC until
+   * `scanning` is false instead of trusting event timing. Resolves false on
+   * timeout (the caller then returns a partial result plus a warning) and when
+   * the engine dies (the search that follows reports the real failure).
+   * @param timeoutMs - maximum wait; defaults to the configured scan timeout.
+   * @returns true when the scan finished, false when the wait timed out/aborted.
+   */
+  async function waitForInitialScan(timeoutMs = settings.scanTimeoutMs ?? INITIAL_SCAN_TIMEOUT_MS) {
+    try {
+      await ready
+    } catch {
+      return false
+    }
+    // An engine that does not report a scanning flag cannot be waited for;
+    // answer from whatever it returns instead of stalling every custom engine.
+    if (initialScanState === 'idle' || initialScanState === 'unknown') return true
+    const deadline = Date.now() + Math.max(0, timeoutMs)
+    for (;;) {
+      const remaining = deadline - Date.now()
+      try {
+        const status = await request('status', {}, Math.max(1, Math.min(SCAN_STATUS_PROBE_TIMEOUT_MS, remaining)))
+        if (status === null || typeof status !== 'object' || status.scanning !== true) {
+          initialScanState = 'idle'
+          return true
+        }
+      } catch {
+        return false
+      }
+      if (Date.now() >= deadline) return false
+      await new Promise(resolvePromise => setTimeout(resolvePromise, INITIAL_SCAN_POLL_MS))
+    }
   }
 
   /** Ask the engine to shut down and wait for the process to exit. */
@@ -234,7 +312,7 @@ export function startEngine(settings) {
       child.once('exit', () => { clearTimeout(timer); resolvePromise() })
     })
   }
-  return { request, close, child }
+  return { request, close, child, waitForInitialScan }
 }
 
 /** Run a name search through a one-shot engine session. */
@@ -244,6 +322,11 @@ export async function runNameSearch(settings, query, options = {}) {
   const session = startEngine(settings)
   const started = Date.now()
   try {
+    // Wait for the engine's first scan before querying. `ready` is emitted
+    // before the scan starts, so an immediate search could return zero hits on
+    // a slow/cold filesystem (observed on Windows and macOS CI runners). On
+    // timeout the search still runs and the result carries a warning.
+    const scanComplete = await session.waitForInitialScan()
     const result = await session.request('search', {
       query,
       limit,
@@ -267,7 +350,8 @@ export async function runNameSearch(settings, query, options = {}) {
       total: typeof result.total === 'number' ? result.total : hits.length,
       returned: hits.length,
       truncated: result.truncated === true || typeof result.total === 'number' ? result.total > hits.length + offset : false,
-      indexing: result.indexing === true,
+      indexing: result.indexing === true || !scanComplete,
+      ...(scanComplete ? {} : { warnings: ['initial-scan-incomplete'] }),
       tookMs: Date.now() - started,
       hits,
     }
@@ -793,7 +877,7 @@ const USAGE = [
   '  --json           machine-readable JSON on stdout',
   '  --timeout <ms>   engine request timeout (default 15000)',
   '',
-  'Environment: DSH_LOCATOR_STATE, DSH_LOCATOR_ROOTS (path-separator separated), DSH_LOCATOR_BIN.',
+  'Environment: DSH_LOCATOR_STATE, DSH_LOCATOR_ROOTS (path-separator separated), DSH_LOCATOR_BIN, DSH_LOCATOR_SCAN_TIMEOUT (ms).',
   'Exit codes: 0 ok, 1 runtime error, 2 usage error, 3 index/engine unavailable.',
 ].join('\n')
 
@@ -871,6 +955,7 @@ export function renderText(result) {
   if (result.command === 'search') {
     const lines = [String(result.returned) + ' of ' + String(result.total ?? '?') + ' match(es) for ' + JSON.stringify(result.query) + (result.truncated ? ' (truncated)' : '')]
     for (const hit of result.hits) lines.push(hit.path + (hit.dir ? '/' : ''))
+    if (Array.isArray(result.warnings) && result.warnings.length > 0) lines.push('warnings: ' + result.warnings.join(', '))
     return lines.join('\n')
   }
   if (result.command === 'content-search' || result.command === 'find') {

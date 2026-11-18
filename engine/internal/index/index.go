@@ -145,6 +145,10 @@ func (ix *Index) appendLocked(name string, parent int32, info FileInfo, frn uint
 // only happens when the name contains a Han character.
 func (ix *Index) addDerivedLocked(id int32, name string) {
 	ix.py.grow(len(ix.recs))
+	// Root records store their absolute path in the name arena (pathLocked
+	// reconstructs the path from it); index the search forms of the record's own
+	// name, never of the ancestor directories that are only part of the path.
+	name = ix.searchNameLocked(id, name)
 	if full, initials, ok := pinyinKeys(name); ok {
 		ix.py.set(id, full, initials)
 	}
@@ -255,6 +259,26 @@ func (ix *Index) Name(id int32) string {
 func (ix *Index) nameLocked(id int32) string {
 	r := &ix.recs[id]
 	return unsafeString(ix.names[r.NameOff : r.NameOff+r.NameLen])
+}
+
+// searchNameLocked returns the name search terms are matched against. A record
+// without a parent stores its whole absolute path in the name arena, because
+// pathLocked assembles the absolute path from it and AddRoot has no parent to
+// attach to. Its own name is still the last path component, exactly like the
+// Hit.Name the server returns. Matching the raw stored bytes would turn every
+// ancestor directory into part of the searchable name: on macOS the temporary
+// directory lives under "/var/folders", so the bare term "old" matched every
+// index root (old=2 where the deleted file should have left 0 hits).
+func (ix *Index) searchNameLocked(id int32, name string) string {
+	if ix.recs[id].Parent < 0 {
+		return filepath.Base(name)
+	}
+	return name
+}
+
+// matchNameLocked is searchNameLocked for the record's stored name.
+func (ix *Index) matchNameLocked(id int32) string {
+	return ix.searchNameLocked(id, ix.nameLocked(id))
 }
 
 // Path reconstructs the absolute path of a record.
