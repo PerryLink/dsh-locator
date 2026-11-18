@@ -4,7 +4,7 @@
 
 **记得名字就搜名字，记得内容就搜内容；找到之后直接打开，或者跳回那次对话。**
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的全盘文件搜索：自带索引，不装 Everything，不依赖 `es.exe`，Windows / macOS / Linux 用同一套工具和同一个面板。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的全盘文件搜索：自带索引，不装 Everything，不依赖 `dsh-v0.2.2-rc.4`（2026-11-18）；`es.exe`，Windows / macOS / Linux 用同一套工具和同一个面板。
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -481,7 +481,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 
 ## 版本与兼容性
 
-- Node：`^22.19.0 || >=24.9.0`；DSH：`>=0.2.1-rc.2 <0.3.0`（见 `package.json` 的 `engines`）。
+- Node：`dsh-v0.2.2-rc.4`（2026-11-18）`^22.19.0 || >=24.9.0`；DSH：`>=0.2.1-rc.2 <0.3.0 || >=0.2.2-0 <0.3.0`（见 `package.json` 的 `engines`）。
 - 发布走 GitHub Actions provenance，npm 上的包可验证来源；Gitee / GitCode 由 mirror workflow 自动同步。
 - 更新记录：[CHANGELOG.md](CHANGELOG.md)；问题与建议：[Issues](https://github.com/PerryLink/dsh-locator/issues)。
 

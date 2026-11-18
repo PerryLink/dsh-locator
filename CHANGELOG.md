@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.1 — 2026-11-18
+
+* **DeepSeek Harness 0.2.2-rc.4 compatibility**: the `@deepseek-ai/dsh-tools` devDependency moves from 0.2.2-rc.3 to 0.2.2-rc.4, and every dsh peer/engines range gains the append-only `>=0.2.2-0 <0.3.0` clause. No runtime behaviour changed; all five READMEs now name `dsh-v0.2.2-rc.4` and the v0.19.1 git-install stamp.
+
 ## 0.19.0 — 2026-11-18
 
 * **Chinese file names**: the name index normalises full/half-width, case and CJK compatibility characters and matches pinyin — full syllables (`guojia`), initials (`gjjy`/`gjy`) and mixed queries (`guo家`) find Chinese filenames; the snapshot format is unchanged and old snapshots build the derived pinyin keys on load.

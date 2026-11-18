@@ -4,7 +4,7 @@
 
 **Busca por nombre cuando recuerdas el nombre y por contenido cuando recuerdas la frase; después abre el archivo o vuelve a la conversación.**
 
-Búsqueda de archivos en todo el disco para [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) con su **propio** índice: sin instalar Everything, sin `es.exe`, con las mismas herramientas y el mismo panel en Windows, macOS y Linux.
+Búsqueda de archivos en todo el disco para [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) con su **propio** índice: sin instalar Everything, sin `dsh-v0.2.2-rc.4`（2026-11-18）；`es.exe`, con las mismas herramientas y el mismo panel en Windows, macOS y Linux.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -513,7 +513,7 @@ El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` 
 
 ## Versión y compatibilidad
 
-- Node `^22.19.0 || >=24.9.0`; DSH `>=0.2.1-rc.2 <0.3.0` (ver `engines` en `package.json`).
+- Node `^22.19.0 || >=24.9.0`; DSH `>=0.2.1-rc.2 <0.3.0 || >=0.2.2-0 <0.3.0` (ver `engines` en `package.json`).
 - Las versiones se publican con procedencia de GitHub Actions, así que el origen del paquete npm es verificable; Gitee / GitCode se sincronizan con un workflow de réplica.
 - Registro de cambios: [CHANGELOG.md](CHANGELOG.md); dudas e informes: [Issues](https://github.com/PerryLink/dsh-locator/issues).
 
