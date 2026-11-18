@@ -1,3 +1,5 @@
+> Compatibilidade com o host: DeepSeek Harness `dsh-v0.2.2-rc.4` (verificado em 2026-11-18).
+
 <div align="center">
 
 # 🔎 dsh-locator

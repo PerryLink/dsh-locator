@@ -1,3 +1,5 @@
+> होस्ट संगतता: DeepSeek Harness `dsh-v0.2.2-rc.4` (2026-11-18 को सत्यापित)।
+
 <div align="center">
 
 # 🔎 dsh-locator
