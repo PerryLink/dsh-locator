@@ -4,7 +4,7 @@
 
 **Busque por nome quando lembra do nome e por conteúdo quando lembra da frase; depois abra o arquivo ou volte para a conversa.**
 
-Busca de arquivos em todo o disco para o [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) com **índice próprio**: sem instalar o Everything, sem `dsh-v0.2.2-rc.4`（2026-11-18）；`es.exe`, com as mesmas ferramentas e o mesmo painel no Windows, macOS e Linux.
+Busca de arquivos em todo o disco para o [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) com **índice próprio**: sem instalar o Everything, sem `es.exe`, com as mesmas ferramentas e o mesmo painel no Windows, macOS e Linux.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)

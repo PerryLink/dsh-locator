@@ -4,7 +4,7 @@
 
 **Search names when you remember the name, contents when you remember the phrase — then open the file or jump back to the conversation.**
 
-Whole-disk file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) with its **own** index: no Everything install, no `dsh-v0.2.2-rc.4`（2026-11-18）；`es.exe`, one set of tools and one panel across Windows, macOS and Linux.
+Whole-disk file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) with its **own** index: no Everything install, no `es.exe`, one set of tools and one panel across Windows, macOS and Linux.
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)

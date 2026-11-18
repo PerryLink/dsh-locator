@@ -4,7 +4,7 @@
 
 **नाम याद है तो नाम से खोजें, बात याद है तो सामग्री से खोजें; फिर फ़ाइल खोलें या उसी बातचीत पर वापस जाएँ।**
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) के लिए पूरे डिस्क की फ़ाइल खोज, **अपने ही इंडेक्स** के साथ: Everything इंस्टॉल करने की ज़रूरत नहीं, `dsh-v0.2.2-rc.4`（2026-11-18）；`es.exe` पर निर्भरता नहीं, Windows / macOS / Linux पर एक ही टूल और एक ही पैनल।
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) के लिए पूरे डिस्क की फ़ाइल खोज, **अपने ही इंडेक्स** के साथ: Everything इंस्टॉल करने की ज़रूरत नहीं, `es.exe` पर निर्भरता नहीं, Windows / macOS / Linux पर एक ही टूल और एक ही पैनल।
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.2 — 2026-11-18
+
+* **Documentation fix and 0.2.2-rc.4 alignment completed**: restores the corrupted intro sentence and compatibility line in all five READMEs (0.19.1 inserted the `dsh-v0.2.2-rc.4` stamp mid-sentence), and actually applies the rc.4 adjustments announced in 0.19.1 — `@deepseek-ai/dsh-tools` devDependency 0.2.2-rc.4 and the append-only `>=0.2.2-0` clause in `engines.dsh` and the dsh-tools peer range. No runtime behaviour change.
+
 ## 0.19.1 — 2026-11-18
 
 * **DeepSeek Harness 0.2.2-rc.4 compatibility**: the `@deepseek-ai/dsh-tools` devDependency moves from 0.2.2-rc.3 to 0.2.2-rc.4, and every dsh peer/engines range gains the append-only `>=0.2.2-0 <0.3.0` clause. No runtime behaviour changed; all five READMEs now name `dsh-v0.2.2-rc.4` and the v0.19.1 git-install stamp.
