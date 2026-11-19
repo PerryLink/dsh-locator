@@ -80,7 +80,7 @@ El índice es local: sin llamadas de red, sin telemetría, sin subidas; el plugi
 | Índice | Persistente, propio | Persistente (USN de NTFS) | Índice del sistema (metadatos/contenido) | Recorrido en cada llamada |
 | Búsqueda en contenido | Archivos de texto + mensajes de sesión de DSH | Solo nombres por defecto | Sí, varía según el sistema | Sí, sin índice |
 | Salto a sesión | Los resultados llevan `sessionId` / `messageId` | No | No | No |
-| Herramientas para agentes | Seis herramientas, un lenguaje de consulta | Requiere CLI/servicio | Requiere scripts propios | Nativas, sin índice persistente |
+| Herramientas para agentes | 12 herramientas locator + 2 adaptadores de capability, un lenguaje de consulta | Requiere CLI/servicio | Requiere scripts propios | Nativas, sin índice persistente |
 | Velocidad en Windows | Cerca de Everything (USN opcional) | La más rápida y ligera | No aplica | Más lenta que un índice |
 
 En resumen: la **idea** de Everything (índice persistente + consultas estructuradas) está implementada de forma independiente y multiplataforma, con las sesiones de DSH añadidas encima. No es un envoltorio de Everything.
@@ -92,7 +92,7 @@ En resumen: la **idea** de Everything (índice persistente + consultas estructur
 dsh plugin --profile web add dsh-locator
 
 # fijar una versión
-dsh plugin --profile web add dsh-locator@0.7.7
+dsh plugin --profile web add dsh-locator@0.19.3
 
 # rama principal de GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -404,6 +404,14 @@ DeepSeek Harness
 ## Memoria
 
 El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
+
+## Notas de actualización 0.19.2
+
+- Corrige la corrupción de los README introducida en 0.19.1 en los cinco idiomas.
+- Completa la alineación con DeepSeek Harness 0.2.2-rc.4: devDependency `@deepseek-ai/dsh-tools` 0.2.2-rc.4 y la cláusula `|| >=0.2.2-0 <0.3.0` en `engines.dsh` y el peer de dsh-tools.
+- Panel: se elimina el lanzador del pie de la barra lateral; solo queda la lupa de la cabecera de la conversación (SVG de 16 px en un área de 28 px, centrada verticalmente).
+- Documentación: tabla de herramientas con los 12 tools + 2 capability, uso de CLI/MCP y nuevas opciones de configuración.
+- `336 tests`; los seis binarios del motor se reconstruyeron en 0.19.2.
 
 ## Notas de actualización 0.19.0
 

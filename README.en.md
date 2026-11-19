@@ -80,7 +80,7 @@ The index is local: no network calls, no telemetry, no uploads, and the plugin n
 | Index | Persistent, self-built | Persistent (NTFS USN) | System metadata/content index | Re-walk per call |
 | Body search | Text files + DSH session messages | Names only by default | Yes, varies by system | Yes, unindexed |
 | Session jump | Hits carry `sessionId` / `messageId` | No | No | No |
-| Agent tools | Six tools, one query language | Needs a CLI/service | Needs glue scripts | Native, no persistent index |
+| Agent tools | 12 locator tools + 2 capability adapters, one query language | Needs a CLI/service | Needs glue scripts | Native, no persistent index |
 | Windows speed | Close to Everything (USN optional) | Fastest and lightest | N/A | Slower than an index |
 
 In short: the **idea** behind Everything (persistent index + structured query) is implemented independently and cross-platform, with DSH sessions added on top. It is not a wrapper around Everything.
@@ -92,7 +92,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.7.6
+dsh plugin --profile web add dsh-locator@0.19.3
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -191,12 +191,33 @@ Press `Ctrl+F` in a conversation (or click `⌕` in the session header) to open 
 
 | Tool | What it does |
 |---|---|
-| `locator_search` | Query names and paths, with `ext:`, `size:`, `dm:`, `path:` filters plus sorting and pagination. |
-| `locator_find` | Search file bodies and session messages; hits carry snippets, an optional `line` number, `sessionId`/`messageId`, and the content-index state. |
-| `locator_status` | Roots, name-index counts, watcher state, state directory and engine path. (Content progress is reported by `locator_find` and the panel, not here.) |
+| `locator_search` | Query names and paths, with `ext:`, `size:`, `dm:`, `path:` filters plus sorting and pagination; `mode: names/content/count` and `totalCount`/`nextOffset`/`truncated`/`budget` on every result. |
+| `locator_find` | Search file bodies and session messages; hits carry snippets, `contextLines`, `format`, `refStatus`, an optional `line` number and `sessionId`/`messageId`. |
+| `locator_status` | Roots, name-index counts, watcher/incremental-refresh state, effective ignore rules, output budget, hooks and state directory. |
 | `locator_rebuild` | Replace the name index with a fresh background scan; searches keep using the old index until the new one is ready. |
 | `locator_reindex` | Refresh or rebuild the content index: incremental by default, `full: true` drops and rebuilds it. |
 | `locator_export` | Write a read-only SQLite mirror of the name index (`entries` table) for external SQL tools. |
+| `locator_resolve` | Resolve `ref://` / `dsh-session:` evidence: metadata, hash, freshness, permissions, lifecycle `status` and a bounded excerpt. |
+| `locator_cite` | Render refs as markdown / mention / json citations; `detail: exact` adds the verbatim text, offsets and a fallback link. |
+| `locator_explore` | Explore an open question with parallel name/body queries, merge evidence refs and return a budgeted digest. |
+| `locator_outline` | List the symbols of one indexed file (functions/classes/types/Markdown headings, 14 languages). |
+| `locator_symbol` | Find declarations by symbol name across the index. |
+| `locator_repo_map` | Token-budgeted repository declaration map for orienting in an unfamiliar tree. |
+| `capability_search` | Find a tool/MCP action/skill by intent in the live DSH capability registry (not file search). |
+| `capability_preflight` | Validate a capability, its argument schema, risk and approval requirements before calling it. |
+
+### CLI and MCP
+
+The npm package also exposes two bins (or run the scripts directly):
+
+```sh
+npx dsh-locator search "handoff ext:md" --json
+npx dsh-locator find "retry policy" --context 2
+npx dsh-locator status --json
+npx dsh-locator resolve "ref://file?..." --excerpt
+npx dsh-locator cite "ref://file?..." --format markdown
+npx dsh-locator-mcp   # read-only MCP stdio server for Claude Code / Cursor etc.
+```
 
 ## Query language
 
@@ -254,6 +275,20 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentActiveSessionDelayMs` | `120000` | Only index a session log after it has been quiet this long. |
 | `contentSessionDirs` | `[]` | Extra session directories; empty means `$DSH_HOME/sessions`. |
 | `contentExcludes` | dependency/toolchain names | Path segments or substrings the content index skips; the name index still covers them. |
+| `refreshIncremental` | `true` | Fallback refreshes rescan only roots the watcher cannot cover; `false` restores the 0.18 full rebuild. |
+| `contentIndexReasoning` | `false` | Index assistant reasoning/thinking blocks (toggling rebuilds session documents only). |
+| `contentExtractDocuments` | `true` | Extract PDF/Word/Excel/PowerPoint/EPUB bodies (lazy, failures only warn). |
+| `contentExtractMaxBytes` | `20000000` | Largest document handed to the extractor. |
+| `contentIndexSymbols` | `true` | Build the code-symbol store behind `locator_outline`/`locator_symbol`/`locator_repo_map`. |
+| `contentSymbolMaxBytes` | `524288` | Largest code file considered for symbol extraction. |
+| `contentFullIndex` | `false` | One-switch full mode: overrides body/file caps to unlimited. |
+| `notIndexed` | `[]` | Globs that never enter the content index (name index still covers them). |
+| `notSearchable` | `[]` | Globs never returned as hits (still readable). |
+| `notReadable` | `[]` | Globs agents must not read (content hits and evidence refs are refused). |
+| `outputBudgetChars` | `8000` | Per-tool-result character budget; `0` disables it. |
+| `urlFreshness` | `false` | Let `locator_resolve` revalidate URL refs with one bounded conditional HTTP request. |
+| `rerankCommand` | `''` | Optional external rerank command (`rerank/v1` JSON stdin/stdout). |
+| `ocrCommand` | `''` | Optional external OCR command (`ocr/v1` JSON stdin/stdout). |
 | `stateDir` | `''` | Snapshot and content database directory; empty means the platform cache directory. Use a separate value per DSH process. |
 
 `binaryPath`, `maxResults`, `startupTimeoutMs` and `requestTimeoutMs` are also available for custom engines, page caps and deadlines; the defaults are fine for most setups.
@@ -266,8 +301,8 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 
 | Metric | Result |
 |---|---|
-| Cold scan | ~1.51 M entries in 11–12 s |
-| Snapshot size | ~171 MB for 1.51 M entries |
+| Cold scan | ~1.50 M entries in 10–12 s |
+| Snapshot size | ~154 MB for 1.50 M entries |
 | Hot query (`locator_search`) | 6–25 ms for common queries; `path:` prefix scans ~70 ms |
 | Search while a rebuild runs | The old index keeps serving until the new one is ready |
 | Peak scan memory | Hundreds of MB; the engine is a child process and honours `memoryLimitMB` / `GOMEMLIMIT` |
@@ -276,9 +311,9 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 
 | Metric | Result (0.7.x, real home) |
 |---|---|
-| Coverage | ~95.8 k text files / 95 sessions / 1,050 messages |
+| Coverage | ~93.4 k text files / 93 sessions / 2,131 messages |
 | Full rebuild | ~3.5 min in the background; host p95 14 ms / max 115 ms during it |
-| Incremental refresh (no change) | ~12 s (dominated by the engine dump of 1.51 M entries) |
+| Incremental refresh (no change) | ~12 s (dominated by the engine dump of 1.50 M entries) |
 | Idle host latency | p50 2 ms / p95 3 ms / max 6 ms |
 | Database size | ~3.1 GB (about 3× the body budget) |
 | Content query | ~100 ms for common words, a few ms for rare terms (worker thread, host unaffected) |
@@ -406,6 +441,18 @@ DeepSeek Harness
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
 
+## 0.19.2 upgrade notes
+
+- **Fixes the 0.19.1 README insertion corruption** in all five language files.
+- **Completes the DeepSeek Harness 0.2.2-rc.4 alignment**: `@deepseek-ai/dsh-tools` devDependency 0.2.2-rc.4, and the append-only `|| >=0.2.2-0 <0.3.0` clause in `engines.dsh` and the dsh-tools peer range.
+- **Panel search entry**: the sidebar-footer launcher is removed; only the session-header magnifier remains (16 px SVG in a 28 px hit target, vertically centred, matching the adjacent controls).
+- **Documentation iteration**: the tool table lists the six new 0.19.0 tools, adds CLI/MCP usage, and the config table covers extraction/symbols/budget/ignore/URL-freshness/hooks; performance numbers refreshed from 0.19.x measurements.
+- `336 tests`; six engines rebuilt at 0.19.2.
+
+## 0.19.1 upgrade notes
+
+- Aligns with DeepSeek Harness 0.2.2-rc.4 (version/docs only; no runtime behaviour change). Note: this release shipped README insertion errors, fixed in 0.19.2.
+
 ## 0.19.0 upgrade notes
 
 - **Chinese file names**: the name index normalises full/half-width, case and CJK compatibility characters and matches pinyin (full syllables, initials, mixed queries); the snapshot format is unchanged and old snapshots build the derived pinyin keys on load.
@@ -423,7 +470,7 @@ The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOG
   npx dsh-locator-mcp    # stdio MCP server for external agents (Claude Code / Cursor etc.)
   ```
 - **Optional hooks**: `rerankCommand` and `ocrCommand` external commands, both off by default.
-- **332 tests**; six engine binaries rebuilt at 0.19.0 (darwin release binaries are rebuilt on macOS by CI).
+- **336 tests**; six engine binaries rebuilt at 0.19.0 (darwin release binaries are rebuilt on macOS by CI).
 ## 0.18.0 upgrade notes
 
 - **Remote-filesystem roots are no longer walked for inotify**: NFS, SMB/CIFS, Ceph, AFS and WSL 9p/DrvFs roots cannot deliver usable inotify events. The Linux watcher now skips their per-directory walk entirely (previously it installed one watch per directory and only then reported "degraded"), so a 9p root no longer costs seconds-to-minutes of startup/rebuild time or tens of thousands of kernel watch slots. Those roots keep the periodic rebuild fallback and still report `watchDegraded` with the same reason; local roots keep native watching.

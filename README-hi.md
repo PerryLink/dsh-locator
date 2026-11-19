@@ -80,7 +80,7 @@ dsh plugin --profile web add dsh-locator
 | इंडेक्स | लगातार बना, अपना | लगातार बना (NTFS USN) | सिस्टम इंडेक्स (मेटाडेटा/सामग्री) | हर कॉल पर फिर से चलता है |
 | सामग्री खोज | टेक्स्ट फ़ाइलें + DSH सेशन संदेश | डिफ़ॉल्ट रूप से केवल नाम | हाँ, सिस्टम के अनुसार बदलता है | हाँ, लेकिन इंडेक्स नहीं |
 | सेशन पर जाना | परिणाम में `sessionId` / `messageId` | नहीं | नहीं | नहीं |
-| एजेंट टूल | छह टूल, एक क्वेरी भाषा | अलग CLI/सेवा चाहिए | अलग स्क्रिप्ट चाहिए | मूल टूल, स्थायी इंडेक्स नहीं |
+| एजेंट टूल | 12 locator टूल + 2 capability adapters, एक क्वेरी भाषा | अलग CLI/सेवा चाहिए | अलग स्क्रिप्ट चाहिए | मूल टूल, स्थायी इंडेक्स नहीं |
 | Windows पर गति | Everything के करीब (USN वैकल्पिक) | सबसे तेज़ और हल्का | लागू नहीं | इंडेक्स से धीमा |
 
 संक्षेप में: Everything का **विचार** (लगातार इंडेक्स + संरचित क्वेरी) स्वतंत्र रूप से क्रॉस-प्लेटफ़ॉर्म लागू किया गया है, और ऊपर DSH सेशन जोड़े गए हैं। यह Everything का रैपर नहीं है।
@@ -92,7 +92,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # संस्करण तय करें
-dsh plugin --profile web add dsh-locator@0.7.7
+dsh plugin --profile web add dsh-locator@0.19.3
 
 # GitHub मुख्य ब्रांच
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -405,6 +405,14 @@ DeepSeek Harness
 ## मेमोरी
 
 इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
+
+## 0.19.2 अपग्रेड नोट्स
+
+- पाँचों भाषाओं में 0.19.1 में पेश README corruption ठीक करता है।
+- DeepSeek Harness 0.2.2-rc.4 alignment पूरा करता है: devDependency `@deepseek-ai/dsh-tools` 0.2.2-rc.4 और `engines.dsh` / dsh-tools peer में `|| >=0.2.2-0 <0.3.0` clause।
+- Panel: sidebar footer launcher हटाया गया; अब केवल conversation header की magnifier बची है (16px SVG, 28px hit target, vertically centred)।
+- Docs: tool table में 12 tools + 2 capability, CLI/MCP usage और नई configuration options जोड़ी गईं।
+- `336 tests`; छह engines 0.19.2 पर rebuild।
 
 ## 0.19.0 अपग्रेड नोट्स
 

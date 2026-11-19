@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.19.3 — 2026-11-19
+
+* **Documentation iteration**: the five READMEs now list all twelve locator tools plus the two capability adapters, add CLI/MCP usage, and document the 0.19.0 configuration surface (document extraction, code symbols, result budget, ignore layers, URL freshness, external hooks); install examples and performance numbers are refreshed from 0.19.x measurements. No runtime behaviour change; engines rebuilt for version consistency (336 tests).
+
 ## 0.19.2 — 2026-11-18
 
 * **Documentation fix and 0.2.2-rc.4 alignment completed**: restores the corrupted intro sentence and compatibility line in all five READMEs (0.19.1 inserted the `dsh-v0.2.2-rc.4` stamp mid-sentence), and actually applies the rc.4 adjustments announced in 0.19.1 — `@deepseek-ai/dsh-tools` devDependency 0.2.2-rc.4 and the append-only `>=0.2.2-0` clause in `engines.dsh` and the dsh-tools peer range. No runtime behaviour change.
