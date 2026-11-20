@@ -335,10 +335,10 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 | `function` (26.7 k hits) | 146 ms | **41 ms** |
 | Rare-term query | 8.8 ms | 13 ms (4 ms absolute difference, no practical impact) |
 | Incremental refresh (no change) | ~12 s (dump of 1.5 M entries) | **<0.3 s** (engine generation fast path) |
-| Full rebuild | ~3.5 min | **estimated 1.5–2 min** (250 writes/transaction + FTS optimize) |
-| Database size | ~4.1 GB (4.1× the body budget) | **estimated 2–3 GB** (cache exclusion, symbol cap, eviction, DB budget) |
-| Coverage | ~93.4 k files; new files freeze once the budget is full | Evicts oldest documents within the budget; new files stay indexable; `locator_status` reports coverage |
-| Host latency | Content queries run in a worker, host unaffected | Unchanged; `/combined` enrichment is asynchronous, so 9p roots no longer block the event loop |
+| Full rebuild | ~3.5 min (the old build stopped early once the budget filled) | **measured ~11 min** (260 k candidates / 1 GB budget / 39 k evictions, one-off; 1–4 s incrementals afterwards) |
+| Database size | ~4.1 GB (4.1× the body budget) | **measured 4.12 GB** (967 MB of bodies, ~4.3×; `contentMaxDbBytes` defaults to 5 GB) |
+| Coverage | ~93.4 k files; new files freeze once the budget is full | **measured 91,729 files / 91 sessions / 2,064 messages, 69.8% coverage**; oldest documents evict within the budget and new files stay indexable |
+| Host latency | Content queries run in a worker, host unaffected | Unchanged; `/combined` enrichment is asynchronous, so 9p roots no longer block the event loop; measured HTTP `/content` common-word query **~3 ms** |
 
 **Cheaper configurations**
 
