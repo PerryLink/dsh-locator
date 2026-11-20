@@ -383,6 +383,20 @@ func (s *Server) unwatchedRefreshInterval() time.Duration {
 	return unwatched
 }
 
+// initialFallbackCadence is the delay for the very first fallback round. The
+// native watcher installs asynchronously after ready, so watcherHealth() may
+// still report no coverage at startup; trusting it would postpone the first
+// refresh of a 9p root by a full base interval (35 minutes observed in the
+// 0.20.2 live test). When an unwatched cadence is configured, start with it so
+// the first refresh happens on the fast schedule.
+func (s *Server) initialFallbackCadence() time.Duration {
+	delay := s.fallbackCadence(s.watcherHealth())
+	if d := s.unwatchedRefreshInterval(); d > 0 && d < delay {
+		return d
+	}
+	return delay
+}
+
 // fallbackCadence is the delay the fallback loop installs for the next round
 // given the current watcher coverage: the unwatched cadence when the fallback
 // exists to cover watcher-less roots, the base interval otherwise.

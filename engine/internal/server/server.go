@@ -835,7 +835,7 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 		// interval just to learn that nothing changed. A changed refresh
 		// resets the delay. Rounds that refresh watcher-less roots use the
 		// faster unwatched cadence with a 2x idle cap instead.
-		delay := s.fallbackCadence(s.watcherHealth())
+		delay := s.initialFallbackCadence()
 		if delay <= 0 {
 			delay = s.opt.RefreshInterval
 		}

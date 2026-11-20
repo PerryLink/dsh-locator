@@ -115,6 +115,17 @@ func TestUnwatchedRefreshInterval(t *testing.T) {
 
 // TestFallbackCadence: a fallback that exists to cover watcher-less roots starts
 // on the unwatched cadence; complete watcher coverage keeps the base interval.
+func TestInitialFallbackCadence(t *testing.T) {
+	s := New(Options{Watch: true, RefreshInterval: 30 * time.Minute, UnwatchedRefreshInterval: 5 * time.Minute})
+	if got := s.initialFallbackCadence(); got != 5*time.Minute {
+		t.Fatalf("initial cadence before the watcher installs = %v, want 5m", got)
+	}
+	slow := New(Options{Watch: true, RefreshInterval: 30 * time.Minute, UnwatchedRefreshInterval: 45 * time.Minute})
+	if got := slow.initialFallbackCadence(); got != 30*time.Minute {
+		t.Fatalf("initial cadence with slow unwatched = %v, want base 30m", got)
+	}
+}
+
 func TestFallbackCadence(t *testing.T) {
 	s := New(Options{Watch: true, RefreshInterval: 30 * time.Minute, UnwatchedRefreshInterval: 10 * time.Minute})
 	mixed := watch.Health{Coverage: []watch.RootCoverage{
