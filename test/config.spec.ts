@@ -99,7 +99,7 @@ describe('0.20.0 performance configuration', () => {
     expect(resolved.memoryLimitMB).toBe(0)
     expect(resolved.contentEvict).toBe(true)
     expect(resolved.contentSymbolsPerFile).toBe(500)
-    expect(resolved.contentMaxDbBytes).toBe(2_000_000_000)
+    expect(resolved.contentMaxDbBytes).toBe(5_000_000_000)
     expect(resolved.contentRankAdaptive).toBe(true)
     expect(resolved.contentQueryCacheSize).toBe(64)
     expect(resolved.contentQueryCacheTtlMs).toBe(60_000)

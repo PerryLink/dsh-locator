@@ -286,7 +286,7 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentExtractMaxBytes` | `8000000` | Largest document handed to the extractor (runs in a worker thread with a 512 MB heap and a 5 s deadline). |
 | `contentEvict` | `true` | Evict the oldest documents when the body budget is full instead of freezing the index. |
 | `contentSymbolsPerFile` | `500` | Symbols kept per code file. |
-| `contentMaxDbBytes` | `2000000000` | `content.db` byte budget; oversize triggers one idle rebuild per six hours. |
+| `contentMaxDbBytes` | `5000000000` | `content.db` byte budget (about 4–5× the body budget); oversize triggers one idle rebuild per six hours. |
 | `contentRankAdaptive` | `true` | Skip bm25 ordering for wide result sets (order-of-magnitude faster on common words). |
 | `contentQueryCacheSize` | `64` | Content search cache entries; `0` disables the cache. |
 | `contentQueryCacheTtlMs` | `60000` | Content search cache TTL. |

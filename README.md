@@ -281,7 +281,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentExtractMaxBytes` | `8000000` | 交给文档抽取器的单文件上限；抽取在独立 worker 线程内执行（512MB 堆、5s 超时）。 |
 | `contentEvict` | `true` | 正文预算满时按 mtime 淘汰最旧文档，而不是冻结索引（新文件可持续入库）。 |
 | `contentSymbolsPerFile` | 500 | 每个代码文件最多保存的符号数。 |
-| `contentMaxDbBytes` | 2000000000 | content.db 字节预算；超限时在空闲期重建一次（6h 最多一次）。 |
+| `contentMaxDbBytes` | 5000000000 | content.db 字节预算（正文预算的约 4–5 倍）；超限时在空闲期重建一次（6h 最多一次）。 |
 | `contentRankAdaptive` | `true` | 宽结果集跳过 bm25 全量排序（对常见词快一个数量级）。 |
 | `contentQueryCacheSize` | 64 | 内容查询结果缓存条数；0 关闭。 |
 | `contentQueryCacheTtlMs` | 60000 | 内容查询缓存 TTL。 |

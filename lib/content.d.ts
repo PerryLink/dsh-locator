@@ -272,6 +272,9 @@ export declare class ContentIndex {
     private batchOps;
     /** A full build created the symbols table without its indexes; create them at the end. */
     private symbolIndexesPending;
+    /** Fresh full build: symbols indexes are created after the insert pass, so per-file deletes must wait. */
+    private symbolsBulk;
+    private readonly symbolsBulkPurge;
     /** Persisted counters kept in content_meta so caps checks stay O(1). */
     private fileDocs;
     private oversizedDocs;

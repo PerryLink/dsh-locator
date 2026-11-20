@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.1 — 2026-11-20
+
+* **Full content rebuild regression**: a fresh rebuild creates the symbols indexes after the bulk insert pass, but `writeSymbols` still issued a per-file `DELETE FROM symbols WHERE path = ?` while no path index existed — a full scan of the growing symbols table (measured ~22 ms per file at 700 k rows). Full rebuilds therefore crawled (about 50 minutes on the live corpus instead of the expected few minutes). Deletes during the fresh build are now deferred and applied once the indexes exist, and the same holds for evictions performed while the build is running.
+* **`contentMaxDbBytes` default** raised from 2 GB to 5 GB: the FTS trigram layout stores roughly 4–5× the body budget on disk, so the old default made every full index look over budget and schedule an idle rebuild every six hours.
+* No engine behaviour change; engines rebuilt for version consistency. `443 tests`.
+
 ## 0.20.0 — 2026-11-20
 
 Performance and footprint release: name index, content index, runtime and panel were profiled end-to-end; every P0/P1/P2 item from the performance study is implemented or explicitly superseded. See `00-live/PERFORMANCE-RESEARCH-dsh-locator-2026-11-20.md` (research notes) for measurements.

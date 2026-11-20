@@ -439,6 +439,9 @@ export class ContentIndex {
   private batchOps = 0
   /** A full build created the symbols table without its indexes; create them at the end. */
   private symbolIndexesPending = false
+  /** Fresh full build: symbols indexes are created after the insert pass, so per-file deletes must wait. */
+  private symbolsBulk = false
+  private readonly symbolsBulkPurge = new Set<string>()
   /** Persisted counters kept in content_meta so caps checks stay O(1). */
   private fileDocs = 0
   private oversizedDocs = 0
@@ -847,8 +850,13 @@ export class ContentIndex {
     if (this.ensureSymbolsTables()) this.needsSymbolBackfill = true
     if (fresh) {
       // A full build inserts every symbol; its indexes are created afterwards so
-      // the insert pass does not pay index maintenance per row.
+      // the insert pass does not pay index maintenance per row. There is also
+      // nothing to delete yet, and DELETE without an index is a full table scan
+      // (measured ~22 ms per file on a 700 k-row table), so per-file deletes are
+      // deferred until the indexes exist.
       this.symbolIndexesPending = true
+      this.symbolsBulk = true
+      this.symbolsBulkPurge.clear()
     } else {
       this.ensureSymbolIndexes()
     }
@@ -2490,6 +2498,15 @@ export class ContentIndex {
       this.db.exec('CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path)')
       this.db.exec('CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name)')
       this.symbolIndexesPending = false
+      if (this.symbolsBulk) {
+        // Apply the deletions deferred during the fresh insert pass now that
+        // symbols_path exists (normally empty; eviction during a full build is
+        // the only producer).
+        const purge = this.db.prepare('DELETE FROM symbols WHERE path = ?')
+        for (const path of this.symbolsBulkPurge) purge.run(path)
+        this.symbolsBulkPurge.clear()
+        this.symbolsBulk = false
+      }
     } catch { /* additive data layer: a failed index only slows lookups */ }
   }
 
@@ -2629,7 +2646,7 @@ export class ContentIndex {
   private writeSymbols(path: string, symbols: readonly CodeSymbol[]): void {
     if (this.db === null) return
     try {
-      this.db.prepare('DELETE FROM symbols WHERE path = ?').run(path)
+      if (!this.symbolsBulk) this.db.prepare('DELETE FROM symbols WHERE path = ?').run(path)
       if (symbols.length === 0) return
       const insert = this.db.prepare('INSERT INTO symbols (path, name, kind, line, language, scope) VALUES (?, ?, ?, ?, ?, ?)')
       for (const symbol of symbols) insert.run(path, symbol.name, symbol.kind, symbol.line, symbol.language, symbol.scope ?? null)
@@ -2639,6 +2656,7 @@ export class ContentIndex {
   /** Remove every stored symbol of one deleted file. */
   private deleteSymbols(path: string): void {
     if (this.db === null || path === '') return
+    if (this.symbolsBulk) { this.symbolsBulkPurge.add(path); return }
     try { this.db.prepare('DELETE FROM symbols WHERE path = ?').run(path) } catch { /* additive table only */ }
   }
 

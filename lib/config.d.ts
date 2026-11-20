@@ -95,7 +95,7 @@ export interface Config {
     contentEvict?: boolean;
     /** Maximum symbols stored per code file (default 500; lower keeps the symbols table small). */
     contentSymbolsPerFile?: number;
-    /** Hard budget for content.db in bytes (default 2 GB); oversize triggers an idle rebuild. */
+    /** Hard budget for content.db in bytes (default 5 GB); oversize triggers an idle rebuild. */
     contentMaxDbBytes?: number;
     /** Adaptive bm25: skip rank ordering for result sets above this hit threshold (default 2000). */
     contentRankAdaptive?: boolean;

@@ -98,7 +98,7 @@ export interface Config {
   contentEvict?: boolean
   /** Maximum symbols stored per code file (default 500; lower keeps the symbols table small). */
   contentSymbolsPerFile?: number
-  /** Hard budget for content.db in bytes (default 2 GB); oversize triggers an idle rebuild. */
+  /** Hard budget for content.db in bytes (default 5 GB); oversize triggers an idle rebuild. */
   contentMaxDbBytes?: number
   /** Adaptive bm25: skip rank ordering for result sets above this hit threshold (default 2000). */
   contentRankAdaptive?: boolean
@@ -270,7 +270,7 @@ export const Config: Schema<Config> = Schema.object({
   contentExtractMaxBytes: Schema.number().default(8_000_000),
   contentEvict: Schema.boolean().default(true),
   contentSymbolsPerFile: Schema.number().default(500),
-  contentMaxDbBytes: Schema.number().default(2_000_000_000),
+  contentMaxDbBytes: Schema.number().default(5_000_000_000),
   contentRankAdaptive: Schema.boolean().default(true),
   contentQueryCacheSize: Schema.number().default(64),
   contentQueryCacheTtlMs: Schema.number().default(60_000),
