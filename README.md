@@ -164,7 +164,7 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 
 ## Web 面板
 
-在 Web GUI 里按 `Ctrl+Shift+F`，或者点会话头部的放大镜。面板通过同源路由工作（`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`），不另起服务、不占额外端口。`/combined` 新增 `matchMode`、`caseSensitive`、`wholeWord`、`sessionId`、`count` 参数，内容组返回 `count`/`warnings`，文件命中带 `line`。
+在 Web GUI 里按 `Ctrl+Shift+F`，或者点会话头部的放大镜。面板语言跟随 DSH 界面语言（`<html lang>`），没有有效语言标签时默认中文；可通过 profile 的 `locale` 配置（`preference: zh`）固定。面板通过同源路由工作（`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`），不另起服务、不占额外端口。`/combined` 新增 `matchMode`、`caseSensitive`、`wholeWord`、`sessionId`、`count` 参数，内容组返回 `count`/`warnings`，文件命中带 `line`。
 
 - **默认同时搜索三个范围**：内容（正文 + 会话）、文件、目录，三个勾选默认全部打开；取消任一勾选即可缩小范围。结果按“内容 → 文件 → 目录”分组，组头显示数量；内容按相关度排序，文件/目录按排序菜单。
 - **双击或 `Enter` 激活**：会话命中打开对应会话，并把命中的词用半透明琥珀色高亮（随滚动跟随、自动居中、`Esc` 清除）；文件/目录在文件管理器中定位。`Ctrl+Shift+C` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 插入 `@file`，`Alt+1–3` 切换范围。
@@ -402,6 +402,10 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - **全库内容正则 P0 不做**：正则模式会暂停内容组（文件/目录名仍可正则），避免 1GB 级全库扫描和 ReDoS；会话内查找条支持正则。
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
+
+## 0.19.4 更新
+
+- **面板默认中文**：面板语言改为每次取用时解析（优先 DSH 的 `<html lang>`，无有效标签时默认中文），不再在模块加载时冻结；live profile 也把 DSH locale 偏好固定为 `zh`。
 
 ## 0.19.2 更新
 

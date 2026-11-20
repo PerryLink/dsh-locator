@@ -165,7 +165,7 @@ The build runs inside the DSH host process, but file reads and zstd decoding are
 
 ## Web panel
 
-Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier in the conversation header. The panel uses same-origin routes (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), so it needs no second server and no extra port. `/combined` accepts `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` and `count`; the content group returns `count`/`warnings` and file hits carry `line`.
+Press `Ctrl+Shift+F` anywhere in the Web GUI, or click the magnifier in the conversation header. The panel follows the DSH UI language (`<html lang>`) and defaults to Chinese when no supported tag is present; pin it with a profile `locale` config (`preference: zh`). The panel uses same-origin routes (`search`, `content`, `content/rebuild`, `combined`, `status`, `reveal`, `open`), so it needs no second server and no extra port. `/combined` accepts `matchMode`, `caseSensitive`, `wholeWord`, `sessionId` and `count`; the content group returns `count`/`warnings` and file hits carry `line`.
 
 - **All three scopes are on by default**: content (bodies + sessions), files and folders; uncheck any scope to narrow the search. Results are grouped **content → files → folders** with a count per group; content is ranked by relevance and name groups follow the sort menu.
 - **Double-click or `Enter` activates a hit**: a session hit opens the conversation and paints the matched words with a translucent amber highlight that follows scrolling, is centered on arrival and clears with `Esc`; file/folder hits are revealed in the file manager. `Ctrl+Shift+C` copies the path, `Ctrl+O` opens, `Ctrl+Enter` inserts `@file`, and `Alt+1–3` toggles the scopes.
@@ -440,6 +440,10 @@ DeepSeek Harness
 ## Memory
 
 The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
+
+## 0.19.4 upgrade notes
+
+- **Chinese panel default**: the panel now resolves its locale on every lookup (host `<html lang>` first, Chinese when no supported tag exists) instead of freezing it at module load; the live profile also pins the DSH locale preference to `zh`.
 
 ## 0.19.2 upgrade notes
 

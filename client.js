@@ -1324,24 +1324,22 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         openFailed: "Не удалось открыть: {reason}", revealFailed: "Не удалось показать: {reason}",
       },
     }
-    const LANG = (() => {
-      // The host sets <html lang> from the active DSH locale; prefer it over
-      // the browser UI language so the panel follows the product setting.
+    // Resolve the panel locale on every lookup: the host sets <html lang>
+    // from the active DSH locale after client boot, so a module-load constant
+    // can stay stale (the served document starts as lang="en" even when the
+    // product language is Chinese). Unsupported/absent tags default to zh.
+    const LOCALE_TAGS = ['zh', 'es', 'pt', 'hi', 'ja', 'fr', 'de', 'ru', 'en']
+    function currentLang() {
       const hostTag = typeof document !== 'undefined' && document.documentElement ? document.documentElement.lang : ''
-      const tag = String(hostTag || (typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase()
-      if (tag.startsWith('zh')) return 'zh'
-      if (tag.startsWith('es')) return 'es'
-      if (tag.startsWith('pt')) return 'pt'
-      if (tag.startsWith('hi')) return 'hi'
-      if (tag.startsWith('ja')) return 'ja'
-      if (tag.startsWith('fr')) return 'fr'
-      if (tag.startsWith('de')) return 'de'
-      if (tag.startsWith('ru')) return 'ru'
-      return 'en'
-    })()
-    const TEXT = STRINGS[LANG]
+      const tag = String(hostTag || (typeof navigator !== 'undefined' && navigator.language) || '').toLowerCase()
+      for (const id of LOCALE_TAGS) {
+        if (tag.startsWith(id)) return id
+      }
+      return 'zh'
+    }
     function t(key, vars) {
-      let value = TEXT[key] || STRINGS.en[key] || key
+      const text = STRINGS[currentLang()] || STRINGS.en
+      let value = text[key] || STRINGS.en[key] || key
       if (vars) value = value.replace(/\{(\w+)\}/g, (_, name) => String(vars[name] ?? ''))
       return value
     }

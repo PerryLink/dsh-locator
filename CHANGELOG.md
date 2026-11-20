@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.19.4 — 2026-11-20
+
+* **Panel language default**: the panel resolves its locale dynamically (host `<html lang>` wins; unsupported or absent tags default to Chinese) instead of freezing a module-load constant, so a host that switches to Chinese after client boot is reflected. The live profile also pins the DSH locale preference to `zh`.
+* No other runtime change; engines rebuilt for version consistency (336 tests).
+
 ## 0.19.3 — 2026-11-19
 
 * **Documentation iteration**: the five READMEs now list all twelve locator tools plus the two capability adapters, add CLI/MCP usage, and document the 0.19.0 configuration surface (document extraction, code symbols, result budget, ignore layers, URL freshness, external hooks); install examples and performance numbers are refreshed from 0.19.x measurements. No runtime behaviour change; engines rebuilt for version consistency (336 tests).
