@@ -1781,15 +1781,10 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
     }
 
     function highlight(text, query) {
-      const words = queryWords(query)
-      if (words.length === 0) return text
-      try {
-        const pattern = new RegExp('(' + words.map(escapeRegExp).join('|') + ')', 'gi')
-        const parts = String(text).split(pattern)
-        return parts.map((part, index) => (index % 2 === 1 ? h('mark', { className: 'dsh-locator-hit', key: index }, part) : part))
-      } catch {
-        return text
-      }
+      const expression = highlightExpression(query, highlightCache)
+      if (expression === null) return text
+      const parts = String(text).split(expression)
+      return parts.map((part, index) => (index % 2 === 1 ? h('mark', { className: 'dsh-locator-hit', key: index }, part) : part))
     }
 
     // ── panel preferences ───────────────────────────────────────────────────
@@ -3052,6 +3047,286 @@ self.onmessage = event => {
       try { localStorage.setItem(FIND_HISTORY_KEY, JSON.stringify(list.slice(0, 20))) } catch { /* ignore */ }
     }
 
+    // ── panel search pipeline ───────────────────────────────────────────────
+    // Body/session search is expensive (index build, ranking, evidence
+    // enrichment), so the panel never runs all of it on every keystroke: the
+    // name index answers first, bodies/sessions join after the typing pause,
+    // and one full request upgrades the settled query with evidence blocks and
+    // exact counts. The pure helpers below are unit-tested out of this bundle
+    // (see test/client.spec.ts), so the browser code holds no hidden logic.
+    /** Names-first debounce; short, but still coalesces very fast typing. */
+    const SEARCH_NAMES_DELAY = 90
+    /** Bodies/sessions are only queried after this pause (the 250–350ms window). */
+    const SEARCH_CONTENT_DELAY = 300
+    /** A settled query is upgraded once (rich evidence + exact count) at this idle. */
+    const SEARCH_SETTLE_DELAY = 900
+    /** Per-phase LRU: retyping/backspacing a previous query is instant. */
+    const SEARCH_CACHE_SIZE = 20
+    /** Hard DOM row cap: the list never grows with loaded pages past this. */
+    const SEARCH_ROW_LIMIT = 300
+    /** `content-query-too-short` threshold shared with the content index. */
+    const SEARCH_MIN_CONTENT_CHARS = 3
+    /** The panel's bounded-count budget (mirrors src/combined.ts's default). */
+    const SEARCH_COUNT_LIMIT = 1000
+    /** Highlight expressions are compiled once per query, not twice per row. */
+    const HIGHLIGHT_CACHE_SIZE = 8
+
+    /** Bounded LRU cache; Map insertion order doubles as the recency list. */
+    function createLruCache(size) {
+      const limit = typeof size === 'number' && Number.isFinite(size) ? Math.max(1, Math.trunc(size)) : 1
+      const entries = new Map()
+      return {
+        get(key) {
+          if (!entries.has(key)) return undefined
+          const value = entries.get(key)
+          entries.delete(key)
+          entries.set(key, value)
+          return value
+        },
+        set(key, value) {
+          entries.delete(key)
+          entries.set(key, value)
+          while (entries.size > limit) entries.delete(entries.keys().next().value)
+        },
+        has(key) { return entries.has(key) },
+        delete(key) { return entries.delete(key) },
+        clear() { entries.clear() },
+        size() { return entries.size },
+        keys() { return [...entries.keys()] },
+      }
+    }
+
+    /**
+     * Compile (and cache) the highlight expression for one query. The cache is
+     * keyed by the raw query, so every row of one result page reuses the same
+     * RegExp instead of compiling two new ones per row per keystroke.
+     * @returns the case-insensitive expression, or null when nothing is highlighted.
+     */
+    function highlightExpression(query, cache) {
+      const key = typeof query === 'string' ? query : ''
+      const cached = cache.get(key)
+      if (cached !== undefined) return cached
+      const words = queryWords(key)
+      let expression = null
+      if (words.length > 0) {
+        try {
+          expression = new RegExp('(' + words.map(escapeRegExp).join('|') + ')', 'gi')
+        } catch {
+          expression = null
+        }
+      }
+      // A null result is cached too: filter-only queries highlight nothing.
+      cache.set(key, expression)
+      return expression
+    }
+    const highlightCache = createLruCache(HIGHLIGHT_CACHE_SIZE)
+
+    /**
+     * Decide which phases one panel query runs. Names always run; bodies and
+     * sessions need an enabled content index, a non-regex match mode and at
+     * least `minChars` characters (the content index rejects shorter queries).
+     */
+    function searchPhasePlan(input) {
+      const settings = input !== null && typeof input === 'object' ? input : {}
+      const query = typeof settings.query === 'string' ? settings.query : ''
+      const text = query.trim()
+      const scopes = settings.scopes !== null && typeof settings.scopes === 'object' ? settings.scopes : {}
+      const matchMode = settings.matchMode === 'extended' || settings.matchMode === 'regex' ? settings.matchMode : 'normal'
+      const minChars = typeof settings.minChars === 'number' && settings.minChars > 0 ? Math.trunc(settings.minChars) : 3
+      const contentEnabled = settings.contentEnabled !== false
+      return {
+        text,
+        minChars,
+        contentEnabled,
+        matchMode,
+        names: scopes.files === true || scopes.dirs === true,
+        content: scopes.content === true && contentEnabled && matchMode !== 'regex' && text.length >= minChars,
+      }
+    }
+
+    /**
+     * Build the POST body for one search phase:
+     * - `names`: compact name page only, no counting work (`count: 'none'`);
+     * - `content`: compact bodies/sessions with a cheap bounded count;
+     * - `full`: rich evidence blocks plus an exact count (settled upgrade);
+     * - `more`: one extra rich page for load-more.
+     * Compact requests tell the server to skip ref/hash/freshness/permissions
+     * enrichment (src/combined.ts); browsing rows do not need them, the settled
+     * full request and the evidence inspector do.
+     */
+    function combinedBody(input, phase) {
+      const settings = input !== null && typeof input === 'object' ? input : {}
+      const scopes = settings.scopes !== null && typeof settings.scopes === 'object' ? settings.scopes : {}
+      const contentScope = scopes.content === true
+      const filesScope = scopes.files === true
+      const dirsScope = scopes.dirs === true
+      const body = {
+        query: typeof settings.query === 'string' ? settings.query : '',
+        content: false,
+        files: false,
+        dirs: false,
+        limit: typeof settings.limit === 'number' ? settings.limit : 50,
+        contentLimit: typeof settings.contentLimit === 'number' ? settings.contentLimit : 30,
+        countLimit: typeof settings.countLimit === 'number' ? settings.countLimit : 1000,
+        filesOffset: typeof settings.filesOffset === 'number' ? settings.filesOffset : 0,
+        dirsOffset: typeof settings.dirsOffset === 'number' ? settings.dirsOffset : 0,
+        contentOffset: typeof settings.contentOffset === 'number' ? settings.contentOffset : 0,
+        sort: typeof settings.sort === 'string' ? settings.sort : 'mtime',
+        desc: settings.desc === true,
+        matchMode: settings.matchMode === 'extended' || settings.matchMode === 'regex' ? settings.matchMode : 'normal',
+        caseSensitive: settings.caseSensitive === true,
+        wholeWord: settings.wholeWord === true,
+        sessionId: typeof settings.sessionId === 'string' ? settings.sessionId : '',
+        root: typeof settings.root === 'string' ? settings.root : '',
+        includeArchived: settings.includeArchived === true,
+        count: 'none',
+      }
+      if (phase === 'names') {
+        body.files = filesScope
+        body.dirs = dirsScope
+        body.compact = true
+      } else if (phase === 'content') {
+        body.content = contentScope
+        body.count = 'bounded'
+        body.compact = true
+      } else if (phase === 'more') {
+        body.content = contentScope
+        body.files = filesScope
+        body.dirs = dirsScope
+        body.compact = false
+      } else {
+        body.content = contentScope
+        body.files = filesScope
+        body.dirs = dirsScope
+        body.count = 'exact'
+      }
+      return body
+    }
+
+    /**
+     * The synthetic content group shown between the names preview and the body
+     * phase: it keeps build counters/progress visible and mirrors the server's
+     * guards, so the body group never disappears mid-search.
+     */
+    function contentPlaceholderGroup(state, matchMode, queryLength, minChars) {
+      const content = state !== null && typeof state === 'object' ? state : null
+      const group = {
+        hits: [],
+        returned: 0,
+        capped: false,
+        count: { value: 0, kind: 'unknown' },
+        warnings: [],
+        building: content !== null && content.building === true,
+        files: content !== null && typeof content.files === 'number' ? content.files : 0,
+        sessions: content !== null && typeof content.sessions === 'number' ? content.sessions : 0,
+        messages: content !== null && typeof content.messages === 'number' ? content.messages : 0,
+        truncated: content !== null && content.truncated === true,
+        tookMs: 0,
+        pending: true,
+      }
+      if (content !== null && content.progress !== null && typeof content.progress === 'object') group.progress = content.progress
+      if (matchMode === 'regex') group.error = 'content-regex-not-supported'
+      else if (typeof queryLength === 'number' && queryLength > 0 && queryLength < (typeof minChars === 'number' ? minChars : 3)) group.error = 'content-query-too-short'
+      return group
+    }
+
+    /** One row identity, shared by the preview/settle/load-more merge rules. */
+    function hitIdentity(hit) {
+      const record = hit !== null && typeof hit === 'object' ? hit : {}
+      return String(record.path || '') + '|' + String(record.messageId || '')
+    }
+
+    /**
+     * Merge a names-phase response into the loaded groups. Normally it replaces
+     * the preview, but a slow name snapshot may arrive after the body phase; in
+     * that case the newer body rows win and file rows are de-duplicated again.
+     */
+    function mergeNamePhase(groups, data) {
+      const previous = groups !== null && typeof groups === 'object' ? groups : {}
+      const next = data !== null && typeof data === 'object' ? data : {}
+      const merged = { ...previous }
+      if (next.files !== undefined) merged.files = next.files
+      if (next.dirs !== undefined) merged.dirs = next.dirs
+      const contentHits = merged.content !== undefined && Array.isArray(merged.content.hits) ? merged.content.hits : []
+      if (contentHits.length > 0 && merged.files !== undefined) {
+        const contentPaths = new Set(contentHits.map(hit => hit.path).filter(path => typeof path === 'string'))
+        const hits = Array.isArray(merged.files.hits) ? merged.files.hits : []
+        const kept = contentPaths.size === 0 ? hits : hits.filter(hit => !contentPaths.has(hit.path))
+        merged.files = {
+          ...merged.files,
+          hits: kept,
+          returned: kept.length,
+          deduped: (merged.files.deduped ?? 0) + (hits.length - kept.length),
+        }
+      }
+      return merged
+    }
+
+    /** Merge a body/session page into the preview groups, de-duplicating file rows. */
+    function mergeContentPhase(groups, data) {
+      const previous = groups !== null && typeof groups === 'object' ? groups : {}
+      const next = data !== null && typeof data === 'object' ? data : {}
+      const content = next.content
+      if (content === undefined) return previous
+      const merged = { ...previous, content }
+      const contentHits = Array.isArray(content && content.hits) ? content.hits : []
+      const contentPaths = new Set(contentHits.map(hit => hit.path).filter(path => typeof path === 'string'))
+      if (merged.files !== undefined) {
+        const hits = Array.isArray(merged.files.hits) ? merged.files.hits : []
+        const kept = contentPaths.size === 0 ? hits : hits.filter(hit => !contentPaths.has(hit.path))
+        merged.files = {
+          ...merged.files,
+          hits: kept,
+          returned: kept.length,
+          deduped: (merged.files.deduped ?? 0) + (hits.length - kept.length),
+        }
+      }
+      return merged
+    }
+
+    /**
+     * Append one load-more page to the loaded groups: new rows only (one row per
+     * path/message), the exact count already shown wins, and the one-row-per-path
+     * invariant holds across pages (content rows win over file rows).
+     */
+    function appendCombinedPages(groups, data) {
+      const previous = groups !== null && typeof groups === 'object' ? groups : {}
+      const next = data !== null && typeof data === 'object' ? data : {}
+      const merged = { ...previous }
+      for (const key of ['content', 'files', 'dirs']) {
+        const oldGroup = previous[key]
+        const nextGroup = next[key]
+        if (oldGroup === undefined || nextGroup === undefined) continue
+        const oldHits = Array.isArray(oldGroup.hits) ? oldGroup.hits : []
+        const nextHits = Array.isArray(nextGroup.hits) ? nextGroup.hits : []
+        const seen = new Set(oldHits.map(hitIdentity))
+        const added = nextHits.filter(hit => !seen.has(hitIdentity(hit)))
+        merged[key] = {
+          ...nextGroup,
+          hits: [...oldHits, ...added],
+          returned: oldHits.length + added.length,
+          total: Math.max(typeof oldGroup.total === 'number' ? oldGroup.total : 0, typeof nextGroup.total === 'number' ? nextGroup.total : 0),
+          count: oldGroup.count !== undefined && oldGroup.count !== null && oldGroup.count.kind === 'exact' ? oldGroup.count : nextGroup.count,
+        }
+      }
+      const contentHits = merged.content !== undefined && Array.isArray(merged.content.hits) ? merged.content.hits : []
+      const contentPaths = new Set(contentHits.map(hit => hit.path).filter(path => typeof path === 'string'))
+      if (merged.files !== undefined) {
+        const hits = Array.isArray(merged.files.hits) ? merged.files.hits : []
+        const kept = contentPaths.size === 0 ? hits : hits.filter(hit => !contentPaths.has(hit.path))
+        merged.files = { ...merged.files, hits: kept, returned: kept.length }
+      }
+      return merged
+    }
+
+    /** Slice the rendered list at the hard row cap (the loaded list is untouched). */
+    function capResultRows(rows, limit) {
+      const list = Array.isArray(rows) ? rows : []
+      const max = typeof limit === 'number' && Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : 300
+      const capped = list.length > max
+      return { rows: capped ? list.slice(0, max) : list, capped, total: list.length, limit: max }
+    }
+
     function Panel() {
       const open = useOpen()
       const prefs = useMemo(readPrefs, [])
@@ -3068,6 +3343,7 @@ self.onmessage = event => {
       const [error, setError] = useState('')
       const [took, setTook] = useState(0)
       const [status, setStatus] = useState(null)
+      const [contentState, setContentState] = useState(null)
       const [availableContent, setAvailableContent] = useState(true)
       const [matchMode, setMatchMode] = useState(prefs.matchMode || 'normal')
       const [caseSensitive, setCaseSensitive] = useState(prefs.caseSensitive === true)
@@ -3086,10 +3362,18 @@ self.onmessage = event => {
       const [capDetail, setCapDetail] = useState(null)
       const inputRef = useRef(null)
       const panelRef = useRef(null)
-      const abortRef = useRef(null)
       const listRef = useRef(null)
       const toastTimerRef = useRef(0)
       const insertTimerRef = useRef(0)
+      // Search generation + in-flight controllers: every keystroke cancels the
+      // previous phases, and the LRU keeps 20 phase responses so a retyped query
+      // renders from memory instead of the network.
+      const searchRef = useRef({ generation: 0, controllers: [] })
+      const searchCacheRef = useRef(null)
+      if (searchCacheRef.current === null) searchCacheRef.current = createLruCache(SEARCH_CACHE_SIZE)
+      // Follows the content build across /status polls; a true→false edge means
+      // the build finished, so the visible results get one refresh.
+      const buildingRef = useRef(false)
 
       const close = useCallback(() => store.set(false), [])
       const activeScope = conversationScope('')
@@ -3098,6 +3382,18 @@ self.onmessage = event => {
         ? { content: scopes.content, files: false, dirs: false }
         : { content: scopes.content, files: scopes.files, dirs: scopes.dirs }
       const anyScope = effectiveScopes.content || effectiveScopes.files || effectiveScopes.dirs
+      // Adopt the content half of a /status response: counters, live progress
+      // and the building flag drive the panel without any extra search request.
+      const adoptStatus = useCallback(next => {
+        if (next === null || typeof next !== 'object') return null
+        const content = next.content !== null && typeof next.content === 'object' ? next.content : null
+        if (content !== null) setContentState(content)
+        if (content !== null && content.enabled === false) {
+          setAvailableContent(false)
+          setScopes(value => (value.content ? { ...value, content: false } : value))
+        }
+        return content
+      }, [])
 
       useEffect(() => {
         writePrefs({ scopes, sort, desc, matchMode, caseSensitive, wholeWord })
@@ -3133,11 +3429,22 @@ self.onmessage = event => {
         }, 30)
         return () => {
           clearTimeout(timer)
-          if (abortRef.current !== null) { abortRef.current.abort(); abortRef.current = null }
+          const search = searchRef.current
+          search.generation += 1
+          for (const controller of search.controllers) controller.abort()
+          search.controllers = []
           setGroups(null)
           if (previous instanceof HTMLElement && previous.isConnected) previous.focus()
         }
       }, [open, sessionOnly, activeSessionId])
+
+      // A closed panel should not keep phase payloads (evidence blocks are
+      // large-ish); reopening starts from a clean LRU.
+      useEffect(() => {
+        if (open) return undefined
+        searchCacheRef.current.clear()
+        return undefined
+      }, [open])
 
       useEffect(() => {
         if (!open) return undefined
@@ -3152,95 +3459,273 @@ self.onmessage = event => {
         return () => document.removeEventListener('keydown', onDocumentKey, true)
       }, [open, close])
 
+      // The initial status read feeds the footer, the root picker, the content
+      // capability flag and the build state; it never runs a search.
       useEffect(() => {
         if (!open) return undefined
         let cancelled = false
+        post('/dsh-locator/status', {}).then(next => {
+          if (cancelled) return
+          setStatus(next)
+          adoptStatus(next)
+        }).catch(() => {})
+        return () => { cancelled = true }
+      }, [open, adoptStatus])
+
+      const statusScanning = status !== null && status.scanning === true
+      const contentBuilding = contentState !== null && contentState.building === true
+
+      // Building/scans poll ONLY /dsh-locator/status: it carries the phase,
+      // progress and the building flag, so the counters animate without
+      // re-running the combined search. A build that finishes while the panel
+      // is open drops the cached partial pages and refreshes the results once.
+      useEffect(() => {
+        if (!open) return undefined
+        if (!contentBuilding && !statusScanning) return undefined
+        let cancelled = false
         let timer = 0
-        const load = () => {
+        const tick = () => {
           post('/dsh-locator/status', {}).then(next => {
             if (cancelled) return
             setStatus(next)
-            if (next && next.content && next.content.enabled === false) {
-              setAvailableContent(false)
-              setScopes(value => (value.content ? { ...value, content: false } : value))
+            const content = adoptStatus(next)
+            const building = content !== null && content.building === true
+            if (buildingRef.current && !building) {
+              searchCacheRef.current.clear()
+              setRefreshTick(value => value + 1)
             }
-            if (next && next.scanning) timer = setTimeout(load, 1500)
-          }).catch(() => {})
+            buildingRef.current = building
+            const scanning = next !== null && typeof next === 'object' && next.scanning === true
+            if (building || scanning) timer = setTimeout(tick, building ? 2500 : 1500)
+          }).catch(() => {
+            if (!cancelled) timer = setTimeout(tick, 2500)
+          })
         }
-        load()
+        timer = setTimeout(tick, contentBuilding ? 2500 : 1500)
         return () => { cancelled = true; clearTimeout(timer) }
-      }, [open])
+      }, [open, contentBuilding, statusScanning, adoptStatus])
 
-      // One request for every enabled scope; the server owns the grouping and
-      // de-duplication. Empty and one-character queries never start a content
-      // build (see src/combined.ts), so opening the panel stays cheap.
+      // Two-phase search. Phase 1 (names, 90ms debounce) is a compact
+      // files/dirs page and paints in ~20-30ms. Phase 2 (bodies/sessions) runs
+      // only after the 300ms typing pause, only for 3+ character queries, is
+      // compact and asks for a cheap bounded count. Phase 3 is one full settled
+      // request (rich evidence + exact count) at 900ms idle; queries that cannot
+      // query content get that full request directly at 300ms. Every phase is
+      // cancellable and cached in the 20-entry LRU.
       useEffect(() => {
         if (!open) return undefined
         if (!anyScope) {
+          // Cancel whatever was in flight: with every scope off there is no
+          // generation that may still apply its response to the cleared list.
+          const idle = searchRef.current
+          idle.generation += 1
+          for (const controller of idle.controllers) controller.abort()
+          idle.controllers = []
           setGroups(null)
           setLoading(false)
+          setOffsets({ files: 0, dirs: 0, content: 0 })
           setError('')
           return undefined
         }
-        const timer = setTimeout(() => {
-          if (abortRef.current) abortRef.current.abort()
+        const cache = searchCacheRef.current
+        const search = searchRef.current
+        search.generation += 1
+        const generation = search.generation
+        for (const controller of search.controllers) controller.abort()
+        search.controllers = []
+        const isCurrent = () => search.generation === generation
+        const isAbort = cause => cause !== null && typeof cause === 'object' && cause.name === 'AbortError'
+        const fetchPhase = async (body, cacheKey) => {
+          const cached = cache.get(cacheKey)
+          if (cached !== undefined) return cached
           const controller = new AbortController()
-          abortRef.current = controller
+          search.controllers.push(controller)
+          const data = await post('/dsh-locator/combined', body, controller.signal)
+          if (isCurrent()) cache.set(cacheKey, data)
+          return data
+        }
+        const settings = {
+          query,
+          scopes: effectiveScopes,
+          sort,
+          desc,
+          matchMode,
+          caseSensitive,
+          wholeWord,
+          sessionId: sessionOnly ? activeSessionId : '',
+          root: rootFilter,
+          includeArchived,
+          limit: PAGE_NAME,
+          contentLimit: PAGE_CONTENT,
+          countLimit: SEARCH_COUNT_LIMIT,
+        }
+        const plan = searchPhasePlan({ query, scopes: effectiveScopes, contentEnabled: availableContent, matchMode, minChars: SEARCH_MIN_CONTENT_CHARS })
+        const contentScopeOn = effectiveScopes.content && availableContent
+        const applied = { content: false, full: false }
+        // True once any phase painted rows: later background failures must not
+        // replace visible results with a global error banner.
+        let rendered = false
+        let contentController = null
+        const adoptSearchState = data => {
+          if (data === null || typeof data !== 'object') return
+          const content = data.content
+          if (content === undefined || content === null || typeof content !== 'object') return
+          setContentState(previous => ({
+            ...(previous !== null && typeof previous === 'object' ? previous : { enabled: true }),
+            building: content.building === true,
+            files: typeof content.files === 'number' ? content.files : 0,
+            sessions: typeof content.sessions === 'number' ? content.sessions : 0,
+            messages: typeof content.messages === 'number' ? content.messages : 0,
+            truncated: content.truncated === true,
+            ...(content.progress !== undefined && content.progress !== null && typeof content.progress === 'object' ? { progress: content.progress } : {}),
+          }))
+        }
+        const fail = cause => {
+          if (!isCurrent()) return
+          setError(cause instanceof Error ? cause.message : String(cause))
+          setLoading(false)
+        }
+        const runPreview = async () => {
+          if (!isCurrent()) return
           setLoading(true)
           setError('')
-          setOffsets({ files: 0, dirs: 0, content: 0 })
-          post('/dsh-locator/combined', {
-            query,
-            content: effectiveScopes.content,
-            files: effectiveScopes.files,
-            dirs: effectiveScopes.dirs,
-            limit: PAGE_NAME,
-            contentLimit: PAGE_CONTENT,
-            filesOffset: 0,
-            dirsOffset: 0,
-            contentOffset: 0,
-            sort,
-            desc,
-            matchMode,
-            caseSensitive,
-            wholeWord,
-            sessionId: sessionOnly ? activeSessionId : '',
-            root: rootFilter,
-            includeArchived,
-            count: matchMode === 'regex' ? 'none' : 'exact',
-          }, controller.signal).then(data => {
-            if (controller.signal.aborted) return
-            setGroups({
-              content: data.content,
-              files: data.files,
-              dirs: data.dirs,
-            })
+          const body = combinedBody(settings, 'names')
+          try {
+            const data = await fetchPhase(body, 'names:' + JSON.stringify(body))
+            if (!isCurrent()) return
+            if (applied.full) { setLoading(false); return }
+            if (applied.content) {
+              setGroups(previous => mergeNamePhase(previous, data))
+              setOffsets(current => ({
+                files: typeof data.files?.returned === 'number' ? data.files.returned : current.files,
+                dirs: typeof data.dirs?.returned === 'number' ? data.dirs.returned : current.dirs,
+                content: current.content,
+              }))
+            } else {
+              const preview = {}
+              if (contentScopeOn) preview.content = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+              if (data.files !== undefined) preview.files = data.files
+              if (data.dirs !== undefined) preview.dirs = data.dirs
+              setGroups(preview)
+              setOffsets({
+                files: typeof data.files?.returned === 'number' ? data.files.returned : 0,
+                dirs: typeof data.dirs?.returned === 'number' ? data.dirs.returned : 0,
+                content: 0,
+              })
+            }
+            if (typeof data.contentEnabled === 'boolean') setAvailableContent(data.contentEnabled)
+            adoptSearchState(data)
+            setTook(typeof data.tookMs === 'number' ? data.tookMs : 0)
+            rendered = true
+            setLoading(false)
+          } catch (cause) {
+            if (isAbort(cause)) return
+            if (rendered) return
+            fail(cause)
+          }
+        }
+        const runContent = async () => {
+          if (!isCurrent() || !plan.content) return
+          const body = combinedBody(settings, 'content')
+          const cacheKey = 'content:' + JSON.stringify(body)
+          try {
+            const cached = cache.get(cacheKey)
+            let data
+            if (cached !== undefined) {
+              data = cached
+            } else {
+              if (contentController !== null) contentController.abort()
+              contentController = new AbortController()
+              search.controllers.push(contentController)
+              data = await post('/dsh-locator/combined', body, contentController.signal)
+              if (!isCurrent() || applied.full) return
+              cache.set(cacheKey, data)
+            }
+            if (!isCurrent() || applied.full) return
+            applied.content = true
+            rendered = true
+            setGroups(previous => mergeContentPhase(previous, data))
+            setOffsets(current => ({
+              ...current,
+              content: typeof data.content?.returned === 'number' ? data.content.returned : 0,
+            }))
+            adoptSearchState(data)
+          } catch (cause) {
+            if (isAbort(cause) || !isCurrent() || applied.full) return
+            const fallback = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+            fallback.pending = false
+            fallback.error = cause instanceof Error ? cause.message : String(cause)
+            setGroups(previous => mergeContentPhase(previous, { content: fallback }))
+          }
+        }
+        const runFull = async () => {
+          if (!isCurrent()) return
+          if (contentController !== null) { contentController.abort(); contentController = null }
+          const body = combinedBody(settings, 'full')
+          // A short/regex query must not ask the server to touch bodies at all;
+          // the preview placeholder already carries the localized guard message.
+          if (!plan.content) body.content = false
+          try {
+            const data = await fetchPhase(body, 'full:' + JSON.stringify(body))
+            if (!isCurrent()) return
+            applied.full = true
+            const full = {}
+            if (contentScopeOn) {
+              const placeholder = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+              placeholder.pending = false
+              full.content = data.content !== undefined ? data.content : placeholder
+            }
+            if (data.files !== undefined) full.files = data.files
+            if (data.dirs !== undefined) full.dirs = data.dirs
+            setGroups(full)
             setOffsets({
-              files: data.files?.returned ?? 0,
-              dirs: data.dirs?.returned ?? 0,
-              content: data.content?.returned ?? 0,
+              files: typeof data.files?.returned === 'number' ? data.files.returned : 0,
+              dirs: typeof data.dirs?.returned === 'number' ? data.dirs.returned : 0,
+              content: typeof data.content?.returned === 'number' ? data.content.returned : 0,
             })
             if (typeof data.contentEnabled === 'boolean') setAvailableContent(data.contentEnabled)
+            adoptSearchState(data)
             setTook(typeof data.tookMs === 'number' ? data.tookMs : 0)
+            rendered = true
+            setError('')
             setLoading(false)
-          }).catch(cause => {
-            if (controller.signal.aborted) return
-            setError(cause instanceof Error ? cause.message : String(cause))
-            setLoading(false)
-          })
-        }, 140)
-        return () => clearTimeout(timer)
-      }, [open, query, sort, desc, scopes.content, scopes.files, scopes.dirs, matchMode, caseSensitive, wholeWord, sessionOnly, activeSessionId, refreshTick, anyScope, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs])
+          } catch (cause) {
+            if (isAbort(cause)) return
+            // The settled upgrade is background polish: keep the preview rows.
+            if (rendered) return
+            fail(cause)
+          }
+        }
+        setError('')
+        const namesPhase = effectiveScopes.files === true || effectiveScopes.dirs === true
+        if (namesPhase) {
+          setLoading(true)
+        } else {
+          // Content-only scopes (e.g. the session filter): a names request would
+          // be empty, so paint the placeholder now and let the body phase fill it.
+          const preview = {}
+          if (contentScopeOn) preview.content = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+          setGroups(preview)
+          setOffsets({ files: 0, dirs: 0, content: 0 })
+          setLoading(false)
+        }
+        const namesTimer = namesPhase ? setTimeout(() => { void runPreview() }, SEARCH_NAMES_DELAY) : 0
+        const contentTimer = plan.content ? setTimeout(() => { void runContent() }, SEARCH_CONTENT_DELAY) : 0
+        const fullTimer = namesPhase || plan.content
+          ? setTimeout(() => { void runFull() }, plan.content ? SEARCH_SETTLE_DELAY : SEARCH_CONTENT_DELAY)
+          : 0
+        return () => {
+          clearTimeout(namesTimer)
+          clearTimeout(contentTimer)
+          clearTimeout(fullTimer)
+          search.generation += 1
+          for (const controller of search.controllers) controller.abort()
+          search.controllers = []
+        }
+      }, [open, query, sort, desc, scopes.content, scopes.files, scopes.dirs, matchMode, caseSensitive, wholeWord, sessionOnly, activeSessionId, rootFilter, includeArchived, refreshTick, anyScope, availableContent, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs])
 
-      const contentBuilding = groups !== null && groups.content !== undefined && groups.content.building === true
-      useEffect(() => {
-        if (!open || !contentBuilding) return undefined
-        const timer = setTimeout(() => setRefreshTick(value => value + 1), 2500)
-        return () => clearTimeout(timer)
-      }, [open, contentBuilding, refreshTick])
-
-      const panelHitKey = (group, hit) => group + '|' + String(hit.path || '') + '|' + String(hit.messageId || '')
-      const rows = useMemo(() => {
+      const panelHitKey = (group, hit) => group + '|' + hitIdentity(hit)
+      const loadedRows = useMemo(() => {
         if (groups === null) return []
         const needle = filter.trim().toLowerCase()
         const out = []
@@ -3257,6 +3742,8 @@ self.onmessage = event => {
         }
         return out
       }, [groups, effectiveScopes.content, effectiveScopes.files, effectiveScopes.dirs, filter])
+      const rowCap = useMemo(() => capResultRows(loadedRows, SEARCH_ROW_LIMIT), [loadedRows])
+      const rows = rowCap.rows
       const rowIndexByKey = useMemo(() => new Map(rows.map((entry, index) => [panelHitKey(entry.group, entry.hit), index])), [rows])
       // A pasted evidence token in the search box turns into a one-line Quick
       // Switch instead of being sent to the name/content engines unchanged.
@@ -3297,6 +3784,13 @@ self.onmessage = event => {
       useEffect(() => () => {
         clearTimeout(toastTimerRef.current)
         clearTimeout(insertTimerRef.current)
+      }, [])
+
+      // Retry means "do not trust the cached phases": drop the LRU first, then
+      // let the search effect re-run every phase for the current query.
+      const retrySearch = useCallback(() => {
+        searchCacheRef.current.clear()
+        setRefreshTick(value => value + 1)
       }, [])
 
       const copy = useCallback(hit => {
@@ -3449,15 +3943,16 @@ self.onmessage = event => {
               ],
       ]
 
+      // Copy/export use every loaded row, not just the capped DOM window.
       const copyAll = useCallback(() => {
-        const paths = rows.map(entry => entry.hit.path).filter(path => typeof path === 'string' && path !== '')
+        const paths = loadedRows.map(entry => entry.hit.path).filter(path => typeof path === 'string' && path !== '')
         if (paths.length === 0) return
         copyText(paths.join('\n')).then(() => notify(t('copiedAll', { n: paths.length }))).catch(() => {})
-      }, [notify, rows])
+      }, [notify, loadedRows])
 
       const exportRows = useCallback(format => {
-        if (rows.length === 0) return
-        const records = rows.map(({ group, hit }) => ({
+        if (loadedRows.length === 0) return
+        const records = loadedRows.map(({ group, hit }) => ({
           group,
           kind: typeof hit.kind === 'string' ? hit.kind : group,
           path: typeof hit.path === 'string' ? hit.path : '',
@@ -3498,7 +3993,7 @@ self.onmessage = event => {
         } catch {
           notify(t('exportFailed'))
         }
-      }, [notify, rows])
+      }, [loadedRows, notify])
 
       const reveal = useCallback(hit => {
         if (!hit || loading || typeof hit.path !== 'string' || hit.path === '') return
@@ -3638,21 +4133,21 @@ self.onmessage = event => {
         if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' })
       }, [selected])
 
+      // Load-more appends one rich page to the loaded groups instead of
+      // re-rendering a re-fetched list; the request is tied to the current
+      // search generation, so a slow page can never land in a newer query.
       const loadMore = useCallback(async () => {
         if (loading || loadingMore || groups === null) return
+        const search = searchRef.current
+        const generation = search.generation
+        const controller = new AbortController()
+        search.controllers.push(controller)
         setLoadingMore(true)
         setError('')
         try {
-          const data = await post('/dsh-locator/combined', {
+          const body = combinedBody({
             query,
-            content: effectiveScopes.content,
-            files: effectiveScopes.files,
-            dirs: effectiveScopes.dirs,
-            limit: PAGE_NAME,
-            contentLimit: PAGE_CONTENT,
-            filesOffset: offsets.files,
-            dirsOffset: offsets.dirs,
-            contentOffset: offsets.content,
+            scopes: effectiveScopes,
             sort,
             desc,
             matchMode,
@@ -3661,48 +4156,30 @@ self.onmessage = event => {
             sessionId: sessionOnly ? activeSessionId : '',
             root: rootFilter,
             includeArchived,
-            count: matchMode === 'regex' ? 'none' : 'exact',
-          })
-          setGroups(previous => {
-            if (previous === null) return previous
-            const merged = { ...previous }
-            for (const key of ['content', 'files', 'dirs']) {
-              const oldGroup = previous[key]
-              const nextGroup = data[key]
-              if (oldGroup === undefined || nextGroup === undefined) continue
-              const oldHits = Array.isArray(oldGroup.hits) ? oldGroup.hits : []
-              const nextHits = Array.isArray(nextGroup.hits) ? nextGroup.hits : []
-              const seen = new Set(oldHits.map(hit => panelHitKey(key, hit)))
-              const added = nextHits.filter(hit => !seen.has(panelHitKey(key, hit)))
-              merged[key] = {
-                ...nextGroup,
-                hits: [...oldHits, ...added],
-                returned: oldHits.length + added.length,
-                total: Math.max(oldGroup.total ?? 0, nextGroup.total ?? 0),
-                count: oldGroup.count?.kind === 'exact' ? oldGroup.count : nextGroup.count,
-              }
-            }
-            // Keep the one-row-per-path invariant across pages too.
-            const contentPaths = new Set((merged.content?.hits ?? []).map(hit => hit.path))
-            if (merged.files !== undefined) {
-              merged.files = { ...merged.files, hits: (merged.files.hits ?? []).filter(hit => !contentPaths.has(hit.path)) }
-              merged.files.returned = merged.files.hits.length
-            }
-            return merged
-          })
+            limit: PAGE_NAME,
+            contentLimit: PAGE_CONTENT,
+            countLimit: SEARCH_COUNT_LIMIT,
+            filesOffset: offsets.files,
+            dirsOffset: offsets.dirs,
+            contentOffset: offsets.content,
+          }, 'more')
+          const data = await post('/dsh-locator/combined', body, controller.signal)
+          if (search.generation !== generation) return
+          setGroups(previous => appendCombinedPages(previous, data))
           setOffsets(current => ({
-            files: current.files + (data.files?.returned ?? 0),
-            dirs: current.dirs + (data.dirs?.returned ?? 0),
-            content: current.content + (data.content?.returned ?? 0),
+            files: current.files + (typeof data.files?.returned === 'number' ? data.files.returned : 0),
+            dirs: current.dirs + (typeof data.dirs?.returned === 'number' ? data.dirs.returned : 0),
+            content: current.content + (typeof data.content?.returned === 'number' ? data.content.returned : 0),
           }))
         } catch (cause) {
+          if (controller.signal.aborted || search.generation !== generation) return
           setError(cause instanceof Error ? cause.message : String(cause))
         } finally {
           setLoadingMore(false)
         }
-      }, [activeSessionId, caseSensitive, desc, effectiveScopes.content, effectiveScopes.dirs, effectiveScopes.files, groups, loading, loadingMore, matchMode, offsets, query, sessionOnly, sort, wholeWord])
+      }, [activeSessionId, caseSensitive, desc, effectiveScopes.content, effectiveScopes.dirs, effectiveScopes.files, groups, includeArchived, loading, loadingMore, matchMode, offsets, query, rootFilter, sessionOnly, sort, wholeWord])
 
-      const canLoadMore = groups !== null && ['content', 'files', 'dirs'].some(key => {
+      const canLoadMore = groups !== null && rowCap.capped === false && ['content', 'files', 'dirs'].some(key => {
         if (!effectiveScopes[key]) return false
         const group = groups[key]
         if (group === undefined) return false
@@ -3953,8 +4430,18 @@ self.onmessage = event => {
         return text.length <= 48 ? text : '…' + text.slice(-47)
       }
       const contentProgressText = () => {
-        const progress = content !== undefined && content.progress ? content.progress : null
-        const aggregate = () => t('contentBuilding', { files: content?.files ?? 0, messages: content?.messages ?? 0 })
+        // Live phase/progress comes from the /status poll (or the latest
+        // combined response), never from a re-run search.
+        const live = contentState !== null && typeof contentState === 'object' ? contentState : null
+        const progress = live !== null && live.progress !== null && typeof live.progress === 'object'
+          ? live.progress
+          : (content !== undefined && content.progress ? content.progress : null)
+        const liveFiles = live !== null && typeof live.files === 'number' ? live.files : null
+        const liveMessages = live !== null && typeof live.messages === 'number' ? live.messages : null
+        const aggregate = () => t('contentBuilding', {
+          files: liveFiles !== null ? liveFiles : (content?.files ?? 0),
+          messages: liveMessages !== null ? liveMessages : (content?.messages ?? 0),
+        })
         if (progress === null || typeof progress.scanned !== 'number') return aggregate()
         const total = typeof progress.total === 'number' && progress.total > 0 ? progress.total.toLocaleString() : ''
         if (total === '') return aggregate()
@@ -3986,7 +4473,7 @@ self.onmessage = event => {
             groupHead(key, label, countLabel(group, count), combinedNote === '' ? null : combinedNote),
             h('div', { className: 'dsh-locator-groupempty', role: informational ? 'status' : 'alert' },
               informational ? message : t('errorPrefix') + message,
-              informational ? null : h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry'))),
+              informational ? null : h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: retrySearch }, t('retry'))),
           )
         }
         return h('div', { className: 'dsh-locator-group', role: 'group', 'aria-labelledby': 'dsh-locator-group-' + key },
@@ -3998,7 +4485,8 @@ self.onmessage = event => {
                   ? t('filterEmpty')
                   : (key === 'content' && scopes.content
                     ? (sessionOnly && query.trim().length >= 3 ? t('panelSessionHint')
-                      : query.trim().length < 3 ? t('contentShort') : (contentBuilding ? t('loading') : t('emptyResults')))
+                      : query.trim().length < 3 ? t('contentShort')
+                        : (group.pending === true || contentBuilding ? t('loading') : t('emptyResults')))
                     : (query.trim() === '' ? t('emptyQuery') : t('emptyResults'))))
             : visibleHits.map(hit => rowFor(key, hit, rowIndexByKey.get(panelHitKey(key, hit)))),
         )
@@ -4135,12 +4623,12 @@ self.onmessage = event => {
         ),
         sessionOnly ? h('div', { className: 'dsh-locator-groupempty' }, t('panelSessionHint')) : null,
         renderQuickSwitch(),
-        h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading ? 'true' : 'false' },
+        h('div', { id: 'dsh-locator-results', className: 'dsh-locator-scroll', ref: listRef, role: 'listbox', 'aria-busy': loading || loadingMore ? 'true' : 'false' },
           view === 'capabilities'
             ? renderCapabilityView()
             : error !== ''
             ? h('div', { className: 'dsh-locator-empty', role: 'alert' }, t('errorPrefix') + error,
-                h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: () => setRefreshTick(v => v + 1) }, t('retry')))
+                h('button', { className: 'dsh-locator-dirbtn dsh-locator-retry', onClick: retrySearch }, t('retry')))
             : null,
           !anyScope
             ? h('div', { className: 'dsh-locator-empty' }, t('emptyScopes'))
@@ -4161,7 +4649,10 @@ self.onmessage = event => {
             ms: took.toFixed(1),
           })
             + (status && status.scanning ? ' · ' + t('indexing') : '')
-            + (contentBuilding ? ' · ' + t('indexing') : '')),
+            + (contentBuilding ? ' · ' + t('indexing') : '')
+            // The DOM keeps at most SEARCH_ROW_LIMIT rows; the rest stays loaded
+            // for copy/export once the list is narrowed with the filter box.
+            + (rowCap.capped ? ' · ' + t('showing', { n: rows.length }) : '')),
           h('span', { className: 'grow' }),
           rows.length > 0
             ? h('button', {

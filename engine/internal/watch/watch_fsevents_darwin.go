@@ -27,6 +27,7 @@ import (
 	"unsafe"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
+	"github.com/PerryLink/dsh-locator/engine/internal/scan"
 )
 
 const (
@@ -56,6 +57,7 @@ type watcher struct {
 	ix       *index.Index
 	roots    []string
 	excludes []string
+	excluder *scan.Excluder
 	onError  func(error)
 
 	onDegraded   func(Health)
@@ -98,6 +100,7 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		ix:           ix,
 		roots:        opt.Roots,
 		excludes:     opt.Excludes,
+		excluder:     newExcluder(opt),
 		onError:      opt.OnError,
 		onDegraded:   opt.OnDegraded,
 		file:         os.NewFile(uintptr(readFD), "dsh-locator-fsevents"),
@@ -224,7 +227,7 @@ func (w *watcher) apply(event fsevent) {
 		w.rescan()
 		return
 	}
-	if excludedFSEventPath(event.path, w.excludes) {
+	if w.excluder.SkipAnySegment(event.path) {
 		return
 	}
 	if event.flags&fseventItemRemoved != 0 && event.flags&fseventItemCreated == 0 {
@@ -260,7 +263,7 @@ func (w *watcher) walkAdd(root string) {
 		if err != nil {
 			return nil
 		}
-		if entry.IsDir() && path != root && excludedFSEventPath(path, w.excludes) {
+		if entry.IsDir() && path != root && w.excluder.SkipAnySegment(path) {
 			return filepath.SkipDir
 		}
 		if entry.IsDir() {
@@ -281,7 +284,7 @@ func (w *watcher) rescan() {
 			if err != nil {
 				return nil
 			}
-			if entry.IsDir() && path != root && excludedFSEventPath(path, w.excludes) {
+			if entry.IsDir() && path != root && w.excluder.SkipAnySegment(path) {
 				return filepath.SkipDir
 			}
 			info, statErr := entry.Info()
@@ -307,22 +310,4 @@ func (w *watcher) Close() error {
 		}
 	})
 	return nil
-}
-
-func excludedFSEventPath(path string, patterns []string) bool {
-	for _, segment := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' }) {
-		if segment == "" {
-			continue
-		}
-		for _, pattern := range patterns {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" || strings.ContainsAny(pattern, `/\`) {
-				continue
-			}
-			if ok, _ := filepath.Match(pattern, segment); ok {
-				return true
-			}
-		}
-	}
-	return false
 }

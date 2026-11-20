@@ -25,9 +25,23 @@ export interface CodeSymbol {
 }
 /** Options for {@link extractSymbols}. */
 export interface ExtractSymbolsOptions {
-    /** Cap on returned symbols (default 2000). */
+    /** Cap on returned symbols (default 500). */
     maxSymbols?: number;
 }
+/**
+ * Whether a path is generated or vendored code that should not contribute
+ * symbols (dependency trees, bundles, protobuf/bindata output).
+ * @param path - file path or bare name.
+ */
+export declare function isGeneratedSymbolPath(path: string): boolean;
+/**
+ * Whether a source body looks machine-generated: a generator header in the
+ * first 16 KiB, or minified code dominated by very long lines. Called before
+ * symbol extraction so a bundle cannot flood the symbol table.
+ * @param text - source text.
+ * @param language - language id from {@link languageForPath}.
+ */
+export declare function looksGeneratedSource(text: string, language: string): boolean;
 /** Language ids {@link extractSymbols} understands. */
 export declare const SYMBOL_LANGUAGES: readonly string[];
 /**

@@ -127,6 +127,37 @@ interface ClientHelpers {
   parseRefUri: (ref: unknown) => ParsedRef | null
   evidenceForHit: (group: string, hit: unknown) => EvidenceModel
   parseQuickSwitch: (query: unknown) => QuickSwitchTarget | null
+  createLruCache: (size: number) => LruCache
+  highlightExpression: (query: unknown, cache: LruCache) => RegExp | null
+  searchPhasePlan: (input: unknown) => SearchPhasePlan
+  combinedBody: (input: unknown, phase: string) => Record<string, any>
+  contentPlaceholderGroup: (state: unknown, matchMode: string, queryLength: number, minChars: number) => Record<string, any>
+  hitIdentity: (hit: unknown) => string
+  mergeNamePhase: (groups: Record<string, any> | null, data: Record<string, any>) => Record<string, any>
+  mergeContentPhase: (groups: Record<string, any> | null, data: Record<string, any>) => Record<string, any>
+  appendCombinedPages: (groups: Record<string, any> | null, data: Record<string, any>) => Record<string, any>
+  capResultRows: (rows: unknown[], limit: number) => { rows: unknown[]; capped: boolean; total: number; limit: number }
+}
+
+/** Bounded LRU cache (see createLruCache in client.js). */
+interface LruCache {
+  get<T>(key: string): T | undefined
+  set<T>(key: string, value: T): void
+  has(key: string): boolean
+  delete(key: string): boolean
+  clear(): void
+  size(): number
+  keys(): string[]
+}
+
+/** Phase decision for one panel query (see searchPhasePlan in client.js). */
+interface SearchPhasePlan {
+  text: string
+  minChars: number
+  contentEnabled: boolean
+  matchMode: string
+  names: boolean
+  content: boolean
 }
 
 /** Dependency order: each function is evaluated as a top-level declaration. */
@@ -136,6 +167,10 @@ const HELPER_FUNCTIONS = [
   'fileRefForPath', 'parseRefUri', 'baseNameOf', 'sessionMentionFor',
   'normalizeFreshness', 'normalizePermissions', 'defaultPermissionsFor',
   'markdownCitationFor', 'evidenceForHit', 'parseQuickSwitch',
+  // 0.20.0 panel search pipeline (all pure; no browser globals).
+  'escapeRegExp', 'queryWords', 'createLruCache', 'highlightExpression',
+  'searchPhasePlan', 'combinedBody', 'contentPlaceholderGroup', 'hitIdentity',
+  'mergeNamePhase', 'mergeContentPhase', 'appendCombinedPages', 'capResultRows',
 ] as const
 
 const helpers = new Function(`${HELPER_FUNCTIONS.map(name => functionLiteral(name)).join('\n')}\nreturn { ${HELPER_FUNCTIONS.join(', ')} }`)() as ClientHelpers
@@ -425,5 +460,214 @@ describe('client.js bundle', () => {
     expect(source).toContain('jumpToContentHit(hit, query, notify)')
     expect(source).toContain("t('openFailed'")
     expect(source).toContain("t('revealFailed'")
+  })
+})
+
+/** Numeric value of one `const NAME = <digits>` declaration in client.js. */
+function sourceConstant(name: string): number {
+  const match = new RegExp('const ' + name + ' = (\\d+)').exec(source)
+  expect(match, `missing constant: ${name}`).not.toBeNull()
+  return Number(match?.[1] ?? 'NaN')
+}
+
+describe('client.js search pipeline (0.20.0 perf)', () => {
+  it('plans names first and gates the body phase exactly like the content index', () => {
+    const scopes = { content: true, files: true, dirs: true }
+    const plan = helpers.searchPhasePlan({ query: '  the  ', scopes, contentEnabled: true, matchMode: 'normal', minChars: 3 })
+    expect(plan).toMatchObject({ text: 'the', content: true, names: true, matchMode: 'normal' })
+    // Shorter than the shared three-character content threshold: names only.
+    expect(helpers.searchPhasePlan({ query: 'ab', scopes, contentEnabled: true, matchMode: 'normal', minChars: 3 }).content).toBe(false)
+    expect(helpers.searchPhasePlan({ query: ' ab ', scopes, contentEnabled: true, matchMode: 'normal', minChars: 3 }).content).toBe(false)
+    expect(helpers.searchPhasePlan({ query: '', scopes, contentEnabled: true, matchMode: 'normal', minChars: 3 }).content).toBe(false)
+    // The server pauses bodies in regex mode and when the index is disabled.
+    expect(helpers.searchPhasePlan({ query: 'abc', scopes, contentEnabled: true, matchMode: 'regex', minChars: 3 }).content).toBe(false)
+    expect(helpers.searchPhasePlan({ query: 'abc', scopes, contentEnabled: false, matchMode: 'normal', minChars: 3 }).content).toBe(false)
+    expect(helpers.searchPhasePlan({ query: 'abc', scopes: { content: false, files: true }, contentEnabled: true, matchMode: 'normal', minChars: 3 }).content).toBe(false)
+    // Extended escapes still search the body index.
+    expect(helpers.searchPhasePlan({ query: 'abc', scopes, contentEnabled: true, matchMode: 'extended', minChars: 3 }).content).toBe(true)
+  })
+
+  it('builds compact cheap-count typing requests and one full settled request', () => {
+    const options = {
+      query: 'the',
+      scopes: { content: true, files: true, dirs: true },
+      sort: 'mtime', desc: true, matchMode: 'normal', caseSensitive: false, wholeWord: false,
+      sessionId: '', root: '', includeArchived: false,
+      limit: 50, contentLimit: 30, countLimit: 1000,
+      filesOffset: 0, dirsOffset: 0, contentOffset: 0,
+    }
+    // Phase 1: names only, compact (no evidence enrichment), no counting work.
+    const names = helpers.combinedBody(options, 'names')
+    expect(names).toMatchObject({ content: false, files: true, dirs: true, compact: true, count: 'none', limit: 50 })
+    // Phase 2: bodies/sessions only, compact + cheap bounded count.
+    const content = helpers.combinedBody(options, 'content')
+    expect(content).toMatchObject({ content: true, files: false, dirs: false, compact: true, count: 'bounded', countLimit: 1000 })
+    // Phase 3: everything, rich evidence and an exact count (no compact flag).
+    const full = helpers.combinedBody(options, 'full')
+    expect(full).toMatchObject({ content: true, files: true, dirs: true, count: 'exact' })
+    expect('compact' in full).toBe(false)
+    // Load-more is one extra rich page at the stored offsets.
+    const more = helpers.combinedBody({ ...options, filesOffset: 50, dirsOffset: 50, contentOffset: 30 }, 'more')
+    expect(more).toMatchObject({ content: true, files: true, dirs: true, count: 'none', compact: false, filesOffset: 50, dirsOffset: 50, contentOffset: 30 })
+    // Scope flags are explicit; every option reaches the request unchanged.
+    const scoped = helpers.combinedBody({ ...options, scopes: { content: false, files: true, dirs: false }, sessionId: 's1', root: '/r', includeArchived: true, sort: 'name', desc: false }, 'content')
+    expect(scoped).toMatchObject({ content: false, files: false, dirs: false, sessionId: 's1', root: '/r', includeArchived: true, sort: 'name', desc: false })
+    expect(helpers.combinedBody({ ...options, scopes: { content: true, files: true, dirs: false } }, 'names')).toMatchObject({ files: true, dirs: false })
+  })
+
+  it('bounds the phase cache at 20 entries and evicts least-recently-used keys', () => {
+    const cache = helpers.createLruCache(20)
+    for (let index = 0; index < 25; index++) cache.set('k' + index, index)
+    expect(cache.size()).toBe(20)
+    expect(cache.get('k4')).toBeUndefined()
+    expect(cache.get('k5')).toBe(5)
+    expect(cache.get('k24')).toBe(24)
+    // get() refreshed k5 to the newest slot, so k6 is now the eviction victim.
+    cache.set('k25', 25)
+    expect(cache.get('k5')).toBe(5)
+    expect(cache.get('k6')).toBeUndefined()
+    expect(cache.size()).toBe(20)
+    expect(cache.keys()).toHaveLength(20)
+  })
+
+  it('compiles one highlight expression per query and reuses it for every row', () => {
+    const cache = helpers.createLruCache(8)
+    const first = helpers.highlightExpression('foo Bar', cache)
+    expect(first).toBeInstanceOf(RegExp)
+    expect(first?.flags).toContain('g')
+    expect(first?.flags).toContain('i')
+    // The same object is reused: no recompile per row/per keystroke.
+    expect(helpers.highlightExpression('foo Bar', cache)).toBe(first)
+    expect('Foo bar foo'.split(first as RegExp)).toEqual(['', 'Foo', ' ', 'bar', ' ', 'foo', ''])
+    // Filter-only queries highlight nothing, and that answer is cached too.
+    expect(helpers.highlightExpression('ext:pdf size:>10mb', cache)).toBeNull()
+    expect(cache.has('ext:pdf size:>10mb')).toBe(true)
+    expect(helpers.highlightExpression('ext:pdf size:>10mb', cache)).toBeNull()
+  })
+
+  it('merges the body phase into the preview and keeps one row per path', () => {
+    const preview = {
+      content: { hits: [], returned: 0, count: { value: 0, kind: 'unknown' }, pending: true },
+      files: { hits: [{ path: '/a' }, { path: '/b' }], returned: 2, total: 4, deduped: 0, count: { value: 4, kind: 'exact' } },
+      dirs: { hits: [], returned: 0, total: 0, deduped: 0 },
+    }
+    const merged = helpers.mergeContentPhase(preview, {
+      content: { hits: [{ path: '/a', snippet: 'body' }], returned: 1, count: { value: 1, kind: 'exact' } },
+    })
+    expect(merged.content.hits).toHaveLength(1)
+    expect(merged.content.pending).toBeUndefined()
+    expect(merged.files.hits.map((hit: any) => hit.path)).toEqual(['/b'])
+    expect(merged.files.returned).toBe(1)
+    expect(merged.files.deduped).toBe(1)
+    expect(merged.dirs).toBe(preview.dirs)
+    // A slow names phase arriving after the body phase must not resurrect the
+    // file row that the body hit now owns.
+    const late = helpers.mergeNamePhase(merged, { files: { hits: [{ path: '/a' }, { path: '/c' }], returned: 2, deduped: 0 } })
+    expect(late.content.hits).toHaveLength(1)
+    expect(late.files.hits.map((hit: any) => hit.path)).toEqual(['/c'])
+    expect(late.files.deduped).toBe(1)
+    // A body response without a content group (e.g. scope off) leaves groups alone.
+    expect(helpers.mergeContentPhase(merged, {})).toBe(merged)
+  })
+
+  it('appends load-more pages without duplicates and keeps the exact count', () => {
+    const first = {
+      content: { hits: [{ path: '/a', messageId: 'm1' }], returned: 1, total: 9, count: { value: 9, kind: 'exact' } },
+      files: { hits: [{ path: '/b' }, { path: '/c' }], returned: 2, total: 3, count: { value: 3, kind: 'exact' } },
+      dirs: { hits: [], returned: 0, total: 0, count: { value: 0, kind: 'exact' } },
+    }
+    const page = {
+      content: { hits: [{ path: '/a', messageId: 'm1' }, { path: '/d', messageId: 'm2' }], returned: 2, total: 9, count: { value: 2, kind: 'bounded' } },
+      files: { hits: [{ path: '/c' }, { path: '/e' }], returned: 2, total: 3, count: { value: 3, kind: 'exact' } },
+    }
+    const merged = helpers.appendCombinedPages(first, page)
+    expect(merged.content.hits.map((hit: any) => hit.path + '|' + hit.messageId)).toEqual(['/a|m1', '/d|m2'])
+    expect(merged.content.returned).toBe(2)
+    // The already shown exact count beats a fresh bounded one.
+    expect(merged.content.count).toEqual({ value: 9, kind: 'exact' })
+    expect(merged.files.hits.map((hit: any) => hit.path)).toEqual(['/b', '/c', '/e'])
+    expect(merged.files.returned).toBe(3)
+    // A group missing from the extra page keeps what was already loaded.
+    expect(merged.dirs).toBe(first.dirs)
+    // Cross-page invariant: a path that only now appears in content leaves files.
+    const next = helpers.appendCombinedPages(merged, { content: { hits: [{ path: '/b', messageId: '' }], returned: 1 } })
+    expect(next.files.hits.map((hit: any) => hit.path)).toEqual(['/c', '/e'])
+  })
+
+  it('caps rendered rows at 300 without dropping the loaded list', () => {
+    const loaded = Array.from({ length: 350 }, (_, index) => ({ group: 'files', hit: { path: '/f' + index } }))
+    const capped = helpers.capResultRows(loaded, 300)
+    expect(capped.rows).toHaveLength(300)
+    expect(capped.capped).toBe(true)
+    expect(capped.total).toBe(350)
+    expect(capped.limit).toBe(300)
+    expect(capped.rows[0]).toBe(loaded[0])
+    const small = helpers.capResultRows(loaded.slice(0, 3), 300)
+    expect(small).toMatchObject({ capped: false, total: 3 })
+    expect(small.rows).toHaveLength(3)
+  })
+
+  it('keeps build counters and guard errors in the preview placeholder', () => {
+    const progress = { phase: 'files', scanned: 2, total: 10, path: '/x' }
+    const placeholder = helpers.contentPlaceholderGroup({ enabled: true, building: true, files: 3, sessions: 1, messages: 5, truncated: false, progress }, 'normal', 5, 3)
+    expect(placeholder).toMatchObject({ building: true, files: 3, sessions: 1, messages: 5, returned: 0, pending: true })
+    expect(placeholder.progress).toEqual(progress)
+    expect(helpers.contentPlaceholderGroup(null, 'regex', 5, 3).error).toBe('content-regex-not-supported')
+    expect(helpers.contentPlaceholderGroup(null, 'normal', 2, 3).error).toBe('content-query-too-short')
+    // An empty search box is the normal empty state, not a "too short" error.
+    expect(helpers.contentPlaceholderGroup(null, 'normal', 0, 3).error).toBeUndefined()
+    expect(helpers.contentPlaceholderGroup(null, 'normal', 5, 3).building).toBe(false)
+  })
+
+  it('tolerates compact hits (no evidence blocks) in the evidence model', () => {
+    const compact = helpers.evidenceForHit('files', { path: '/tmp/x.md', name: 'x.md', size: 1, mtime: 2 })
+    expect(compact.kind).toBe('file')
+    expect(compact.canOpen).toBe(true)
+    expect(compact.ref).toBe('')
+    expect(compact.cite).toBe('')
+    expect(compact.freshness).toEqual({ state: 'unknown' })
+    // Compact session hits stay actionable/citable from the canonical URI.
+    const session = helpers.evidenceForHit('content', { kind: 'session', sessionId: 'session-1', title: 'Chat' })
+    expect(session.canJump).toBe(true)
+    expect(session.cite.startsWith('[Chat](dsh-session:')).toBe(true)
+  })
+
+  it('wires the two-phase pipeline and status-only building polling', () => {
+    // Names first, bodies inside the 250-350ms pause window, settle last.
+    const namesDelay = sourceConstant('SEARCH_NAMES_DELAY')
+    const contentDelay = sourceConstant('SEARCH_CONTENT_DELAY')
+    const settleDelay = sourceConstant('SEARCH_SETTLE_DELAY')
+    expect(namesDelay).toBeGreaterThan(0)
+    expect(namesDelay).toBeLessThan(contentDelay)
+    expect(contentDelay).toBeGreaterThanOrEqual(250)
+    expect(contentDelay).toBeLessThanOrEqual(350)
+    expect(settleDelay).toBeGreaterThan(contentDelay)
+    // LRU 20 phase cache; at most 300 rows in the DOM.
+    expect(sourceConstant('SEARCH_CACHE_SIZE')).toBe(20)
+    expect(sourceConstant('SEARCH_ROW_LIMIT')).toBe(300)
+    expect(sourceConstant('SEARCH_MIN_CONTENT_CHARS')).toBe(3)
+    // The three phases go through the shared body builder (compact + count flags).
+    expect(source).toContain("combinedBody(settings, 'names')")
+    expect(source).toContain("combinedBody(settings, 'content')")
+    expect(source).toContain("combinedBody(settings, 'full')")
+    expect(source).toContain('appendCombinedPages(previous, data)')
+    expect(source).toContain('capResultRows(loadedRows, SEARCH_ROW_LIMIT)')
+    expect(source).toContain('highlightExpression(query, highlightCache)')
+    // Building/scans poll ONLY /dsh-locator/status; the old combined refresh loop
+    // (re-running the whole search every 2.5s) must be gone.
+    const pollStart = source.indexOf('// Building/scans poll ONLY')
+    expect(pollStart).toBeGreaterThanOrEqual(0)
+    const pollEnd = source.indexOf('// Two-phase search.', pollStart)
+    expect(pollEnd).toBeGreaterThan(pollStart)
+    const pollBlock = source.slice(pollStart, pollEnd)
+    expect(pollBlock).toContain("post('/dsh-locator/status'")
+    expect(pollBlock).not.toContain("post('/dsh-locator/combined'")
+    expect(source).not.toContain('setTimeout(() => setRefreshTick(value => value + 1), 2500)')
+    // Every keystroke cancels the previous phases.
+    expect(source).toContain('new AbortController()')
+    expect(source).toContain('search.controllers')
+    expect(source).toContain('AbortError')
+    expect(source).toContain('mergeContentPhase(')
+    expect(source).toContain('retrySearch')
   })
 })

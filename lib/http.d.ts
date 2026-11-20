@@ -7,11 +7,17 @@
  *   POST /dsh-locator/search   { query, limit, offset, sort, desc, ... }
  *   GET  /dsh-locator/search?q=...&limit=...&offset=...&mode=names|content|count&json=1
  *   POST /dsh-locator/status   {}
+ *   POST /dsh-locator/combined { query, limit, contentLimit, compact, ... }
  *
- * The search route accepts both methods on purpose: the panel keeps the POST
- * JSON-body contract, while scripts and other tools get a plain, citable GET
- * query API (Everything-style HTTP) behind the exact same trust fence, the
- * same auth policy and the same same-origin check.
+ * **Method contract, per route.** `/dsh-locator/search` accepts both POST and
+ * GET on purpose: the panel keeps the POST JSON-body contract, while scripts and
+ * other tools get a plain, citable GET query API (Everything-style HTTP) behind
+ * the exact same trust fence, the same auth policy and the same same-origin
+ * check. Every other route is POST-only and requires `application/json` (415
+ * otherwise); GET carries its parameters in the query string, ignores a request
+ * body, and needs no content-type. `json=1` is accepted on GET for historical
+ * compatibility with the documented curl examples — every response on every
+ * route is already JSON.
 
  * Security is fail-closed. The routes only exist when the host's `connection`
  * service — the browser authentication + Host/Origin trust fence — is
@@ -46,9 +52,22 @@ export interface CapabilityHttpHandlers {
     search: (intent: string, limit?: number) => Promise<unknown>;
     preflight: (capability: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
-export declare function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void, options?: {
+/** Optional /combined behavior knobs (0.20.0); every field is additive. */
+export interface CombinedHttpOptions {
+    /** Character budget for one /combined response; 0/undefined keeps it unbudgeted. */
+    combinedBudgetChars?: number;
+    /** Parallel stat/hash enrichment limit for /combined. */
+    combinedEnrichConcurrency?: number;
+    /** Maximum files hashed per /combined response; 0 disables hashes. */
+    combinedHashMaxHits?: number;
+    /** Freshness-cache lifetime for /combined enrichment, in ms (0 disables). */
+    combinedCacheTtlMs?: number;
+}
+/** Options for {@link registerHttp}. */
+export interface HttpOptions extends CombinedHttpOptions {
     connectionOptional?: boolean;
-}, capabilities?: CapabilityHttpHandlers, scope?: Scope): void;
+}
+export declare function registerHttp(ctx: Context, rt: LocatorRuntime, content?: ContentIndex, ensure?: () => void, options?: HttpOptions, capabilities?: CapabilityHttpHandlers, scope?: Scope): void;
 /**
  * The exact JSON media type required by every locator route. A charset or any
  * other parameter is tolerated (`application/json; charset=utf-8`), any other
@@ -66,4 +85,11 @@ export declare function isJsonContentType(value: string | string[] | undefined):
  * @returns 403 when the request is provably cross-site, else undefined.
  */
 export declare function originRejection(headers: IncomingHttpHeaders): 403 | undefined;
+/**
+ * Read-only 0.20.0 content diagnostics (coverage/db bytes/refresh mode) as an
+ * optional nested block. The call is O(1) and must never fail the status route.
+ * @param content - the content store.
+ * @returns `{ diagnostics }` or an empty object.
+ */
+export declare function contentDiagnostics(content: ContentIndex): Record<string, unknown>;
 //# sourceMappingURL=http.d.ts.map

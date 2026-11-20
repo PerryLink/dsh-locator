@@ -7,18 +7,26 @@
  * scope gating, the lazy-build guard for empty queries, per-group degradation,
  * match-option routing (content vs name engine), page counts and de-duplication
  * of a path that appears both as a body hit and a name hit.
+ *
+ * 0.20.0 (P0-9) moved evidence enrichment off the synchronous path: hit
+ * freshness/permissions/hash are computed with async `stat` calls under a small
+ * concurrency limit and a short TTL cache, so a 9p root no longer blocks the
+ * host event loop. Hashes are capped per page (default 5, `combinedHashMaxHits`)
+ * and skipped on slow/network filesystems. `compact` mode (P1) skips the
+ * enrichment entirely and strips the evidence fields for keystroke requests.
  * @module dsh-locator/combined
  */
 import type { ContentHit, ContentProgress, ContentState } from './content.ts';
 import type { ContentCount, ContentCountMode, ContentMatchMode, ContentSearchOptions, ContentSearchResult } from './content-search.ts';
 import type { RefFreshness, RefPermissions } from './refs.ts';
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts';
-/** Additive evidence metadata attached to one combined hit for the panel. */
+import type { OutputBudget } from './scope.ts';
+/** One combined hit's additive evidence; every field is absent in compact mode. */
 export interface CombinedHitEvidence {
     /** Freshness of the hit's snapshot against the current bytes. */
-    freshness: RefFreshness;
+    freshness?: RefFreshness;
     /** The caller may read this hit; visibility mirrors the hit's scope. */
-    permissions: RefPermissions;
+    permissions?: RefPermissions;
     /** sha256 of the file bytes when cheap to compute (small name hits). */
     hash?: string;
 }
@@ -30,8 +38,29 @@ export type CombinedContentHit = ContentHit & {
 export type CombinedNameHit = SearchHit & CombinedHitEvidence;
 /** Only files up to this size get a hash on a name hit (panel evidence detail). */
 export declare const COMBINED_HASH_MAX_BYTES: number;
-/** At most this many name hits per page are hashed, keeping keystroke latency low. */
-export declare const COMBINED_HASH_MAX_HITS = 20;
+/** Default cap on hashed files per response (config: combinedHashMaxHits). */
+export declare const COMBINED_HASH_MAX_HITS = 5;
+/** Default parallel stat/hash enrichment limit (config: combinedEnrichConcurrency). */
+export declare const COMBINED_ENRICH_CONCURRENCY = 8;
+/** Default freshness-cache lifetime; a longer window trades staleness for latency. */
+export declare const COMBINED_ENRICH_CACHE_TTL_MS = 1500;
+/** Optional per-call knobs; the HTTP layer fills them from config. */
+export interface CombinedOptions {
+    /** Parallel stat/hash enrichment limit (default {@link COMBINED_ENRICH_CONCURRENCY}). */
+    enrichConcurrency?: number;
+    /** Maximum files hashed per response; 0 disables hashes (default {@link COMBINED_HASH_MAX_HITS}). */
+    hashMaxHits?: number;
+    /** Largest file that may be hashed (default {@link COMBINED_HASH_MAX_BYTES}). */
+    hashMaxBytes?: number;
+    /** Enrichment TTL cache lifetime in ms; 0 disables the cache (default 1500). */
+    cacheTtlMs?: number;
+    /** Skip hashing one path (default: slow/network mounts, 9p included). */
+    skipHash?: (path: string) => boolean;
+    /** Character budget for the whole response; 0/undefined keeps it unbudgeted. */
+    budgetChars?: number;
+    /** Abort enrichment/queries when the HTTP client goes away. */
+    signal?: AbortSignal;
+}
 /**
  * Compare one hit snapshot (engine mtime/size) with the current stat. A page is
  * a preview, not a resolve, so the check is one stat per hit and never a read.
@@ -47,6 +76,17 @@ export declare function freshnessForHit(snapshot: {
     mtimeMs: number;
     size: number;
 } | undefined, observedAt: number): RefFreshness;
+/** Bound one async mapper to a concurrency limit, preserving input order. */
+export declare function mapLimit<T, R>(items: readonly T[], limit: number, run: (item: T, index: number) => Promise<R>): Promise<R[]>;
+/**
+ * Whether hashing this path is likely expensive (9p/CIFS/NFS/sshfs mounts, UNC
+ * shares). Freshness still needs one stat; only the byte-reading hash is skipped.
+ * @param path - absolute path.
+ * @returns true when the path lives on a slow/network filesystem.
+ */
+export declare function isSlowFilesystemPath(path: string): boolean;
+/** Drop every cached enrichment observation (tests and a state-dir switch). */
+export declare function resetCombinedEnrichCache(): void;
 /**
  * Accept a requested root prefix only when it lives under a configured root;
  * the panel sends one of `status.roots`, but the route is still a trust
@@ -89,10 +129,12 @@ export interface CombinedRequest {
     /** How much counting work the groups may spend. */
     count: ContentCountMode;
     countLimit: number;
+    /** Keystroke mode: skip evidence enrichment and strip ref/hash/freshness/permissions. */
+    compact: boolean;
 }
 /** One name-index group: files or directories. */
 export interface NameGroup {
-    /** Hits carry additive freshness/permissions/hash evidence fields. */
+    /** Hits carry additive freshness/permissions/hash evidence fields (absent in compact). */
     hits: CombinedNameHit[];
     returned: number;
     total: number;
@@ -107,7 +149,7 @@ export interface NameGroup {
 }
 /** The content group: body/session hits plus the index state at query time. */
 export interface ContentGroup {
-    /** Hits carry additive freshness/permissions evidence fields. */
+    /** Hits carry additive freshness/permissions evidence fields (absent in compact). */
     hits: CombinedContentHit[];
     returned: number;
     /** True when the group was cut off by its page limit. */
@@ -134,6 +176,10 @@ export interface CombinedResponse {
     content?: ContentGroup;
     files?: NameGroup;
     dirs?: NameGroup;
+    /** True when the response was produced in compact (evidence-free) mode. */
+    compact?: boolean;
+    /** Character-budget report; present only when `budgetChars > 0`. */
+    budget?: OutputBudget;
     tookMs: number;
 }
 /** Dependencies required to run a combined search; the HTTP layer supplies them. */
@@ -152,6 +198,8 @@ export interface CombinedDeps {
     /** Configured roots; a requested root prefix must live under one of them. */
     roots?: string[];
 }
+/** Whether one error is the abort rejection of a cancelled store query. */
+export declare function isAbortError(error: unknown): boolean;
 /**
  * Read the three scope flags from a request body. Anything that is not an
  * explicit `false` counts as enabled, so a panel that only sends `{ content:
@@ -186,8 +234,18 @@ export declare function dedupeNameHits<T extends SearchHit>(contentHits: readonl
  * minutes and gigabytes for no results. Failures are contained per group so a
  * broken content cache still shows name results.
  * @param deps - stores and the lazy-start hook.
- * @param request - normalized request.
+ * @param input - normalized request.
+ * @param options - per-call enrichment/budget knobs (config-backed).
  * @returns grouped result in content → files → dirs order.
  */
-export declare function runCombinedSearch(deps: CombinedDeps, input: CombinedRequest): Promise<CombinedResponse>;
+export declare function runCombinedSearch(deps: CombinedDeps, input: CombinedRequest, options?: CombinedOptions): Promise<CombinedResponse>;
+/**
+ * Fit a combined response inside a character budget by dropping the tail of the
+ * lowest-priority groups first: dirs, then files, then content hits. Structural
+ * fields (counts, state, warnings) are always kept; each trimmed group reports
+ * `returned`/`truncated` and the response carries a {@link OutputBudget} block.
+ * @param response - response to trim in place.
+ * @param limitChars - soft cap on the serialized response size.
+ */
+export declare function applyCombinedBudget(response: CombinedResponse, limitChars: number): void;
 //# sourceMappingURL=combined.d.ts.map

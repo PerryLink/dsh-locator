@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -8,7 +8,7 @@ import { strToU8, zipSync } from 'fflate'
 import { estimateSymbolTokens } from '../src/symbols.ts'
 import { zstdCompressSync } from 'node:zlib'
 import { afterAll, describe, expect, it } from 'vitest'
-import { ContentIndex } from '../src/content.ts'
+import { adaptivePressure, ContentIndex } from '../src/content.ts'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import type { ContentOptions, ContentProgress } from '../src/content.ts'
 import { CONTENT_STATE_SCHEMA } from '../src/find.ts'
@@ -909,6 +909,9 @@ describe('whole-word scan budgets', () => {
 })
 
 describe('content search worker protocol', () => {
+  /** The new protocol request shape: { id, method: 'search', params }. */
+  const isSearchRequest = (message: Record<string, unknown>): boolean => message.method === 'search'
+
   it('reports a timeout instead of re-running the query on the host thread', async () => {
     const content = await makeWorkerIndex({
       searchWorkerTimeoutMs: 40,
@@ -927,8 +930,8 @@ describe('content search worker protocol', () => {
     const content = await makeWorkerIndex({
       searchWorkerTimeoutMs: 500,
       searchWorkerFactory: () => fakeWorker((message, worker) => {
-        if (typeof message.query !== 'string') return
-        setImmediate(() => { worker.emit('message', { id: message.id, result: { hits: 'not-an-array', count: { value: 0, kind: 'exact' }, warnings: [] } }) })
+        if (!isSearchRequest(message)) return
+        setImmediate(() => { worker.emit('message', { id: message.id, ok: true, result: { hits: 'not-an-array', count: { value: 0, kind: 'exact' }, warnings: [] } }) })
       }),
     })
     const result = await content.search('WORKERMARK', 5, {})
@@ -941,13 +944,64 @@ describe('content search worker protocol', () => {
     const content = await makeWorkerIndex({
       searchWorkerTimeoutMs: 500,
       searchWorkerFactory: () => fakeWorker((message, worker) => {
-        if (typeof message.query !== 'string') return
+        if (!isSearchRequest(message)) return
         setImmediate(() => { worker.emit('exit', 1) })
       }),
     })
     const result = await content.search('WORKERMARK', 5, {})
     expect(result.hits).toEqual([])
     expect(result.error).toBe('content-search-worker-failed')
+  })
+
+  it('answers a valid worker result, strips the signal and pools two workers', async () => {
+    const posted: Array<Record<string, unknown>> = []
+    const seen = new Set<string>()
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 500,
+      searchWorkers: 2,
+      searchWorkerFactory: () => fakeWorker((message, worker) => {
+        if (!isSearchRequest(message)) return
+        posted.push(message)
+        const params = message.params as { query: string }
+        const result = {
+          hits: [{ kind: 'file', path: '/tmp/worker.md', title: 'worker.md', snippet: params.query, score: 0 }],
+          count: { value: 1, kind: 'exact' },
+          warnings: [],
+        }
+        setImmediate(() => { worker.emit('message', { id: message.id, ok: true, result }) })
+      }),
+    })
+    const signal = new AbortController().signal
+    const [first, second] = await Promise.all([
+      content.search('WORKERMARK', 5, {}, { signal }),
+      content.search('OTHERMARK', 5, {}, { signal }),
+    ])
+    expect(first.hits).toHaveLength(1)
+    expect(second.hits).toHaveLength(1)
+    for (const message of posted) {
+      const params = message.params as { options?: Record<string, unknown> }
+      expect(params.options?.signal).toBeUndefined()
+      expect(params.options?.rankAdaptive).toBe(true)
+    }
+    // Two concurrent queries used two pooled workers instead of serialising.
+    expect(posted.length).toBe(2)
+    for (const message of posted) seen.add(String(message.id))
+    expect(seen.size).toBe(2)
+  })
+
+  it('rejects with an AbortError and asks the worker to cancel', async () => {
+    const messages: Array<Record<string, unknown>> = []
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 5_000,
+      searchWorkerFactory: () => fakeWorker((message) => { messages.push(message) }),
+    })
+    const controller = new AbortController()
+    const pending = content.search('WORKERMARK', 5, {}, { signal: controller.signal })
+    setTimeout(() => controller.abort(), 20)
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(messages.some(message => message.method === 'cancel')).toBe(true)
+    // The worker is kept alive for the next query (only the request is cancelled).
+    expect(messages.some(message => message.method === 'search')).toBe(true)
   })
 
   it('allows a budgeted in-process query only when the worker cannot be created', async () => {
@@ -1890,5 +1944,559 @@ describe('setRefMeta (P1-5 helper)', () => {
     expect(content.setRefMeta(key, { blob: 'x'.repeat(2000) })).toBe(false)
     expect(content.refsFor(key)[0]?.meta).toBe(before)
     expect(JSON.parse(content.refsFor(key)[0]?.meta ?? '{}')).toBeTypeOf('object')
+  })
+})
+
+/** Read every content_meta flag from a finished database. */
+function contentMeta(state: string): Map<string, number> {
+  const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+  const rows = db.prepare('SELECT key, value FROM content_meta').all() as Array<{ key: string; value: number }>
+  db.close()
+  return new Map(rows.map(row => [row.key, Number(row.value)]))
+}
+
+interface GenerationEntry { path: string; name: string; size: number; mtime: number; ext: string; dir: boolean }
+interface GenerationCall { after: number; limit: number; opts?: { since?: number; mtimeFrom?: number } }
+
+/** A fake engine that honors the dump since/mtimeFrom filters like the real one. */
+function generationEngine(root: string): {
+  live: string
+  engine: { generation: number; entries: GenerationEntry[]; calls: GenerationCall[] }
+  runtime: LocatorRuntime
+} {
+  const live = join(root, 'live.md')
+  writeFileSync(live, 'GENERATION-FIRST marker')
+  const engine = {
+    generation: 1,
+    entries: [{ path: live, name: 'live.md', size: statSync(live).size, mtime: Date.now() - 60_000, ext: 'md', dir: false }] as GenerationEntry[],
+    calls: [] as GenerationCall[],
+  }
+  const runtime = {
+    dump: async (after: number, limit: number, opts?: { since?: number; mtimeFrom?: number }) => {
+      engine.calls.push({ after, limit, ...(opts === undefined ? {} : { opts }) })
+      if (opts?.since !== undefined && opts.since === engine.generation) {
+        return { entries: [], next: 0, done: true, unchanged: true, generation: engine.generation }
+      }
+      const filtered = opts?.mtimeFrom === undefined
+        ? engine.entries
+        : engine.entries.filter(entry => entry.mtime >= (opts.mtimeFrom as number))
+      return { entries: filtered, next: filtered.length, done: true, generation: engine.generation }
+    },
+  } as unknown as LocatorRuntime
+  return { live, engine, runtime }
+}
+
+describe('file-index generation fast path (P0-7)', () => {
+  it('skips the dump walk when the engine generation is unchanged', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-gen-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-gen-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const { live, engine, runtime } = generationEngine(root)
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, fullSweepIntervalMs: 3_600_000 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(1)
+    const callsAfterBuild = engine.calls.length
+    // The file changes on disk but the engine does not report a new generation
+    // (for example the watcher has not fired yet): the fast path must not dump.
+    writeFileSync(live, 'GENERATION-SECOND marker')
+    content.refresh()
+    await settle(content)
+    const probe = engine.calls.slice(callsAfterBuild)
+    expect(probe).toHaveLength(1)
+    expect(probe[0]?.opts?.since).toBe(1)
+    expect((await content.search('GENERATION-SECOND', 5)).length).toBe(0)
+    expect((await content.search('GENERATION-FIRST', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('dumps only files newer than the stored floor when the generation advances', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-gen2-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-gen2-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const { live, engine, runtime } = generationEngine(root)
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, fullSweepIntervalMs: 3_600_000 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    writeFileSync(live, 'GENERATION-THIRD marker')
+    engine.generation = 2
+    const entry = engine.entries[0]
+    if (entry === undefined) throw new Error('fixture entry missing')
+    entry.mtime = Date.now()
+    entry.size = statSync(live).size
+    content.refresh()
+    await settle(content)
+    const incremental = engine.calls[engine.calls.length - 1]
+    expect(incremental?.opts?.since).toBe(1)
+    expect(incremental?.opts?.mtimeFrom).toBeGreaterThan(0)
+    expect((await content.search('GENERATION-THIRD', 5)).length).toBeGreaterThan(0)
+    expect((await content.search('GENERATION-FIRST', 5)).length).toBe(0)
+    expect(contentMeta(state).get('engine_generation')).toBe(2)
+  })
+
+  it('removes documents for deleted files with the periodic full sweep', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-gen3-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-gen3-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const { live, engine, runtime } = generationEngine(root)
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, fullSweepIntervalMs: 1 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(1)
+    await new Promise<void>(resolve => { setTimeout(resolve, 5) })
+    rmSync(live)
+    engine.generation = 2
+    engine.entries = []
+    content.refresh()
+    await settle(content)
+    const sweep = engine.calls[engine.calls.length - 1]
+    expect(sweep?.opts).toBeUndefined()
+    expect(content.status().files).toBe(0)
+    expect((await content.search('GENERATION-FIRST', 5)).length).toBe(0)
+  })
+})
+
+describe('body-budget eviction and coverage (P0-8)', () => {
+  it('evicts the oldest documents instead of freezing the index', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-evict-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-evict-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const base = Date.now() - 60_000
+    const specs = [
+      { name: 'a.md', marker: 'EVICT-A', mtime: base },
+      { name: 'b.md', marker: 'EVICT-B', mtime: base + 1_000 },
+      { name: 'c.md', marker: 'EVICT-C', mtime: base + 2_000 },
+    ]
+    const entries = specs.map(spec => {
+      const path = join(root, spec.name)
+      writeFileSync(path, spec.marker + ' ' + 'x'.repeat(145))
+      return { path, name: spec.name, size: statSync(path).size, mtime: spec.mtime, ext: 'md', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, {
+      stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 400, maxFiles: 100, maxSessions: 0, evict: true,
+    })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(2)
+    expect(content.status().truncated).toBe(false)
+    const diagnostics = content.diagnostics()
+    expect(diagnostics.coverage.evictedDocs).toBeGreaterThanOrEqual(1)
+    expect(diagnostics.coverage.bodyBytes).toBeLessThanOrEqual(400)
+    expect((await content.search('EVICT-A', 5)).length).toBe(0)
+    expect((await content.search('EVICT-C', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('reports persisted coverage counters without a body scan', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-coverage-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-coverage-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries = Array.from({ length: 5 }, (_, index) => {
+      const path = join(root, 'doc-' + String(index) + '.md')
+      writeFileSync(path, 'COVERAGE-' + String(index) + ' body')
+      return { path, name: 'doc-' + String(index) + '.md', size: 20, mtime: Date.now() + index, ext: 'md', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 3, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const coverage = content.diagnostics().coverage
+    expect(coverage.indexedFiles).toBe(3)
+    expect(coverage.candidateFiles).toBe(5)
+    expect(coverage.ratio).toBeCloseTo(0.6)
+    expect(coverage.fileBudget).toBe(3)
+    expect(content.status().truncated).toBe(true)
+    const meta = contentMeta(state)
+    expect(meta.get('file_count')).toBe(3)
+    expect(meta.get('candidate_files')).toBe(5)
+  })
+})
+describe('content database maintenance (P1)', () => {
+  it('optimizes the FTS index after a full build', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'notes.md', body: 'fts optimize marker' }])
+    expect(content.diagnostics().ftsOptimizedAt).toBeGreaterThan(0)
+  })
+
+  it('warns when content.db exceeds its byte budget without rebuild loops', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-dbbudget-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-dbbudget-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'db budget marker')
+    const entries = [{ path, name: 'notes.md', size: 17, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, maxDbBytes: 1_000 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().warnings).toContain('content-db-over-budget')
+    expect(content.diagnostics().dbOverBudget).toBe(true)
+    const before = content.status().updatedAt
+    await new Promise<void>(resolve => { setTimeout(resolve, 5) })
+    content.refresh()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().updatedAt).toBeGreaterThan(before)
+    expect(content.status().warnings).toContain('content-db-over-budget')
+  })
+
+  it('cleans stale quarantined databases and keeps the two newest archives', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-corrupt-state-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }))
+    const old = join(state, 'content.db.corrupt-1')
+    const older = join(state, 'content.db.corrupt-2')
+    const fresh = join(state, 'content.db.corrupt-3')
+    const newest = join(state, 'content.db.corrupt-4')
+    for (const path of [old, older, fresh, newest]) writeFileSync(path, 'x')
+    const stale = Date.now() - 30 * 24 * 60 * 60_000
+    utimesSync(old, stale / 1000, stale / 1000)
+    utimesSync(older, stale / 1000, stale / 1000)
+    const root = mkdtempSync(join(tmpdir(), 'locator-corrupt-root-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'corrupt cleanup marker')
+    const entries = [{ path, name: 'notes.md', size: 22, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const archives = readdirSync(state).filter(name => name.startsWith('content.db.corrupt-')).sort()
+    expect(archives).toEqual(['content.db.corrupt-3', 'content.db.corrupt-4'])
+    expect(existsSync(old)).toBe(false)
+    expect(existsSync(older)).toBe(false)
+  })
+})
+
+describe('adaptive refresh policy (P1)', () => {
+  it('throttles on load, pressure and battery, and stays idle otherwise', () => {
+    expect(adaptivePressure({ cpuCount: 4 }).busy).toBe(false)
+    expect(adaptivePressure({ loadavg: '8.0 4.0 2.0', cpuCount: 4 })).toMatchObject({ busy: true, reasons: ['load'] })
+    expect(adaptivePressure({ loadavg: '1.0 1.0 1.0', cpuCount: 4, ioPressure: 'some avg10=1.00 avg60=55.00 avg300=10.00 total=1' })).toMatchObject({ busy: true, reasons: ['io-pressure'] })
+    expect(adaptivePressure({ cpuCount: 8, cpuPressure: 'some avg10=1.00 avg60=75.00 avg300=10.00 total=1', batteryStatus: 'Discharging' })).toMatchObject({ busy: true, reasons: ['cpu-pressure', 'battery'] })
+    expect(adaptivePressure({ cpuCount: 8, batteryStatus: 'Charging' }).busy).toBe(false)
+  })
+})
+
+describe('symbol slimming (P0-13)', () => {
+  it('caps symbols per file, skips generated code and re-slims on cap change', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-slim-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-slim-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const normal = join(root, 'normal.go')
+    const hidden = join(root, 'hidden.go')
+    const generatedPath = join(root, 'bundle.min.js')
+    const headerGenerated = join(root, 'schema.go')
+    writeFileSync(normal, Array.from({ length: 10 }, (_, index) => 'func Normal' + String(index) + '() {}').join('\n'))
+    writeFileSync(hidden, Array.from({ length: 4 }, (_, index) => 'func Hidden' + String(index) + '() {}').join('\n'))
+    writeFileSync(generatedPath, 'function minified() {}')
+    writeFileSync(headerGenerated, '// Code generated by protoc-gen-go. DO NOT EDIT.\npackage demo\nfunc Generated() {}\n')
+    const entries = [normal, hidden, generatedPath, headerGenerated].map(path => ({ path, name: basename(path), size: statSync(path).size, mtime: Date.now(), ext: path.split('.').pop() ?? '', dir: false }))
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const base = { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 }
+    const first = new ContentIndex(runtime, { ...base, symbolsPerFile: 5 })
+    cleanups.push(() => first.close())
+    first.start()
+    await settle(first)
+    expect(first.outline(normal)).toHaveLength(5)
+    expect(first.outline(hidden)).toHaveLength(4)
+    expect(first.outline(generatedPath)).toEqual([])
+    expect(first.outline(headerGenerated)).toEqual([])
+    first.close()
+    // A smaller cap must be applied to an existing database without a rebuild.
+    const second = new ContentIndex(runtime, { ...base, symbolsPerFile: 2 })
+    cleanups.push(() => second.close())
+    second.boot()
+    await settle(second)
+    expect(second.outline(normal)).toHaveLength(2)
+    const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const row = db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE path = ?').get(normal) as { n: number }
+    db.close()
+    expect(Number(row.n)).toBe(2)
+  })
+
+  it('backfills symbols from stored bodies even when the file is gone', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-symback-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-symback-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'backfill.go')
+    writeFileSync(path, 'package demo\n\nfunc FromBody() {}\n')
+    const entries = [{ path, name: 'backfill.go', size: statSync(path).size, mtime: Date.now(), ext: 'go', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const base = { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 }
+    const first = new ContentIndex(runtime, base)
+    cleanups.push(() => first.close())
+    first.start()
+    await settle(first)
+    first.close()
+    const db = new DatabaseSync(join(state, 'content.db'))
+    db.exec('DELETE FROM symbols')
+    db.prepare("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('symbols', 0)").run()
+    db.close()
+    rmSync(path)
+    const second = new ContentIndex(runtime, base)
+    cleanups.push(() => second.close())
+    second.boot()
+    await settle(second)
+    expect(second.findSymbols('FromBody').map(hit => hit.path)).toEqual([path])
+  })
+})
+describe('session streaming and tail refresh (P1-6)', () => {
+  const sessionFrame = (event: Record<string, unknown>): Buffer => zstdCompressSync(Buffer.from(JSON.stringify(event) + '\n'))
+  const sessionHeader = (id: string): Record<string, unknown> => ({ type: 'session', version: 4, id, createdAt: 1, cwd: '/work' })
+  const userMessage = (id: string, text: string): Record<string, unknown> => ({ type: 'user/message', data: { id, seq: 1, content: [{ type: 'text', text }] } })
+
+  it('appends only new frames and keeps earlier messages searchable', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-tail-sessions-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-tail-state-'))
+    cleanups.push(() => rmSync(sessions, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const dir = join(sessions, '--workspace--', 'session-tail')
+    mkdirSync(dir, { recursive: true })
+    const log = join(dir, 'session.v4.jsonl.zstd')
+    const firstFrame = sessionFrame(sessionHeader('session-tail'))
+    const secondFrame = sessionFrame(userMessage('m-1', 'TAIL-FIRST marker'))
+    writeFileSync(log, Buffer.concat([firstFrame, secondFrame]))
+    const initialSize = statSync(log).size
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect((await content.search('TAIL-FIRST', 5)).length).toBeGreaterThan(0)
+    // DSH appends one zstd frame per durable batch: the refresh reads only the tail.
+    appendFileSync(log, sessionFrame(userMessage('m-2', 'TAIL-SECOND marker')))
+    content.refresh()
+    await settle(content)
+    expect((await content.search('TAIL-FIRST', 5)).length).toBeGreaterThan(0)
+    expect((await content.search('TAIL-SECOND', 5)).length).toBeGreaterThan(0)
+    const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const row = db.prepare('SELECT byte_len AS byteLen, last_line AS lastLine, capped FROM sources WHERE path = ?').get(log) as { byteLen?: number; lastLine?: number; capped?: number } | undefined
+    db.close()
+    expect(Number(row?.byteLen)).toBe(statSync(log).size)
+    expect(Number(row?.byteLen)).toBeGreaterThan(initialSize)
+    expect(Number(row?.lastLine)).toBe(3)
+    expect(Number(row?.capped ?? 0)).toBe(0)
+    // Evidence refs keep working through the multi-frame reader.
+    const body = await content.sessionEventBody('session-tail', 0)
+    expect(body).toContain('TAIL-FIRST')
+  })
+
+  it('re-reads a rewritten log and keeps old rows when the rewrite is unreadable', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-rewrite-sessions-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-rewrite-state-'))
+    cleanups.push(() => rmSync(sessions, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const dir = join(sessions, '--workspace--', 'session-rewrite')
+    mkdirSync(dir, { recursive: true })
+    const log = join(dir, 'session.v4.jsonl.zstd')
+    writeFileSync(log, Buffer.concat([
+      sessionFrame(sessionHeader('session-rewrite')),
+      sessionFrame(userMessage('r-1', 'REWRITE-FIRST marker')),
+    ]))
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 10 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect((await content.search('REWRITE-FIRST', 5)).length).toBeGreaterThan(0)
+    writeFileSync(log, 'this is not a zstd session log')
+    content.refresh()
+    await settle(content)
+    expect(content.status().warnings).toContain('content-session-log-unreadable')
+    // The failed re-read must not delete the previously indexed messages.
+    expect((await content.search('REWRITE-FIRST', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('indexes only the head of a log over sessionMaxBytes', async () => {
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-head-sessions-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-head-state-'))
+    cleanups.push(() => rmSync(sessions, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const dir = join(sessions, '--workspace--', 'session-head')
+    mkdirSync(dir, { recursive: true })
+    const log = join(dir, 'session.v4.jsonl.zstd')
+    const headerFrame = sessionFrame(sessionHeader('session-head'))
+    const firstMessage = sessionFrame(userMessage('h-1', 'HEAD-FIRST marker'))
+    const hugeMessage = sessionFrame(userMessage('h-2', 'HEAD-HIDDEN marker ' + 'y'.repeat(8_000)))
+    writeFileSync(log, Buffer.concat([headerFrame, firstMessage, hugeMessage]))
+    const cap = headerFrame.length + firstMessage.length + 8
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 10, sessionMaxBytes: cap })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect((await content.search('HEAD-FIRST', 5)).length).toBeGreaterThan(0)
+    expect((await content.search('HEAD-HIDDEN', 5)).length).toBe(0)
+    expect(content.status().warnings).toContain('content-session-truncated')
+    const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const row = db.prepare('SELECT capped FROM sources WHERE path = ?').get(log) as { capped?: number } | undefined
+    db.close()
+    expect(Number(row?.capped)).toBe(1)
+    // A capped log is not re-read (its tail is beyond the configured budget).
+    const next = Date.now() + 5_000
+    utimesSync(log, next / 1000, next / 1000)
+    content.refresh()
+    await settle(content)
+    expect((await content.search('HEAD-HIDDEN', 5)).length).toBe(0)
+    expect((await content.search('HEAD-FIRST', 5)).length).toBeGreaterThan(0)
+  })
+})
+
+describe('content search cache and pooling (P1)', () => {
+  it('single-flights, caches and invalidates identical worker queries', async () => {
+    let posts = 0
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 1_000,
+      queryCacheSize: 16,
+      queryCacheTtlMs: 60_000,
+      searchWorkerFactory: () => fakeWorker((message, worker) => {
+        if (message.method !== 'search') return
+        posts++
+        setTimeout(() => {
+          worker.emit('message', { id: message.id, ok: true, result: { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] } })
+        }, 10)
+      }),
+    })
+    await Promise.all([content.search('CACHEMARK', 5, {}), content.search('CACHEMARK', 5, {})])
+    expect(posts).toBe(1)
+    await content.search('CACHEMARK', 5, {})
+    expect(posts).toBe(1)
+    await content.search('OTHERMARK', 5, {})
+    expect(posts).toBe(2)
+    // A build invalidates the cache so stale hits cannot survive a refresh.
+    content.refresh()
+    await settle(content)
+    await content.search('CACHEMARK', 5, {})
+    expect(posts).toBe(3)
+  })
+
+  it('expires cached results after the configured TTL', async () => {
+    let posts = 0
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 1_000,
+      queryCacheSize: 8,
+      queryCacheTtlMs: 5,
+      searchWorkerFactory: () => fakeWorker((message, worker) => {
+        if (message.method !== 'search') return
+        posts++
+        setImmediate(() => {
+          worker.emit('message', { id: message.id, ok: true, result: { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] } })
+        })
+      }),
+    })
+    await content.search('TTLMARK', 5, {})
+    await content.search('TTLMARK', 5, {})
+    expect(posts).toBe(1)
+    await new Promise<void>(resolve => { setTimeout(resolve, 12) })
+    await content.search('TTLMARK', 5, {})
+    expect(posts).toBe(2)
+  })
+})
+
+describe('symbol SQL lookups (P0-11)', () => {
+  it('finds a substring fragment and ranks exact matches first', async () => {
+    const { content } = await makeAdvancedIndex([{ name: 'server.go', body: 'package demo\n\nfunc MiddlewareHandler() {}\nfunc Handler() {}\n' }])
+    const middle = content.findSymbols('dleware')
+    expect(middle.map(hit => hit.name)).toEqual(['MiddlewareHandler'])
+    const exact = content.findSymbols('Handler')
+    expect(exact[0]?.name).toBe('Handler')
+  })
+
+  it('repoMap aggregates by root, ranks by symbol count and ignores sibling prefixes', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'big.go', body: Array.from({ length: 6 }, (_, index) => 'func Big' + String(index) + '() {}').join('\n') },
+      { name: 'small.go', body: 'package demo\n\nfunc Small() {}\n' },
+    ])
+    const hit = content.findSymbols('Big0')[0]
+    if (hit === undefined) throw new Error('fixture symbol missing')
+    const root = dirname(hit.path)
+    const mapped = content.repoMap([root], 200)
+    expect(mapped[0]?.path).toBe(join(root, 'big.go'))
+    expect(mapped.map(file => basename(file.path))).toContain('small.go')
+    expect(content.repoMap([root + '-sibling'], 200)).toEqual([])
+  })
+})
+
+describe('build transaction batching (P0-14)', () => {
+  it('crosses batch boundaries without losing rows or the byte counter', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-batch-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-batch-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries = Array.from({ length: 320 }, (_, index) => {
+      const path = join(root, 'batch-' + String(index) + '.md')
+      writeFileSync(path, 'BATCH-' + String(index) + ' ' + 'z'.repeat(30))
+      return { path, name: 'batch-' + String(index) + '.md', size: 38, mtime: Date.now(), ext: 'md', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 1_000, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(320)
+    expect(content.status().error).toBe('')
+    expect((await content.search('BATCH-319', 5)).length).toBeGreaterThan(0)
+    const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const stored = Number((db.prepare("SELECT value FROM content_meta WHERE key = 'total_bytes'").get() as { value: number }).value)
+    const actual = Number((db.prepare('SELECT COALESCE(SUM(length(body)), 0) AS n FROM docs').get() as { n: number }).n)
+    const complete = Number((db.prepare("SELECT value FROM content_meta WHERE key = 'complete'").get() as { value: number }).value)
+    db.close()
+    expect(stored).toBe(actual)
+    expect(complete).toBe(1)
+  })
+})
+
+describe('integration seams for impl-runtime/impl-content-query', () => {
+  it('accepts the abort signal through ContentSearchOptions as runtime passes it', async () => {
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 5_000,
+      searchWorkerFactory: () => fakeWorker(() => { /* never answer */ }),
+    })
+    const controller = new AbortController()
+    const pending = content.search('SIGNALMARK', 5, { signal: controller.signal } as never)
+    setTimeout(() => controller.abort(), 10)
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('forwards rankAdaptive=false unchanged to the worker', async () => {
+    let observed: unknown
+    const content = await makeWorkerIndex({
+      searchWorkerTimeoutMs: 1_000,
+      rankAdaptive: false,
+      searchWorkerFactory: () => fakeWorker((message, worker) => {
+        if (message.method !== 'search') return
+        const params = message.params as { options?: { rankAdaptive?: unknown } }
+        observed = params.options?.rankAdaptive
+        setImmediate(() => {
+          worker.emit('message', { id: message.id, ok: true, result: { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [] } })
+        })
+      }),
+    })
+    await content.search('RANKMARK', 5, {})
+    expect(observed).toBe(false)
+  })
+
+  it('rebuilds an over-budget database at idle instead of blocking refreshes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-db-idle-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-db-idle-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'idle rebuild marker')
+    const entries = [{ path, name: 'notes.md', size: 19, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, maxDbBytes: 1_000 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const db = new DatabaseSync(join(state, 'content.db'))
+    db.prepare("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('db_budget_rebuilt_at', 0)").run()
+    db.close()
+    content.refresh()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.diagnostics().lastRefreshMode).toBe('full')
+    expect((await content.search('idle rebuild', 5)).length).toBeGreaterThan(0)
+    expect(contentMeta(state).get('complete')).toBe(1)
   })
 })

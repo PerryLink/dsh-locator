@@ -226,6 +226,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       contentMaxFileBytes: 1_000_000,
       contentMaxTotalBytes: 0,
       contentRefreshMs: 60_000,
+      prewarm: false,
       contentMaxFiles: 0,
       contentFullIndex: false,
       contentIndexReasoning: false,

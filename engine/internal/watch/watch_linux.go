@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
+	"github.com/PerryLink/dsh-locator/engine/internal/scan"
 )
 
 type watcher struct {
@@ -31,7 +32,13 @@ type watcher struct {
 	dirsWatched  int
 	dirsFailed   int
 	degraded     bool
-	reasons      []string
+	// limit is the watch directory budget; limited records that a budget or
+	// kernel watch limit truncated coverage (an intermediate state covered by
+	// the periodic refresh, not a backend failure).
+	limit    int
+	limited  bool
+	excluder *scan.Excluder
+	reasons  []string
 	// coverage is one entry per requested root once the constructor finished;
 	// ready distinguishes startup walk failures (recorded in coverage) from
 	// runtime failures (which invalidate per-root attribution).
@@ -63,6 +70,8 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		ix:         ix,
 		roots:      opt.Roots,
 		excludes:   opt.Excludes,
+		excluder:   newExcluder(opt),
+		limit:      opt.maxDirs(),
 		onError:    opt.OnError,
 		onDegraded: opt.OnDegraded,
 		fd:         fd,
@@ -71,16 +80,88 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		started:    time.Now(),
 		stopCh:     make(chan struct{}),
 	}
-	for _, root := range opt.Roots {
+	// Install watches from the directory records the index already holds instead
+	// of walking every root a second time. On a 155k-directory profile the
+	// startup walk cost 2.5-2.8s warm (up to 80s cold) before any event could be
+	// delivered; the index records are the same list the scan just produced.
+	dirs, owners, counts, truncated := w.indexDirectories()
+	if len(dirs) == 0 {
+		// No directory record to start from (bare or empty index): keep the
+		// pre-0.20 startup walk so direct callers and first-run edge cases still
+		// install watches.
+		w.installByWalk(opt.Roots)
+	} else {
+		w.installFromIndex(opt.Roots, dirs, owners, counts, truncated)
+	}
+	if w.watchedDirCount() == 0 {
+		w.mu.Lock()
+		skipped := w.rootsSkipped
+		limited := w.limited
+		w.mu.Unlock()
+		if skipped == 0 && !limited {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("inotify: no directory could be watched (check fs.inotify.max_user_watches)")
+		}
+		// Every root was intentionally skipped (for example a 9p-only profile) or
+		// the watch budget is exhausted. A degraded watcher with no watches is
+		// still useful: it reports the reason and lets the daemon run the
+		// periodic rebuild fallback.
+	}
+	w.mu.Lock()
+	w.ready = true
+	w.mu.Unlock()
+	return w, nil
+}
+
+// maxDirEnumeration bounds the directory paths the watcher materialises from
+// the index. Beyond it the extra directories cannot be watched anyway (the
+// default budget is 120k), so the list is truncated and every root is reported
+// limited, which keeps the daemon on the periodic-refresh path.
+const maxDirEnumeration = 300_000
+
+// indexDirectories streams the live directory records once and attributes each
+// to the configured root that contains it. counts are complete even when the
+// path list is truncated; owners runs parallel to paths.
+func (w *watcher) indexDirectories() (paths []string, owners []int16, counts []int, truncated bool) {
+	if w.ix == nil || len(w.roots) == 0 {
+		return nil, nil, nil, false
+	}
+	counts = make([]int, len(w.roots))
+	after := int32(0)
+	for {
+		page, next, done := w.ix.DirPage(after, 4096)
+		for _, dir := range page {
+			owner := rootIndexFor(dir, w.roots)
+			if owner < 0 {
+				continue
+			}
+			counts[owner]++
+			if len(paths) < maxDirEnumeration {
+				paths = append(paths, dir)
+				owners = append(owners, int16(owner))
+			} else {
+				truncated = true
+			}
+		}
+		if done {
+			break
+		}
+		after = next
+	}
+	return paths, owners, counts, truncated
+}
+
+// installByWalk is the startup walk used when the index holds no directory
+// records (bare index, direct watcher.New callers).
+func (w *watcher) installByWalk(roots []string) {
+	for _, root := range roots {
 		cov := RootCoverage{Path: root}
 		reason, skip := classifyRoot(root)
 		if reason != "" {
 			cov.Reason = reason
 			w.markDegraded(reason)
 			// Remote/9p roots never deliver usable inotify events: do not walk
-			// their trees (tens of thousands of useless kernel watches and
-			// seconds-to-minutes of startup/rebuild time). The periodic rebuild
-			// fallback keeps them converging.
+			// their trees. The periodic rebuild fallback keeps them converging.
 			if skip {
 				w.mu.Lock()
 				w.rootsSkipped++
@@ -101,10 +182,13 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 			w.rootsWatch++
 			w.mu.Unlock()
 		}
+		cov.Limited = w.limited
 		switch {
 		case reason != "":
 			// The filesystem may still drop events (FUSE/stacked mounts), so
 			// keep the root in the rescan set even though it was walked.
+		case w.limited:
+			cov.Reason = w.limitMessage()
 		case watched && failures == 0:
 			cov.Watched = true
 		case watched:
@@ -116,22 +200,144 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		w.coverage = append(w.coverage, cov)
 		w.mu.Unlock()
 	}
-	if w.watchedDirCount() == 0 {
-		w.mu.Lock()
-		skipped := w.rootsSkipped
-		w.mu.Unlock()
-		if skipped == 0 {
-			_ = syscall.Close(fd)
-			return nil, fmt.Errorf("inotify: no directory could be watched (check fs.inotify.max_user_watches)")
+}
+
+// installFromIndex installs one inotify watch per indexed directory, in index
+// order, while respecting the watch budget. A root whose directories are all
+// watched is reported healthy; a root cut short by the budget is reported as
+// unwatched-but-limited so the periodic refresh rescans exactly that root.
+func (w *watcher) installFromIndex(roots, dirs []string, owners []int16, counts []int, truncated bool) {
+	for i, root := range roots {
+		cov := RootCoverage{Path: root}
+		reason, skip := classifyRoot(root)
+		if reason != "" {
+			cov.Reason = reason
+			w.markDegraded(reason)
+			if skip {
+				w.mu.Lock()
+				w.rootsSkipped++
+				w.coverage = append(w.coverage, cov)
+				w.mu.Unlock()
+				continue
+			}
 		}
-		// Every root was intentionally skipped (for example a 9p-only profile).
-		// A degraded watcher with no watches is still useful: it reports the
-		// reason and lets the daemon run the periodic rebuild fallback.
+		beforeFailures := w.failedDirs()
+		added := 0
+		limitHit := false
+		for j, dir := range dirs {
+			if int(owners[j]) != i {
+				continue
+			}
+			if dir != root && w.excluder.Skip(dir, dirBase(dir), true) {
+				continue
+			}
+			if w.watchedDirCount() >= w.limit {
+				w.noteLimit(w.limitMessage())
+				limitHit = true
+				break
+			}
+			if _, err := w.add(dir); err != nil {
+				if isWatchLimitErr(err) {
+					w.noteLimit(w.limitMessage())
+					limitHit = true
+					break
+				}
+				if transientWatchError(err) {
+					continue
+				}
+				w.report(err)
+				w.noteWatchFailure(err)
+				continue
+			}
+			added++
+		}
+		if counts[i] == 0 && !limitHit && !truncated {
+			// The snapshot holds no directory record for this root (a root added
+			// after the build, or a partially written snapshot): fall back to the
+			// startup walk so its changes are still delivered natively.
+			fallbackBefore := w.watchedDirCount()
+			if err := w.addTree(root, true); err != nil {
+				w.report(err)
+			}
+			added = w.watchedDirCount() - fallbackBefore
+		}
+		failures := w.failedDirs() - beforeFailures
+		if added > 0 {
+			w.mu.Lock()
+			w.rootsWatch++
+			w.mu.Unlock()
+		}
+		limited := limitHit || truncated || added < counts[i]
+		cov.Limited = limited
+		switch {
+		case reason != "":
+			// Filesystem may still drop events; keep the root in the rescan set.
+		case limited:
+			cov.Reason = fmt.Sprintf("watch directory budget reached (%d of %d directories watched); the periodic refresh covers the rest", added, counts[i])
+		case failures > 0:
+			cov.Reason = fmt.Sprintf("inotify coverage is incomplete (%d directorie(s) could not be watched)", failures)
+		case added == 0:
+			cov.Reason = "no directory below this root could be watched"
+		default:
+			cov.Watched = true
+		}
+		w.mu.Lock()
+		w.coverage = append(w.coverage, cov)
+		w.mu.Unlock()
 	}
+}
+
+// noteLimit records that a budget or kernel watch limit truncated coverage and
+// notifies the daemon once.
+func (w *watcher) noteLimit(reason string) {
 	w.mu.Lock()
-	w.ready = true
+	first := !w.limited
+	w.limited = true
 	w.mu.Unlock()
-	return w, nil
+	if first {
+		w.markDegraded(reason)
+	}
+}
+
+// limitMessage explains the truncated coverage in one line.
+func (w *watcher) limitMessage() string {
+	return fmt.Sprintf("watch directory budget reached (%d of %d directories); the periodic refresh covers the rest", w.watchedDirCount(), w.limit)
+}
+
+// dirBase returns the last path component without allocating for the common
+// case.
+func dirBase(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[i+1:]
+		}
+	}
+	return p
+}
+
+// dirUnderRoot reports whether dir is root or below it.
+func dirUnderRoot(dir, root string) bool {
+	if dir == root {
+		return true
+	}
+	if len(dir) <= len(root) || dir[:len(root)] != root {
+		return false
+	}
+	return dir[len(root)] == '/'
+}
+
+// rootIndexFor returns the most specific configured root containing dir, or -1.
+func rootIndexFor(dir string, roots []string) int {
+	best := -1
+	for i, root := range roots {
+		if !dirUnderRoot(dir, root) {
+			continue
+		}
+		if best < 0 || len(root) > len(roots[best]) {
+			best = i
+		}
+	}
+	return best
 }
 
 func (w *watcher) report(err error) {
@@ -148,7 +354,7 @@ func (w *watcher) watchedDirCount() int {
 
 func (w *watcher) healthLocked() Health {
 	reasons := w.reasons
-	degraded := w.degraded || w.rootsWatch < len(w.roots) || w.dirsFailed > 0
+	degraded := w.degraded || w.limited || w.rootsWatch < len(w.roots) || w.dirsFailed > 0
 	if w.rootsWatch < len(w.roots) && len(reasons) == 0 {
 		reasons = []string{fmt.Sprintf("%d of %d root(s) could not be watched", len(w.roots)-w.rootsWatch, len(w.roots))}
 	}
@@ -164,6 +370,8 @@ func (w *watcher) healthLocked() Health {
 		Degraded: degraded,
 		Reason:   strings.Join(reasons, "; "),
 		Coverage: coverage,
+		Limit:    w.limit,
+		Limited:  w.limited,
 	}
 }
 
@@ -226,11 +434,16 @@ func (w *watcher) addTree(root string, required bool) error {
 		if !d.IsDir() {
 			return nil
 		}
-		if path != root && excluded(path, d.Name(), w.excludes) {
+		if path != root && w.excluder.Skip(path, d.Name(), true) {
 			return fs.SkipDir
 		}
 		_, werr := w.add(path)
 		if werr != nil {
+			if isWatchLimitErr(werr) {
+				// Budget exhausted: stop walking instead of reporting every
+				// remaining directory as a failure.
+				return fs.SkipAll
+			}
 			if (!required || path != root) && transientWatchError(werr) {
 				return fs.SkipDir
 			}
@@ -242,8 +455,17 @@ func (w *watcher) addTree(root string, required bool) error {
 	})
 }
 
-// add registers one directory watch.
+// add registers one directory watch. It refuses to grow past the directory
+// budget and reports the limit as an intermediate state.
 func (w *watcher) add(dir string) (int32, error) {
+	w.mu.Lock()
+	_, already := w.dirWD[dir]
+	over := !already && w.limit > 0 && w.dirsWatched >= w.limit
+	w.mu.Unlock()
+	if over {
+		w.noteLimit(w.limitMessage())
+		return -1, errWatchLimit
+	}
 	mask := uint32(syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_FROM |
 		syscall.IN_MOVED_TO | syscall.IN_CLOSE_WRITE | syscall.IN_ATTRIB |
 		syscall.IN_DELETE_SELF | syscall.IN_MOVE_SELF | syscall.IN_ONLYDIR)
@@ -425,7 +647,7 @@ func (w *watcher) handle(buf []byte) {
 		case mask&syscall.IN_ISDIR != 0:
 			switch {
 			case mask&(syscall.IN_CREATE|syscall.IN_MOVED_TO) != 0:
-				if !excluded(path, name, w.excludes) {
+				if !w.excluder.Skip(path, name, true) {
 					if err := w.addTree(path, false); err != nil {
 						w.report(err)
 					}
@@ -465,12 +687,12 @@ func (w *watcher) indexTree(root string) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != root && excluded(path, d.Name(), w.excludes) {
+			if path != root && w.excluder.Skip(path, d.Name(), true) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !excluded(path, d.Name(), w.excludes) {
+		if !w.excluder.Skip(path, d.Name(), false) {
 			w.upsert(path)
 		}
 		return nil
@@ -498,32 +720,13 @@ func (w *watcher) rescan() {
 			if err != nil {
 				return nil
 			}
-			if d.IsDir() && path != root && excluded(path, d.Name(), w.excludes) {
+			if d.IsDir() && path != root && w.excluder.Skip(path, d.Name(), true) {
 				return fs.SkipDir
 			}
 			w.upsert(path)
 			return nil
 		})
 	}
-}
-
-func excluded(path, name string, patterns []string) bool {
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if strings.ContainsAny(p, `/\`) {
-			if ok, _ := filepath.Match(p, path); ok {
-				return true
-			}
-			continue
-		}
-		if ok, _ := filepath.Match(p, name); ok {
-			return true
-		}
-	}
-	return false
 }
 
 // Filesystem magic numbers for mounts where inotify notifications cannot be

@@ -284,10 +284,19 @@ func TestNormalizeTextUnit(t *testing.T) {
 	}
 }
 
-func TestSnapshotFormatUnchangedForPinyin(t *testing.T) {
+// TestSnapshotFormatKeepsPinyinDerived pins the compatibility contract: the
+// legacy v1 layout stays readable, and the pinyin/folded-name tables remain
+// derived state that Load rebuilds rather than persisted data.
+func TestSnapshotFormatKeepsPinyinDerived(t *testing.T) {
 	if snapshotVersion != 1 {
-		t.Fatalf("snapshot version = %d, want 1: pinyin state must stay derived", snapshotVersion)
+		t.Fatalf("legacy snapshot version = %d, want 1", snapshotVersion)
 	}
+	if snapshotVersionCurrent != 2 {
+		t.Fatalf("current snapshot version = %d, want 2", snapshotVersionCurrent)
+	}
+	// The round-trip tests (TestPinyinSurvivesSnapshotRoundTrip, the v1 and zstd
+	// cases in snapshot_v2_test.go) prove the derived tables are rebuilt on
+	// load rather than stored.
 }
 
 func mustQuery(t *testing.T, text string) Query {

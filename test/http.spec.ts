@@ -7,7 +7,7 @@
  */
 
 import { Readable } from 'node:stream'
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -15,6 +15,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isJsonContentType, originRejection, registerHttp } from '../src/http.ts'
 import type { LocatorRuntime } from '../src/runtime.ts'
+import type { ContentIndex } from '../src/content.ts'
+import { Scope } from '../src/scope.ts'
 
 interface RegisteredRoute {
   kind: string
@@ -116,13 +118,43 @@ class FakeResponse {
   readonly headers = new Map<string, unknown>()
   body = ''
   writableEnded = false
+  /** Node's "response finished" flag; false while a client can still disconnect. */
+  writableFinished = false
+  private readonly listeners = new Map<string, Array<() => void>>()
 
   setHeader(name: string, value: unknown): void {
     this.headers.set(name.toLowerCase(), value)
   }
 
+  on(event: string, listener: () => void): this {
+    const list = this.listeners.get(event)
+    if (list === undefined) this.listeners.set(event, [listener])
+    else list.push(listener)
+    return this
+  }
+
+  off(event: string, listener: () => void): this {
+    const list = this.listeners.get(event)
+    if (list !== undefined) {
+      const index = list.indexOf(listener)
+      if (index !== -1) list.splice(index, 1)
+    }
+    return this
+  }
+
+  removeListener(event: string, listener: () => void): this {
+    return this.off(event, listener)
+  }
+
+  /** Simulate the socket closing; the handler must see close while unfinished. */
+  emitClose(finished = false): void {
+    this.writableFinished = finished
+    for (const listener of [...(this.listeners.get('close') ?? [])]) listener()
+  }
+
   end(chunk?: unknown): void {
     this.writableEnded = true
+    this.writableFinished = true
     if (typeof chunk === 'string') this.body = chunk
     else if (Buffer.isBuffer(chunk)) this.body = chunk.toString('utf8')
   }
@@ -132,14 +164,27 @@ class FakeResponse {
   }
 }
 
-function fakeRuntime(roots: readonly string[] = [], hits: Array<Record<string, unknown>> = []): LocatorRuntime {
+interface FakeRuntimeOptions {
+  config?: Record<string, unknown>
+  /** Engine status used by routes that do not go through the cache. */
+  engineStatus?: () => Promise<unknown>
+  /** 0.20.0 pushed-stats cache used by /status. */
+  engineStatusCached?: (ttlMs?: number) => Promise<unknown>
+}
+
+function fakeRuntime(
+  roots: readonly string[] = [],
+  hits: Array<Record<string, unknown>> = [],
+  options: FakeRuntimeOptions = {},
+): LocatorRuntime {
   return {
     roots: [...roots],
     stateDir: join(tmpdir(), 'locator-http-state'),
     status: { running: false },
-    config: { maxResults: 100, outputBudgetChars: 8000 },
+    config: { maxResults: 100, outputBudgetChars: 8000, ...options.config },
     start: () => {},
-    engineStatus: async () => undefined,
+    engineStatus: options.engineStatus ?? (async () => undefined),
+    ...(options.engineStatusCached === undefined ? {} : { engineStatusCached: options.engineStatusCached }),
     search: async (args: { offset: number; limit: number }) => ({
       total: hits.length,
       returned: hits.slice(args.offset, args.offset + args.limit).length,
@@ -174,10 +219,10 @@ async function callRoute(
   path: string,
   request: IncomingMessage,
   peer?: unknown,
+  response: FakeResponse = new FakeResponse(),
 ): Promise<FakeResponse> {
   const route = harness.routes.find(candidate => candidate.path === path)
   if (route === undefined) throw new Error(`route not registered: ${path}`)
-  const response = new FakeResponse()
   await route.handler(request, response as unknown as ServerResponse, peer)
   return response
 }
@@ -609,3 +654,214 @@ describe('public GET search API', () => {
   })
 })
 
+
+/** Minimal content store for the content-mode and status route tests. */
+function fakeContent(options: {
+  file?: string
+  hits?: Array<Record<string, unknown>>
+  search?: (query: string, limit: number, searchOptions: Record<string, unknown>) => Promise<unknown>
+  diagnostics?: Record<string, unknown>
+} = {}): ContentIndex {
+  const state = { building: false, files: 1, sessions: 0, messages: 0, truncated: false, error: '', warnings: [], updatedAt: 1 }
+  return {
+    status: () => state,
+    authorizedSessionIds: () => new Set<string>(),
+    indexedMtime: () => options.file === undefined ? undefined : statSync(options.file).mtimeMs,
+    sessionEventRefs: () => new Map(),
+    async search(query: string, limit: number, searchOptions: Record<string, unknown>) {
+      if (options.search !== undefined) return await options.search(query, limit, searchOptions)
+      const hits = options.hits ?? []
+      return { hits: hits.slice(0, limit), count: { value: hits.length, kind: 'exact' as const }, warnings: [] }
+    },
+    ...(options.diagnostics === undefined ? {} : { diagnostics: () => options.diagnostics }),
+  } as unknown as ContentIndex
+}
+
+/** One content hit for the HTTP tests. */
+function contentHttpHit(path: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { kind: 'file', path, title: path.split('/').pop() ?? path, snippet: 'needle body', line: 1, score: 1, ...overrides }
+}
+
+describe('search paging and real tookMs (0.20.0 P0-15)', () => {
+  it('advances nextOffset past the whole name page when the output budget trims it', async () => {
+    const hits = [httpHit('/root/a.md'), httpHit('/root/b.md'), httpHit('/root/c.md')]
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], hits, { config: { outputBudgetChars: 120 } }))
+    const body = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'a', limit: 3 }))).json()
+    const returned = (body.hits as unknown[]).length
+    expect(body.ok).toBe(true)
+    expect(returned).toBeLessThan(3)
+    expect(body.budget).toMatchObject({ truncated: true })
+    // One page, not one request per dropped row: advance by the fetched page.
+    expect(body.nextOffset).toBe(3)
+  })
+
+  it('advances nextOffset past rows dropped by the scope filter', async () => {
+    const hits = [httpHit('/root/a.md'), httpHit('/root/b.md'), httpHit('/root/c.md')]
+    const scope = new Scope({ notSearchable: ['b.md'], notReadable: [], notIndexed: [] }, false)
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], hits), undefined, undefined, {}, undefined, scope)
+    const body = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'a', limit: 3 }))).json()
+    expect(body.ok).toBe(true)
+    expect((body.hits as Array<{ path: string }>).map(hit => hit.path)).toEqual(['/root/a.md', '/root/c.md'])
+    expect(body.truncated).toBe(true)
+    expect(body.nextOffset).toBe(3)
+  })
+
+  it('reports the real content tookMs and page-advancing nextOffset', async () => {
+    const dir = tempDir('locator-http-content-')
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'needle line\nmore\n')
+    const hits = [
+      contentHttpHit(file),
+      contentHttpHit(file, { snippet: 'x'.repeat(600) }),
+      contentHttpHit(file, { snippet: 'y'.repeat(600) }),
+    ]
+    const content = fakeContent({
+      file,
+      search: async () => {
+        await new Promise(resolve => setTimeout(resolve, 25))
+        return { hits, count: { value: 3, kind: 'exact' }, warnings: [] }
+      },
+    })
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [], { config: { outputBudgetChars: 250 } }), content)
+    const body = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'needle', mode: 'content', limit: 3 }))).json()
+    expect(body.ok).toBe(true)
+    expect(body.tookMs).toBeGreaterThanOrEqual(20)
+    expect((body.hits as unknown[]).length).toBeLessThan(3)
+    expect(body.budget).toMatchObject({ truncated: true })
+    expect(body.nextOffset).toBe(3)
+  })
+
+  it('cancels the content query when the client disconnects', async () => {
+    const signals: AbortSignal[] = []
+    const content = fakeContent({
+      search: async (_query, _limit, searchOptions) => {
+        const signal = searchOptions.signal
+        expect(signal).toBeInstanceOf(AbortSignal)
+        signals.push(signal as AbortSignal)
+        return await new Promise((_resolve, reject) => {
+          (signal as AbortSignal).addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')))
+        })
+      },
+    })
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([]), content)
+    const response = new FakeResponse()
+    const pending = callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'needle', mode: 'content' }), undefined, response)
+    // Let the handler reach the store, then drop the connection.
+    await new Promise(resolve => setTimeout(resolve, 25))
+    response.emitClose(false)
+    await pending
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(true)
+    expect(response.json()).toMatchObject({ ok: false, error: 'request-aborted' })
+  })
+})
+
+describe('combined route 0.20.0 options', () => {
+  it('serves compact responses without evidence fields', async () => {
+    const dir = tempDir('locator-http-compact-')
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'body')
+    const content = fakeContent({ hits: [contentHttpHit('/tmp/body-only.md')] })
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([dir], [httpHit('/tmp/name-only.md')]), content)
+    const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'note', compact: true }))).json()
+    expect(body.compact).toBe(true)
+    const fileHits = (body.files as { hits: Array<Record<string, unknown>> }).hits
+    expect(fileHits).toHaveLength(1)
+    expect(fileHits[0]).toMatchObject({ path: '/tmp/name-only.md' })
+    expect(fileHits[0]?.freshness).toBeUndefined()
+    expect(fileHits[0]?.permissions).toBeUndefined()
+    expect(fileHits[0]?.ref).toBeUndefined()
+    expect(fileHits[0]?.hash).toBeUndefined()
+    const contentHits = (body.content as { hits: Array<Record<string, unknown>> }).hits
+    expect(contentHits[0]?.freshness).toBeUndefined()
+    expect(contentHits[0]?.permissions).toBeUndefined()
+  })
+
+  it('applies the configured combined character budget', async () => {
+    const hits = Array.from({ length: 12 }, (_, index) => httpHit('/tmp/name-' + String(index) + '.md'))
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], hits), undefined, undefined, { combinedBudgetChars: 700 })
+    const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'name', compact: true }))).json()
+    expect(body.budget).toBeDefined()
+    expect(body.budget).toMatchObject({ limitChars: 700, truncated: true })
+    expect((body.budget as { dropped: number }).dropped).toBeGreaterThan(0)
+    // Structural counts stay intact even when hits are trimmed.
+    expect((body.files as { count: { value: number } }).count.value).toBe(12)
+  })
+
+  it('keeps the response unbudgeted by default', async () => {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [httpHit('/tmp/a.md')]))
+    const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'a' }))).json()
+    expect(body.budget).toBeUndefined()
+    expect(body.compact).toBeUndefined()
+  })
+})
+
+describe('status route 0.20.0 observability', () => {
+  const payload = {
+    version: '0.20.0', platform: 'linux/amd64', roots: ['/tmp'], entries: 3, files: 3, dirs: 0,
+    nameBytes: 10, deleted: 0, watching: true, scanning: false, usn: false, uptimeSec: 1, stateDir: '/state',
+    rssBytes: 111, hwmBytes: 222, watchDirs: 10, watchLimit: 120_000, watchLimited: true,
+    watchInitializing: true, snapshotBytes: 1_000, saveBytes: 900, saveMs: 12, saveCount: 2,
+    queueDepth: 3, generation: 5, builtAt: 1_700_000_000_000, queryCount: 4, lastQueryMs: 1.5,
+    recentQueryMs: [1, 2], heapBytes: 1234, numGC: 2, refreshBackoffMs: 0,
+  }
+
+  it('answers from the pushed 1 s status cache and forwards engine gauges', async () => {
+    let cachedCalls = 0
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [], {
+      engineStatus: async () => {
+        throw new Error('the status route must use the cached copy')
+      },
+      engineStatusCached: async () => {
+        cachedCalls += 1
+        return payload
+      },
+    }))
+    const body = (await callRoute(harness, '/dsh-locator/status', fakeRequest({}))).json()
+    expect(body.ok).toBe(true)
+    expect(cachedCalls).toBe(1)
+    expect(body).toMatchObject({
+      rssBytes: 111,
+      hwmBytes: 222,
+      watchDirs: 10,
+      watchLimit: 120_000,
+      watchLimited: true,
+      watchInitializing: true,
+      snapshotBytes: 1_000,
+      saveBytes: 900,
+      saveMs: 12,
+      saveCount: 2,
+      queueDepth: 3,
+      generation: 5,
+      queryCount: 4,
+      recentQueryMs: [1, 2],
+    })
+  })
+
+  it('forwards the content diagnostics block read-only', async () => {
+    const diagnostics = {
+      coverage: { indexedFiles: 10, candidateFiles: 12, ratio: 0.833, bodyBytes: 100, budgetBytes: 200, fileBudget: 0, truncated: false, evictedDocs: 1, sessions: 1, messages: 2 },
+      dbBytes: 300, walBytes: 4, dbBudgetBytes: 400, dbOverBudget: false, ftsOptimizedAt: 0,
+      lastRefreshMs: 5, lastRefreshMode: 'fast', engineGeneration: 1, symbolsPerFile: 500, extractWorker: true,
+    }
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime(), fakeContent({ diagnostics }))
+    const body = (await callRoute(harness, '/dsh-locator/status', fakeRequest({}))).json()
+    expect((body.content as { diagnostics?: unknown }).diagnostics).toEqual(diagnostics)
+  })
+
+  it('omits diagnostics when the store does not provide them', async () => {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime(), fakeContent())
+    const body = (await callRoute(harness, '/dsh-locator/status', fakeRequest({}))).json()
+    expect((body.content as { diagnostics?: unknown }).diagnostics).toBeUndefined()
+  })
+})

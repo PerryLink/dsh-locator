@@ -92,7 +92,7 @@ Resumindo: a **ideia** do Everything (índice persistente + consultas estruturad
 dsh plugin --profile web add dsh-locator
 
 # fixar uma versão
-dsh plugin --profile web add dsh-locator@0.19.3
+dsh plugin --profile web add dsh-locator@0.20.0
 
 # branch principal do GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -240,7 +240,7 @@ Cada campo é um campo de configuração do Schemastery; sobrescreva a entrada `
 | `refreshIntervalMs` | `1800000` | Cadência de reconstrução quando não há watcher nativo (kqueue ou falha do watcher); `0` desativa. |
 | `scanWorkers` | `0` | Concorrência de leitura de diretórios; `0` usa o número de CPUs. |
 | `windowsUsn` | `false` | Tentar a enumeração USN/MFT do NTFS antes da varredura (Windows, administrador; com fallback automático). |
-| `memoryLimitMB` | `0` | Limite suave do heap Go do motor em MiB; `0` deixa com `GOMEMLIMIT`/`GOGC`. |
+| `memoryLimitMB` | `0` | Limite suave do heap Go em MiB; `0` = automático (25% da RAM, 384–1024 MiB); um valor positivo fixa. |
 | `contentIndex` | `true` | Construir o índice de corpos e mensagens de sessão; `false` deixa a busca por nome com custo de conteúdo quase zero. |
 | `contentLazy` | `true` | Construir o índice de conteúdo na primeira busca em vez de no arranque. |
 | `contentMaxFileBytes` | `1000000` | Bytes lidos de um arquivo de texto. |
@@ -404,7 +404,19 @@ DeepSeek Harness
 
 ## Memória
 
-O motor é um único processo Go e respeita as variáveis padrão `GOMEMLIMIT` e `GOGC` (ou `memoryLimitMB` na configuração). Um índice de 1,2–1,5 M de entradas chega a várias centenas de MB de RSS com o GC padrão; use `GOMEMLIMIT=600MiB` (limite suave, o runtime troca CPU por memória) ou `GOGC=50` quando o host estiver apertado de RAM. Nenhum altera o formato do snapshot. Na instalação ao vivo usada para os números acima, o processo anfitrião do DSH (incluindo o cache de páginas do banco de conteúdo) ficava por volta de 700 MB de RSS com o índice construído, e a latência do host ocioso permanecia em p50 2 ms.
+O motor é um único processo Go; respeita `GOMEMLIMIT`/`GOGC` e `memoryLimitMB`, onde `0` (padrão) calcula um limite automático (25% da RAM, 384–1024 MiB). Um motor 0.20 carrega um snapshot de 1,5 M de entradas em ~186 MB de heap e fica em ~335 MB de RSS com o watcher instalado (limite de 512 MiB); a versão anterior precisava de ~700 MB no mesmo ponto. Nenhum altera o formato do snapshot. Com o cache de páginas do banco de conteúdo, o processo anfitrião do DSH ficava por volta de 700 MB de RSS na instalação ao vivo, com latência ociosa de p50 2 ms.
+
+## Notas de atualização 0.20.0
+
+- **Escopo do índice**: caches de toolchains/pacotes (`~/go/pkg/mod`, `.cargo*`, `.rustup`, `.local/lib`, pnpm store, ...) são excluídos por padrão (~75% menos entradas); `includeCaches: true` restaura o comportamento 0.19. Snapshots 0.19 convergem na primeira atualização diff; `locator_rebuild` torna imediato.
+- **Memória e persistência**: `memoryLimitMB: 0` agora é automático (25% da RAM, 384–1024 MiB); carregamento de snapshot em streaming (~81 MB menos); autosave pelo último change (80–90% menos escritas); gravação sem lock de leitura; compactação fora do lock com limite de 5%; snapshot zstd opcional e snapshot incremental base+journal.
+- **Watcher e atualização**: o watcher Linux instala a partir do índice em memória (sem percorrer a árvore), é assíncrono e respeita `watchMaxDirs`; roots 9p/DrvFs usam diff upsert (sem escrita quando nada muda, backoff exponencial).
+- **Buscas**: consultas de nomes 27–88% menos CPU (IndexByte, glob de um curinga, bitmaps ext/pinyin, pré-filtro de regex, top-k); conteúdo 10–80× mais rápido em palavras comuns (bm25 adaptativo, SQL separado página/contagem, cache TTL+LRU, cancelamento, 2 workers).
+- **Índice de conteúdo**: caminho rápido por generation (<0,3 s sem mudanças), evicção de orçamento + coverage, transações de 250 escritas, optimize FTS, 500 símbolos/arquivo, extração em worker (8 MiB), sessões em streaming + cauda incremental + limite de 64 MiB, throttling adaptativo.
+- **Painel e HTTP**: `/combined` assíncrono com `compact`, cancelamento ao desconectar, painel em duas fases (nomes ~90 ms, conteúdo após 300 ms, <3 caracteres sem conteúdo, LRU 20), limite de 300 linhas e `loadMore` incremental.
+- **Configuração**: 17 chaves novas (veja a tabela na versão em inglês) e `contentExtractMaxBytes` agora 8 MiB; `memoryLimitMB=0` agora significa automático.
+- **Mudanças de comportamento**: caches não são mais pesquisáveis por nome por padrão; `status.builtAt` em milissegundos; `watching` pode ficar false enquanto o watcher instala em segundo plano. O schema FTS v4 foi adiado (~100 MB de ganho frente a migrar 4 GB).
+- `443 tests`; seis engines reconstruídos em 0.20.0.
 
 ## Notas de atualização 0.19.2
 

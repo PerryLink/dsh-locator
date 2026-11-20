@@ -90,6 +90,48 @@ export interface ContentState {
     /** Distinct stored evidence refs grouped by kind; absent before the database opens. */
     refs?: RefKindCount;
 }
+/** Body-budget coverage of the file index, for `ContentIndex.diagnostics`. */
+export interface ContentCoverage {
+    /** File documents currently stored. */
+    indexedFiles: number;
+    /** Indexable file entries seen by the last full sweep; null before one ran. */
+    candidateFiles: number | null;
+    /** indexedFiles / candidateFiles, 0..1; null while candidateFiles is unknown. */
+    ratio: number | null;
+    /** Stored body bytes. */
+    bodyBytes: number;
+    /** Configured body budget; 0 means unlimited. */
+    budgetBytes: number;
+    /** Configured document-count budget; 0 means unlimited. */
+    fileBudget: number;
+    /** The last build dropped documents because of a budget or cap. */
+    truncated: boolean;
+    /** Documents evicted to make room since this instance opened the database. */
+    evictedDocs: number;
+    sessions: number;
+    messages: number;
+}
+/**
+ * Cheap, read-only observability payload for `locator_status` and the HTTP
+ * status route. Kept out of {@link ContentState} so the tool output schemas
+ * that predate it (and validate `status()` strictly) keep passing.
+ */
+export interface ContentDiagnostics {
+    coverage: ContentCoverage;
+    dbBytes: number;
+    walBytes: number;
+    /** Configured content.db budget; 0 means unlimited. */
+    dbBudgetBytes: number;
+    dbOverBudget: boolean;
+    /** Epoch ms of the last successful FTS optimize, 0 when never run. */
+    ftsOptimizedAt: number;
+    lastRefreshMs: number;
+    lastRefreshMode: 'full' | 'incremental' | 'fast' | 'deferred' | '';
+    engineGeneration: number | null;
+    symbolsPerFile: number;
+    /** Document extraction runs in a worker thread (false: in-process fallback). */
+    extractWorker: boolean;
+}
 export interface ContentOptions {
     stateDir: string;
     sessionDirs?: string[] | undefined;
@@ -156,6 +198,32 @@ export interface ContentOptions {
      * Production never sets it.
      */
     searchWorkerFactory?: (workerPath: string) => Worker;
+    /** Number of parallel content-query workers (default 2; at most 4). */
+    searchWorkers?: number;
+    /**
+     * Evict the oldest documents when the body budget is full instead of
+     * freezing the index (default false for direct embedders; the plugin turns
+     * it on from `contentEvict`).
+     */
+    evict?: boolean;
+    /** Hard budget for content.db in bytes; 0 means unlimited. */
+    maxDbBytes?: number;
+    /** Symbols stored per code file (default 500). */
+    symbolsPerFile?: number;
+    /** Let the query layer skip bm25 rank ordering for wide result sets. */
+    rankAdaptive?: boolean;
+    /** Content search result cache entries; 0 disables caching. */
+    queryCacheSize?: number;
+    /** Content search result cache TTL in ms. */
+    queryCacheTtlMs?: number;
+    /** Largest session log read for indexing; larger logs index their head only. */
+    sessionMaxBytes?: number;
+    /** Throttle builds when the machine is loaded or on battery. */
+    adaptiveRefresh?: boolean;
+    /** Deadline for one extraction in the extractor worker. */
+    extractTimeoutMs?: number;
+    /** Override the periodic full file-index sweep interval (tests). */
+    fullSweepIntervalMs?: number;
 }
 /** One symbol search hit from the additive `symbols` table. */
 export interface SymbolMatch {
@@ -181,7 +249,8 @@ export declare class ContentIndex {
     private generation;
     private totalBytes;
     private sliceDeadline;
-    private worker;
+    /** Search workers; each owns its own read-only database connection. */
+    private readonly workerPool;
     private lockHeld;
     private readonly lockToken;
     private workerSeq;
@@ -198,9 +267,51 @@ export declare class ContentIndex {
     private needsSessionBackfill;
     /** A database predating the additive `symbols` table needs a one-time fill. */
     private needsSymbolBackfill;
-    private readonly pending;
+    /** Queued write operations since the last batch commit. */
+    private inBatch;
+    private batchOps;
+    /** A full build created the symbols table without its indexes; create them at the end. */
+    private symbolIndexesPending;
+    /** Persisted counters kept in content_meta so caps checks stay O(1). */
+    private fileDocs;
+    private oversizedDocs;
+    private countersLoaded;
+    /** Indexable file entries seen by the last full sweep (coverage denominator). */
+    private candidateFiles;
+    /** Documents evicted from the body budget since this instance opened. */
+    private evictedDocs;
+    private dbBytes;
+    private walBytes;
+    private ftsOptimizedAt;
+    private lastRefreshMs;
+    private lastRefreshMode;
+    /** File-index generation observed while walking the last dump. */
+    private engineGeneration;
+    /** Wall clock at the start of the current build. */
+    private buildStartedAt;
+    /** Cached adaptive-throttle verdict (sysfs reads are not free). */
+    private machineSample;
+    /** Single reusable extractor worker plus its pending requests. */
+    private extractWorker;
+    private extractSeq;
+    private readonly extractPending;
+    /** Decoded document bodies keyed by file sha256, bounded by characters. */
+    private readonly extractCache;
+    private extractCacheChars;
+    /** Lazily created query-result cache (see content-cache.ts). */
+    private searchCache;
     constructor(rt: LocatorRuntime, options: ContentOptions);
     status(): ContentState;
+    /**
+     * Cheap observability payload for status routes and tools: budget coverage,
+     * database size and generation state. Synchronous and O(1) apart from two
+     * stats, and safe to call while a build is running.
+     */
+    diagnostics(): ContentDiagnostics;
+    /** Current on-disk content.db size (an open handle keeps counting its file). */
+    private dbSizeBytes;
+    /** Refresh the cached database and WAL byte counts. */
+    private measureDatabase;
     /**
      * Report a lazy build as in progress before the asynchronous start reaches
      * `boot()`, so the panel/agent sees "building" on the very first query
@@ -237,6 +348,20 @@ export declare class ContentIndex {
     private incremental;
     private open;
     /**
+     * Load the O(1) caps counters persisted in content_meta. A database written
+     * before they existed (or whose configured maxFileBytes changed) is recounted
+     * once with a bounded scan; steady-state refreshes never scan the FTS table.
+     */
+    private loadPersistedCounters;
+    /** Persist the counters that make the caps check O(1) on the next boot. */
+    private savePersistedCounters;
+    /**
+     * Delete quarantined database archives that are old (or exceed the retention
+     * count) so a crash-corruption loop cannot fill the disk. Only files this
+     * plugin created with its own quarantine naming are removed.
+     */
+    private cleanupCorruptArchives;
+    /**
      * Decide what an existing `content.db` is before touching it:
      * - `foreign`: no dsh-locator table at all — refuse to modify it.
      * - `corrupt`: zero bytes, unreadable, or not a SQLite database.
@@ -253,19 +378,31 @@ export declare class ContentIndex {
     private quarantineDatabase;
     /** Record one non-fatal build warning (deduplicated, bounded). */
     private addWarning;
-    private reopenWorker;
+    /** Terminate every search worker and fail the requests waiting on them. */
     private stopWorker;
+    /** Effective search worker count: default 2, clamped to 1..4. */
+    private searchWorkerCount;
     /**
-     * Whether a usable search worker exists, creating one when needed.
-     * @returns false when the worker cannot be created at all; that is the only
-     *          case in which an in-process (sync) query is allowed.
+     * Pick the least busy worker, creating workers up to the configured pool size.
+     * @returns null when workers are disabled or cannot be spawned at all; that is
+     *          the only case in which an in-process query is allowed.
      */
-    private ensureWorker;
+    private acquireWorker;
+    /**
+     * Create one worker connection. Real workers get a shared cancellation
+     * buffer: a message alone cannot interrupt a synchronous SQLite call, but the
+     * worker polls the buffer between scan steps (impl-content-query protocol).
+     */
+    private createWorkerSlot;
+    /** Remove one dead/timed-out worker and fail everything waiting on it. */
+    private dropWorkerSlot;
     /**
      * Resolve one worker reply. A malformed reply is reported as a protocol
      * error; the query is never retried on the host thread.
      */
-    private onWorkerMessage;
+    private onWorkerReply;
+    /** Ask one worker to abandon a request cooperatively. */
+    private cancelWorkerRequest;
     private identityOf;
     /**
      * Whether the open handle still points at the file on disk. Another DSH
@@ -281,7 +418,11 @@ export declare class ContentIndex {
     private engineRescanning;
     /** Remove all session documents, keeping file documents and their bytes. */
     private clearSessions;
-    /** Whether the stored rows already respect the configured file/body caps. */
+    /**
+     * Whether the stored rows already respect the configured file/body caps.
+     * Steady-state checks read the persisted counters (O(1)); only a database
+     * written before the counters existed pays one scan.
+     */
     private capsSatisfied;
     private readFlag;
     private writeFlag;
@@ -294,6 +435,12 @@ export declare class ContentIndex {
     private writeTotalBytes;
     /** Yield to the host event loop once the current ~8 ms work slice is spent. */
     private breathe;
+    /**
+     * Whether the machine looks loaded enough that a background content build
+     * should slow down: load per CPU, I/O or CPU pressure, or running on battery.
+     * Sampled at most once every five seconds; any read failure means "not busy".
+     */
+    private machineBusy;
     /** True when a session log has been quiet long enough to be read safely. */
     private settled;
     /** Start one build phase; `total` becomes the progress denominator when known. */
@@ -306,6 +453,22 @@ export declare class ContentIndex {
     private countIndexed;
     /** Total engine entries, used as the files-phase progress denominator. */
     private engineEntries;
+    /** FTS optimize: above this body size the merge runs in bounded chunks. */
+    private static readonly FTS_CHUNKED_OPTIMIZE_BYTES;
+    /** Bounded merge rounds for a large corpus (each round yields to the host). */
+    private static readonly FTS_MERGE_ROUNDS;
+    /**
+     * Merge the FTS5 segments after a full rebuild ("FTS optimize"): rank and
+     * scan paths are materially faster once the segment count is low. A single
+     * optimize on a multi-GB corpus can block the host for tens of seconds, so
+     * large databases get bounded merge rounds with an event-loop yield between
+     * them; small databases take the one-shot optimize.
+     */
+    private optimizeFts;
+    /** Stop the extractor worker and fail its pending requests. */
+    private stopExtractWorker;
+    /** Drop cached query results after the database changed. */
+    private invalidateSearchCache;
     private finish;
     /**
      * Rebuild the session id → session log path map from the persisted sources.
@@ -314,17 +477,77 @@ export declare class ContentIndex {
      */
     private refreshSessionPaths;
     private addDoc;
+    /**
+     * Evict the oldest documents until a new body fits the budget, leaving a
+     * small headroom so the next document does not immediately evict again.
+     * Returns false when eviction is disabled or even an empty table cannot fit
+     * the incoming body; the caller then reports truncation.
+     */
+    private evictForBudget;
+    /** Delete one stored document row and adjust every derived counter. */
+    private removeDocRow;
     /** Body bytes stored for one document key (0 when it is not indexed). */
     private storedBytes;
     private deleteDoc;
     private deletePath;
+    /**
+     * Dump one page of the engine index, forwarding the generation/modification
+     * filters an engine that supports them understands. Runtime versions without
+     * the optional third parameter are called with two arguments only.
+     */
+    private dumpPage;
+    /** Remember the lowest engine generation observed across dump pages. */
+    private observeGeneration;
+    /** Whether a dump page proves the engine supports generation/modification filters. */
+    private generationSupported;
+    /** Stored mtime for one file document key, undefined when not indexed. */
+    private storedMtime;
+    /** Index every file document from scratch (a full content rebuild). */
     private indexFiles;
+    /**
+     * Refresh the file index. A stored engine generation lets an unchanged
+     * refresh end without dumping the whole index (P0-7); otherwise a periodic
+     * full sweep catches deletions and renames, which a generation diff cannot.
+     */
     private refreshFiles;
+    /**
+     * Index only the entries the engine reports as modified (P0-7). Deletions and
+     * renames are intentionally not handled here: the periodic full sweep owns
+     * them.
+     */
+    private incrementalFileRefresh;
+    /**
+     * Compare the whole engine index against docs_meta: re-read changed files and
+     * remove documents whose files disappeared. Records the generation and sweep
+     * timestamps the fast path later relies on.
+     */
+    private fullFileSweep;
     /** Would storing a file of this size overflow the configured body budget? */
     private wouldExceed;
     private readFileDoc;
     /** Extract one document body; its format is recorded additively in docs_meta. */
     private readDocumentDoc;
+    /**
+     * Extract one document body, in the extractor worker when it exists and
+     * in-process otherwise (direct embedders and test runs).
+     */
+    private extractDocumentBody;
+    /** In-process extraction, used when no compiled worker is available. */
+    private extractInProcess;
+    /**
+     * Lazily create the extractor worker. It is capped at 512 MB old-gen heap,
+     * matching the resource envelope the extraction path is designed for.
+     * @returns the worker, or null when it cannot be created.
+     */
+    private ensureExtractWorker;
+    /** Resolve one extractor reply; malformed replies count as failed extraction. */
+    private onExtractMessage;
+    /** Run one extraction on the worker with a hard deadline. */
+    private extractInWorker;
+    /** Return the cached extraction for one hash and refresh its LRU position. */
+    private touchExtractCache;
+    /** Store one extraction answer under its content hash, bounded LRU. */
+    private storeExtractCache;
     /**
      * Whether one dump entry belongs in this build. Document extraction has its
      * own byte cap: a normal PDF or deck is larger than the text-file limit.
@@ -332,10 +555,38 @@ export declare class ContentIndex {
     private entryIsIndexable;
     private indexSessions;
     private refreshSessions;
-    /** Read and decompress one session log completely; no side effects on rows. */
-    private readSessionText;
-    /** Index one already-decoded session log; the caller owns row replacement. */
-    private indexSessionText;
+    /** Load every indexed session log's source row (path, mtime, tail state). */
+    private readSessionSources;
+    /**
+     * Refresh one session log: append only the new Zstandard frames when the log
+     * grew and the tail starts with a frame magic (P1 streaming/tail refresh),
+     * otherwise re-read the whole log (or its head when it exceeds the cap).
+     * @returns true when rows were written and the caller should count progress.
+     */
+    private refreshSessionFile;
+    /**
+     * Decode and index only the appended tail of one session log. Returns null
+     * when the tail does not start with a Zstandard frame (rewritten file) or the
+     * first decoded line is not a fresh JSONL document (partial line), in which
+     * case the caller re-reads the whole log.
+     */
+    private readSessionDelta;
+    /** Persist one session log's source row, including its incremental tail state. */
+    private writeSessionSource;
+    /**
+     * Index decoded session lines in order. In append mode existing rows stay and
+     * only new messages/refs are written.
+     * @returns success plus the tail state the caller persists in sources.
+     */
+    private indexSessionLines;
+    /**
+     * Open one region of a session log and decode its complete Zstandard frames
+     * lazily, one frame at a time, so a 45 MB plaintext log never has to exist as
+     * a single string (P1 streaming decode).
+     * @returns the line generator plus the compressed offset after the last
+     *          complete frame, or null when the region is unreadable/corrupt.
+     */
+    private openSessionDecode;
     /**
      * Session logs to consider, newest first. Archived logs are indexed too:
      * they are excluded from queries (see {@link searchDetailed}) unless the
@@ -353,6 +604,33 @@ export declare class ContentIndex {
     private ensureDocsMetaFormatColumn;
     /** Create the additive symbols table; true when it was missing. */
     private ensureSymbolsTables;
+    /**
+     * Create the symbols indexes after a full insert pass (or when an existing
+     * database is missing them, e.g. a build interrupted before this step).
+     */
+    private ensureSymbolIndexes;
+    /**
+     * Add the additive session-log columns used by streaming/tail refreshes
+     * (sources.byte_len, last_line, title, capped) without bumping the schema
+     * version. Rows from an older database keep NULL and are re-read in full.
+     */
+    private ensureSessionColumns;
+    /** Open a build transaction; nested calls are ignored. */
+    private beginBatch;
+    /** Count one queued write; commit and start a new transaction at the limit. */
+    private batchTick;
+    /** Commit the open batch (no-op when none is open). */
+    private commitBatch;
+    /** Roll back an aborted build so no partial transaction survives it. */
+    private rollbackBatch;
+    /** Effective symbols stored per file; 0/absent means the 500 default. */
+    private symbolsPerFile;
+    /** Full-sweep interval for the generation fast path. */
+    private fullSweepIntervalMs;
+    /** Effective session-log read cap; 0 means unlimited. */
+    private sessionMaxBytes;
+    /** Effective extraction worker deadline. */
+    private extractTimeoutMs;
     /** Document extraction is on unless an embedder explicitly opted out. */
     private extractDocumentsEnabled;
     /** Effective document byte cap; 0/absent means the 20 MiB default. */
@@ -363,6 +641,8 @@ export declare class ContentIndex {
     private symbolMaxBytes;
     /** Symbols for one code file, or undefined when it is not symbol-indexed. */
     private collectFileSymbols;
+    /** Whether the compiled extractor worker exists next to this module. */
+    private extractWorkerAvailable;
     /** Extract and store symbols for one file while its text is in hand. */
     private writeFileSymbols;
     /** Replace every stored symbol of one file (additive table; failures ignored). */
@@ -379,9 +659,10 @@ export declare class ContentIndex {
      */
     private syncSymbols;
     /**
-     * One-time fill of the symbol table for a database built before symbols
-     * existed (or before the user enabled them). Only paths already stored in
-     * docs_meta are read, so it never walks the disk again.
+     * One-time fill of the symbol table from the bodies already stored in the
+     * database: a database that predates the additive table (or one whose symbol
+     * rules changed) never has to walk the disk again. Bodies are paged so a
+     * 1 GB corpus is never loaded at once.
      */
     private backfillSymbols;
     /**
@@ -426,6 +707,17 @@ export declare class ContentIndex {
      * @returns included files with their symbols, most structural first.
      */
     repoMap(roots: readonly string[], tokenBudget: number): RepoMapFile[];
+    /**
+     * Every stored spelling one requested root may have: exactly as given and its
+     * canonical real path (a symlinked temp dir or Windows short name differs).
+     */
+    private rootSpellings;
+    /**
+     * Symbol count per file path, restricted to the requested roots, ranked in
+     * SQL and cut to the repo-map candidate limit. Runs as one index-only
+     * aggregate per root spelling instead of loading every symbol row.
+     */
+    private symbolPathCounts;
     /**
      * Stored document formats for the given file paths (only extracted
      * documents have one). Unlike hit enrichment this is safe to call before a
@@ -534,10 +826,20 @@ export declare class ContentIndex {
      * @returns matching documents ordered by relevance.
      */
     search(query: string, limit: number): Promise<ContentHit[]>;
-    search(query: string, limit: number, options: ContentSearchOptions): Promise<ContentSearchResult>;
+    search(query: string, limit: number, options: ContentSearchOptions, searchOptions?: {
+        signal?: AbortSignal;
+    }): Promise<ContentSearchResult>;
     private searchDetailed;
-    /** Run one query on the worker; timeout/protocol errors are final results. */
-    private searchInWorker;
+    /** Run one query in the worker pool, or in-process when workers are absent. */
+    private runSearch;
+    /**
+     * Run one query on a pooled worker. A timeout terminates that worker; an
+     * abort rejects with a DOMException AbortError after asking the worker to
+     * stop cooperatively.
+     */
+    private searchOnWorker;
+    /** Lazily create the query cache (content-cache.ts). */
+    private ensureSearchCache;
     /** Map a request's sessionId onto the indexed session log path. */
     private resolveSession;
     /**
@@ -547,6 +849,22 @@ export declare class ContentIndex {
      */
     private searchSync;
 }
+/**
+ * Decide whether background content work should throttle. Pure so the policy
+ * can be tested without touching /proc or /sys.
+ * @param input - sampled loadavg, CPU count, PSI files and battery status.
+ * @returns the verdict plus the reason codes that triggered it.
+ */
+export declare function adaptivePressure(input: {
+    loadavg?: string | undefined;
+    cpuCount: number;
+    ioPressure?: string | undefined;
+    cpuPressure?: string | undefined;
+    batteryStatus?: string | undefined;
+}): {
+    busy: boolean;
+    reasons: string[];
+};
 /** One evidence ref occurrence extracted from a session log event. */
 export interface EvidenceRefRow {
     refKey: string;

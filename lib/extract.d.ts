@@ -16,16 +16,22 @@ export type DocumentFormat = 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'epub';
  * @returns the format, or null for anything that is not a supported document.
  */
 export declare function documentFormat(pathOrName: string): DocumentFormat | null;
-/** Options for {@link extractDocument}. */
+/** Options for {@link extractDocument} and {@link extractDocumentFromBuffer}. */
 export interface ExtractOptions {
     /** Files larger than this many bytes are refused without being parsed; 0 means unlimited. */
     maxBytes: number;
     /** Hard cap on returned characters (default 8 MiB). */
     maxChars?: number;
     /**
+     * Cooperative deadline in milliseconds for the asynchronous parsers (PDF
+     * pages). Synchronous ZIP/XML work cannot be interrupted mid-call; the
+     * extractor worker owns the hard timeout. 0/absent means no deadline.
+     */
+    maxMs?: number;
+    /**
      * Non-fatal problem sink. Codes are stable and bounded:
      * `document-too-large`, `document-text-empty`,
-     * `document-extract-failed:<format>`.
+     * `document-extract-timeout`, `document-extract-failed:<format>`.
      */
     onWarning?: (warning: string) => void;
 }
@@ -44,6 +50,8 @@ export declare const DOCUMENT_TOO_LARGE = "document-too-large";
 export declare const DOCUMENT_TEXT_EMPTY = "document-text-empty";
 /** Warning code: parsing threw; the format is spelled out (e.g. `pdf`). */
 export declare function documentExtractFailed(format: DocumentFormat): string;
+/** Warning code: the extraction deadline passed before the document was read. */
+export declare const DOCUMENT_EXTRACT_TIMEOUT = "document-extract-timeout";
 /**
  * Extract the plain-text body of one PDF/Office/EPUB document.
  *
@@ -54,4 +62,13 @@ export declare function documentExtractFailed(format: DocumentFormat): string;
  * @returns the extracted body, or null when nothing could be read.
  */
 export declare function extractDocument(path: string, options: ExtractOptions): Promise<ExtractedDocument | null>;
+/**
+ * Extract one document whose bytes the caller already read (used by the
+ * extractor worker and the hash cache, which avoid a second file read).
+ * @param path - absolute document path; the extension selects the format.
+ * @param data - complete file bytes.
+ * @param options - size cap, character cap, deadline and warning sink.
+ * @returns the extracted body, or null when nothing could be read.
+ */
+export declare function extractDocumentFromBuffer(path: string, data: Buffer, options: ExtractOptions): Promise<ExtractedDocument | null>;
 //# sourceMappingURL=extract.d.ts.map

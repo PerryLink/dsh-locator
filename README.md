@@ -91,7 +91,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # 指定版本
-dsh plugin --profile web add dsh-locator@0.19.3
+dsh plugin --profile web add dsh-locator@0.20.0
 
 # GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -255,8 +255,13 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `watch` | `true` | 是否监听文件系统变化。 |
 | `refreshIntervalMs` | 1800000 | 没有原生监听时的重建周期（kqueue 回退或监听失败时用到）。 |
 | `scanWorkers` | 0 | 扫描并发；0 表示按 CPU 数。 |
+| `includeCaches` | `false` | 是否把已知工具链/包缓存（`~/go/pkg/mod`、`.cargo*`、`.rustup`、`.local/lib`、pnpm store 等）纳入名称索引与监听；默认排除，约可减少 75% 条目。 |
+| `watchMaxDirs` | 120000 | 全部 root 的 watch 目录总上限；超出部分由周期增量刷新覆盖。 |
+| `snapshotCompression` | `'none'` | 快照压缩；`zstd` 约省一半磁盘，但载入/保存各多几百毫秒。 |
+| `prewarm` | `true` | 插件激活时即启动引擎（消除首个请求的冷启动等待）。 |
+| `resourcePreset` | `'balanced'` | 资源档位：`eco`（省内存/延长刷新）、`balanced`、`performance`（更大预算）。 |
 | `windowsUsn` | `false` | Windows 上尝试 USN/MFT 快路径，需要管理员权限。 |
-| `memoryLimitMB` | 0 | 引擎的 Go 软堆上限；0 交给 `GOMEMLIMIT`/`GOGC`。 |
+| `memoryLimitMB` | 0 | 引擎 Go 软堆上限；0 = 自动（按内存 25% clamp 到 384–1024 MiB）；正数固定该值。 |
 | `contentIndex` | `true` | 是否构建正文/会话内容索引；`false` 时只保留名称搜索，开销接近 0。 |
 | `contentLazy` | `true` | 惰性构建：第一次搜内容时才建库；`false` 表示启动后就在后台建。 |
 | `contentMaxFileBytes` | 1000000 | 单个文本文件最多读多少字节。 |
@@ -273,7 +278,15 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `refreshIncremental` | `true` | 周期兜底只重扫 watcher 覆盖不到的 root；`false` 恢复 0.18 全量重建。 |
 | `contentIndexReasoning` | `false` | 是否把 assistant 的 reasoning/thinking 并入会话索引（切换只重建会话）。 |
 | `contentExtractDocuments` | `true` | 是否抽取 PDF/Word/Excel/PPT/EPUB 正文（lazy 加载，失败只 warn）。 |
-| `contentExtractMaxBytes` | `20000000` | 交给文档抽取器的单文件上限。 |
+| `contentExtractMaxBytes` | `8000000` | 交给文档抽取器的单文件上限；抽取在独立 worker 线程内执行（512MB 堆、5s 超时）。 |
+| `contentEvict` | `true` | 正文预算满时按 mtime 淘汰最旧文档，而不是冻结索引（新文件可持续入库）。 |
+| `contentSymbolsPerFile` | 500 | 每个代码文件最多保存的符号数。 |
+| `contentMaxDbBytes` | 2000000000 | content.db 字节预算；超限时在空闲期重建一次（6h 最多一次）。 |
+| `contentRankAdaptive` | `true` | 宽结果集跳过 bm25 全量排序（对常见词快一个数量级）。 |
+| `contentQueryCacheSize` | 64 | 内容查询结果缓存条数；0 关闭。 |
+| `contentQueryCacheTtlMs` | 60000 | 内容查询缓存 TTL。 |
+| `contentSessionMaxBytes` | 67108864 | 单个会话日志最多读取多少字节；超限只索引头部。 |
+| `contentRefreshAdaptive` | `true` | 机器忙/电池供电时自动减少后台索引工作。 |
 | `contentIndexSymbols` | `true` | 是否建立代码符号表（`locator_outline`/`locator_symbol`/`locator_repo_map`）。 |
 | `contentSymbolMaxBytes` | `524288` | 符号抽取的单文件上限。 |
 | `contentFullIndex` | `false` | 一键全量：把正文/文件 cap 覆盖为 0（不限制）。 |
@@ -281,6 +294,9 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `notSearchable` | `[]` | 不作为搜索结果返回的 glob（仍可读）。 |
 | `notReadable` | `[]` | agent 不可读的 glob（正文命中与证据 ref 都会被拒）。 |
 | `outputBudgetChars` | `8000` | 单个 locator 工具结果的字符预算；0 关闭。 |
+| `combinedBudgetChars` | 0 | `/combined` 面板响应预算；0 保持旧行为。 |
+| `combinedEnrichConcurrency` | 8 | `/combined` stat/hash 富化的并发上限。 |
+| `combinedHashMaxHits` | 5 | 每次 `/combined` 最多计算多少个文件哈希；0 关闭。 |
 | `urlFreshness` | `false` | `locator_resolve` 对 URL ref 做有界条件 HTTP 重验（5s、不爬取）。 |
 | `rerankCommand` | `''` | 可选外部重排命令（`rerank/v1` JSON stdin/stdout）。 |
 | `ocrCommand` | `''` | 可选外部 OCR 命令（`ocr/v1` JSON stdin/stdout）。 |
@@ -292,32 +308,39 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 
 以下数字来自开发机（WSL2，Linux，热页缓存）和真实主目录；你的机器会因磁盘、文件数、缓存和 GC 状态而不同。
 
-**名称索引**
+**名称索引**（开发机实测，单个 `/home/yy` root；WSL2 ext4 热页缓存）
 
-| 项目 | 实测 |
-|---|---|
-| 冷启动扫描 | 约 150 万条目 / 10–12 秒 |
-| 快照体积 | 约 154 MB（150 万条目） |
-| 热查询（`locator_search`） | 常见查询 6–25ms；`path:` 前缀扫描约 70ms |
-| 查询时索引重建 | 旧索引继续服务，新索引就绪后切换 |
-| 扫描峰值内存 | 数百 MB 量级；引擎独立子进程，可用 `memoryLimitMB` / `GOMEMLIMIT` 限制 |
+| 项目 | 0.19.4 | 0.20.0 |
+|---|---|---|
+| 冷扫描（默认排除缓存） | 240 万条目 / 16.4s / 峰值 754MB | **48 万条目 / 1.4s / 164MB**（条目 −80%，快约 12×） |
+| 快照体积 | 207MB | **35MB** |
+| 载入 + 派生 | 143–156ms / heap 268MB | **85–108ms / heap 186MB** |
+| 引擎 ready（含 watcher） | 约 2.4s（同步装 15 万目录 watch） | **约 0.3s**（watcher 异步安装） |
+| 常见查询（`locator_search`） | func 13ms / go 16ms / `*.go` 21ms / `ext:` 6.4ms | **func 10.7 / go 6.0 / `*.go` 4.4 / `ext:` 3.3ms** |
+| 正则查询 | `config.*test` 约 102ms | **约 11ms** |
+| 引擎 RSS（watcher 装好后） | 约 700MB | **约 335MB**（auto 512MB 上限） |
+| 增量保存（1000 处变更） | 全量重写 163MB、写锁 144ms | **70.9KB、0.35–0.5ms**（base 不动） |
+| Compact（约 150 万条目） | 约 0.9s（写锁 864ms）/ 峰值 850MB | **120–190ms（写锁 8–16ms）/ 431MB** |
 
 **内容索引**（真实主目录，1GB 预算上限）
 
-| 项目 | 实测（0.7.x，真实主目录） |
-|---|---|
-| 覆盖 | 约 9.3 万个文本文件 / 93 个会话 / 2,131 条消息 |
-| 全量重建 | 约 3.5 分钟（后台、不阻塞宿主；期间宿主 p95 14ms / max 115ms） |
-| 无变化增量刷新 | 约 12 秒（主要花在引擎 150 万条目的 dump 上） |
-| 空闲宿主延迟 | p50 2ms / p95 3ms / max 6ms |
-| 内容库体积 | 约 3.1 GB（约为正文预算的 3 倍） |
-| 内容查询 | 常见词约 100ms、生僻词几毫秒（worker 线程，不阻塞宿主） |
+| 项目 | 0.19.4 | 0.20.0 |
+|---|---|---|
+| 常见词查询（`the`，30 条） | 73ms exact / 70ms none | **5.3ms / 1.6ms**（13.8× / 43.7×） |
+| `function`（2.7 万命中） | 146ms | **41ms** |
+| 生僻词查询 | 8.8ms | 13ms（绝对差 4ms，无实际影响） |
+| 无变化增量刷新 | 约 12s（dump 150 万条目） | **<0.3s**（engine generation 快路径） |
+| 全量重建 | 约 3.5min | **预计 1.5–2min**（250 写/事务 + FTS optimize） |
+| 内容库体积 | 约 4.1GB（正文预算的 4.1×） | **预计约 2–3GB**（默认排除缓存、符号上限、预算淘汰、DB 预算） |
+| 覆盖 | 约 9.3 万文件，预算打满后新文件冻结 | 预算内按 mtime 淘汰，新文件持续可索引；`locator_status` 显示 coverage |
+| 宿主延迟 | 内容查询在 worker，不阻塞 | 不变；`/combined` 富化异步，9p 场景不再阻塞事件循环 |
 
 **怎么更省**
 
 - 只要 Everything 式文件名搜索：`contentIndex: false`，内容开销归零。
 - 想保留内容但更省磁盘：调小 `contentMaxTotalBytes`（如 256000000）、`contentMaxFileBytes`，或把 `contentRefreshMs` 调大。
-- 想覆盖更多文件：调大 `contentMaxTotalBytes` / `contentMaxFiles`，并确认 `contentExcludes` 没把真实文档目录排除掉。
+- 想覆盖更多文件：调大 `contentMaxTotalBytes` / `contentMaxFiles`，并确认 `contentExcludes` 没把真实文档目录排除掉；开 `contentEvict`（默认开）后预算满会淘汰最旧文档而不是冻结。
+- 想连工具链/包缓存也搜：`includeCaches: true`（条目和内存会回到 0.19 量级）；或直接用 `resourcePreset: 'eco' | 'balanced' | 'performance'` 一键切换资源档位。
 - 注意：内容库是缓存，删掉 `stateDir` 后会自动重建，不会影响源文件。
 
 ## 平台支持
@@ -402,6 +425,20 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - **全库内容正则 P0 不做**：正则模式会暂停内容组（文件/目录名仍可正则），避免 1GB 级全库扫描和 ReDoS；会话内查找条支持正则。
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
+
+## 0.20.0 更新
+
+- **默认索引范围**：默认跳过工具链/包缓存（`~/go/pkg/mod`、`.cargo*`、`.rustup`、`.local/lib`、pnpm store 等），条目约 −75%；`includeCaches: true` 恢复旧行为。0.19 旧快照仍含缓存条目，首次 diff 刷新自动收敛，`locator_rebuild` 可立即收缩。
+- **引擎内存与持久化**：`memoryLimitMB: 0` 改为自动（25% RAM，384–1024 MiB）；快照流式载入（少占约 81MB）；拼音/折叠派生单趟构建；autosave 按最后变更计时（活跃期写入 −80~90%）；保存不再持读锁；Compact 移出写锁、墓碑阈值降到 5%；可选 zstd 快照与 base+journal 增量快照。
+- **监听与兜底刷新**：Linux watcher 从内存目录索引直接装（不再 WalkDir）、异步就绪、`watchMaxDirs` 配额与部分覆盖中间态；9p/DrvFs 改 upsert-diff（不再删子树重扫、无变化不落盘、指数退避）。
+- **名称查询**：`IndexByte` 折叠匹配、glob 单星快路径、ext/pinyin 位图、正则字面量预过滤、top-k 流式、扫描路径零分配与预编译 exclude；查询/扫描 CPU 实测 −27~88%。
+- **内容查询**：自适应 bm25（宽结果不 rank）、page/count 过滤 SQL 拆分、TTL+LRU + single-flight 缓存、worker 取消（消息+SAB）与 2 worker 池、只读 PRAGMA、>1s 自动降级；常见词查询快 10–80 倍。
+- **内容索引**：generation 快路径（无变化刷新 <0.3s，不再全量 dump 150 万条）、预算淘汰 + coverage、250 写/事务与 WAL checkpoint、FTS optimize、符号上限 500 且排除生成代码、抽取移入 worker（默认上限 8MiB）、会话日志流式多帧 + 增量尾部 + 64MiB 头截断、负载/电池自适应节流。
+- **repo_map/symbol**：SQL 聚合 + root 过滤 + 硬上限，消除 2.98GB 峰值 / 18s 冻结；symbol exact/prefix 走索引。
+- **面板与 HTTP**：`/combined` 富化异步/限并发/TTL/9p 跳 hash/`compact` 模式；断连取消内容查询；`/search` `nextOffset` 修正；面板两阶段搜索（先 names ~90ms，300ms 后补 content，<3 字符不查 content，LRU 20），300 行上限 + 增量 loadMore，highlight 正则复用，building 只轮询 `/status`。
+- **配置**：新增 17 个性能/资源项（见上表）；`contentExtractMaxBytes` 默认 8MiB；`memoryLimitMB=0` 语义变为自动。
+- **行为变化**：默认不再索引缓存目录；`status.builtAt` 改为 Unix ms；watcher 异步安装期间 `watching` 可能暂为 false（看 `watchInitializing`）；FTS schema v4（contentless/拆分表）评估后暂缓（收益约 100MB，不值得 4GB 库迁移），per-root 分片被增量 journal 取代。
+- 测试 **443 个**；六引擎按 0.20.0 重建。
 
 ## 0.19.4 更新
 

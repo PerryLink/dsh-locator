@@ -60,7 +60,7 @@ func (t *pathTable) get(key string, ix *Index) int32 {
 		}
 		if v > 0 {
 			id := v - 1
-			if pathsEqual(ix.pathLocked(int32(id)), key) {
+			if ix.pathMatchesLocked(int32(id), key) {
 				return int32(id)
 			}
 		}
@@ -87,7 +87,7 @@ func (t *pathTable) set(key string, id int32, ix *Index) bool {
 			return true
 		}
 		if v > 0 {
-			if pathsEqual(ix.pathLocked(int32(v-1)), key) {
+			if ix.pathMatchesLocked(int32(v-1), key) {
 				t.slots[i] = id + 1
 				return false
 			}
@@ -107,7 +107,7 @@ func (t *pathTable) remove(key string, ix *Index) int32 {
 		if v == 0 {
 			return -1
 		}
-		if v > 0 && pathsEqual(ix.pathLocked(int32(v-1)), key) {
+		if v > 0 && ix.pathMatchesLocked(int32(v-1), key) {
 			t.slots[i] = -1
 			t.count--
 			t.tombs++

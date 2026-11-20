@@ -32,16 +32,22 @@ export function documentFormat(pathOrName: string): DocumentFormat | null {
   return DOCUMENT_FORMATS.get(extname(pathOrName).toLowerCase()) ?? null
 }
 
-/** Options for {@link extractDocument}. */
+/** Options for {@link extractDocument} and {@link extractDocumentFromBuffer}. */
 export interface ExtractOptions {
   /** Files larger than this many bytes are refused without being parsed; 0 means unlimited. */
   maxBytes: number
   /** Hard cap on returned characters (default 8 MiB). */
   maxChars?: number
   /**
+   * Cooperative deadline in milliseconds for the asynchronous parsers (PDF
+   * pages). Synchronous ZIP/XML work cannot be interrupted mid-call; the
+   * extractor worker owns the hard timeout. 0/absent means no deadline.
+   */
+  maxMs?: number
+  /**
    * Non-fatal problem sink. Codes are stable and bounded:
    * `document-too-large`, `document-text-empty`,
-   * `document-extract-failed:<format>`.
+   * `document-extract-timeout`, `document-extract-failed:<format>`.
    */
   onWarning?: (warning: string) => void
 }
@@ -64,6 +70,10 @@ export const DOCUMENT_TEXT_EMPTY = 'document-text-empty'
 export function documentExtractFailed(format: DocumentFormat): string {
   return `document-extract-failed:${format}`
 }
+/** Warning code: the extraction deadline passed before the document was read. */
+export const DOCUMENT_EXTRACT_TIMEOUT = 'document-extract-timeout'
+/** Internal sentinel thrown when a cooperative deadline passes. */
+const TIMEOUT_SENTINEL = 'dsh-locator:document-extract-timeout'
 
 const DEFAULT_MAX_CHARS = 8_000_000
 /** One decompressed zip member may not exceed this (zip-bomb guard). */
@@ -128,13 +138,30 @@ export async function extractDocument(path: string, options: ExtractOptions): Pr
   }
   let data: Buffer
   try { data = await readFile(path) } catch { return null }
+  return await extractDocumentFromBuffer(path, data, options)
+}
+
+/**
+ * Extract one document whose bytes the caller already read (used by the
+ * extractor worker and the hash cache, which avoid a second file read).
+ * @param path - absolute document path; the extension selects the format.
+ * @param data - complete file bytes.
+ * @param options - size cap, character cap, deadline and warning sink.
+ * @returns the extracted body, or null when nothing could be read.
+ */
+export async function extractDocumentFromBuffer(path: string, data: Buffer, options: ExtractOptions): Promise<ExtractedDocument | null> {
+  const format = documentFormat(path)
+  if (format === null) return null
+  const maxBytes = options.maxBytes > 0 ? options.maxBytes : Number.POSITIVE_INFINITY
   if (data.length > maxBytes) {
     warn(options, DOCUMENT_TOO_LARGE)
     return null
   }
   const maxChars = options.maxChars !== undefined && options.maxChars > 0 ? options.maxChars : DEFAULT_MAX_CHARS
+  const deadline = options.maxMs !== undefined && options.maxMs > 0 ? Date.now() + options.maxMs : Number.POSITIVE_INFINITY
   try {
-    const extracted = await extractByFormat(format, data, maxChars)
+    checkDeadline(deadline)
+    const extracted = await extractByFormat(format, data, maxChars, deadline)
     let text = extracted.text
     if (text.length > maxChars) text = text.slice(0, maxChars)
     text = text.trim()
@@ -149,10 +176,15 @@ export async function extractDocument(path: string, options: ExtractOptions): Pr
       ...(extracted.pages === undefined ? {} : { pages: extracted.pages }),
       ...(extracted.warning === undefined ? {} : { warning: extracted.warning }),
     }
-  } catch {
-    warn(options, documentExtractFailed(format))
+  } catch (error) {
+    warn(options, error instanceof Error && error.message === TIMEOUT_SENTINEL ? DOCUMENT_EXTRACT_TIMEOUT : documentExtractFailed(format))
     return null
   }
+}
+
+/** Throw the timeout sentinel once the cooperative deadline has passed. */
+function checkDeadline(deadline: number): void {
+  if (Date.now() > deadline) throw new Error(TIMEOUT_SENTINEL)
 }
 
 /** One extractor's raw result before the shared size cap is applied. */
@@ -162,9 +194,10 @@ interface FormatExtraction {
   warning?: string
 }
 
-async function extractByFormat(format: DocumentFormat, data: Buffer, maxChars: number): Promise<FormatExtraction> {
+async function extractByFormat(format: DocumentFormat, data: Buffer, maxChars: number, deadline: number): Promise<FormatExtraction> {
+  checkDeadline(deadline)
   switch (format) {
-    case 'pdf': return await extractPdf(data, maxChars)
+    case 'pdf': return await extractPdf(data, maxChars, deadline)
     case 'docx': return await extractDocx(data)
     case 'xlsx': return await extractXlsx(data)
     case 'pptx': return await extractPptx(data)
@@ -188,7 +221,7 @@ interface PdfjsModule {
 }
 
 /** Extract text page by page; stop reading once the character cap is reached. */
-async function extractPdf(data: Buffer, maxChars: number): Promise<FormatExtraction> {
+async function extractPdf(data: Buffer, maxChars: number, deadline: number): Promise<FormatExtraction> {
   const pdfjs = await lazyImport<PdfjsModule>('pdfjs-dist/legacy/build/pdf.mjs')
   if (typeof pdfjs.getDocument !== 'function') throw new Error('pdfjs-dist getDocument is unavailable')
   const task = pdfjs.getDocument({
@@ -204,6 +237,7 @@ async function extractPdf(data: Buffer, maxChars: number): Promise<FormatExtract
     const pages: string[] = []
     let characters = 0
     for (let index = 1; index <= document.numPages; index++) {
+      checkDeadline(deadline)
       const content = await (await document.getPage(index)).getTextContent()
       const text = pdfPageText(content.items)
       pages.push(text)

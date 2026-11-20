@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +29,12 @@ type Options struct {
 	// WindowsUSN tries the NTFS USN/MFT enumeration first (Windows only,
 	// requires administrator rights) and falls back to the portable walk.
 	WindowsUSN bool
+	// IncludeCaches keeps well-known toolchain/package cache trees (Go module
+	// cache, Cargo, Rustup, .local/lib, site-packages, ...) in the index. The
+	// zero value excludes them, matching the plugin default: on a developer
+	// machine these trees are usually the majority of all entries and almost
+	// never what a user searches for.
+	IncludeCaches bool
 	// Warn receives non-fatal setup errors, such as a USN probe that was denied.
 	Warn func(error)
 	// Progress, when set, is called periodically and once at the end.
@@ -94,9 +99,10 @@ func Run(ctx context.Context, ix *index.Index, opt Options) (Stats, error) {
 		return st, ErrNoRoots
 	}
 	st.Roots = len(valid)
+	excl := NewExcluder(opt.Excludes, opt.IncludeCaches)
 
 	if opt.WindowsUSN {
-		handled, usnStats, usnErr := tryUSNScan(ctx, ix, opt, valid)
+		handled, usnStats, usnErr := tryUSNScan(ctx, ix, opt, valid, excl)
 		if handled {
 			return usnStats, ctx.Err()
 		}
@@ -147,7 +153,7 @@ func Run(ctx context.Context, ix *index.Index, opt Options) (Stats, error) {
 			name := entry.Name()
 			child := filepath.Join(path, name)
 			isDir := entry.IsDir()
-			if excluded(child, name, isDir, opt.Excludes) {
+			if excl.Skip(child, name, isDir) {
 				skipped.Add(1)
 				continue
 			}
@@ -174,7 +180,14 @@ func Run(ctx context.Context, ix *index.Index, opt Options) (Stats, error) {
 			}
 		}
 		if len(batch) > 0 {
-			ix.AddBatch(batch)
+			// The directory record was added by the parent batch before this
+			// subtree was queued; passing its id spares AddBatch one path hash
+			// per entry.
+			if parent, ok := ix.Lookup(path); ok {
+				ix.AddBatchAt(parent, batch)
+			} else {
+				ix.AddBatch(batch)
+			}
 		}
 		progress.report(path, &entries, &dirs)
 		for _, child := range children {
@@ -240,31 +253,6 @@ func Run(ctx context.Context, ix *index.Index, opt Options) (Stats, error) {
 	st.Took = time.Since(start)
 	progress.finish(&entries, &dirs)
 	return st, ctx.Err()
-}
-
-func excluded(path, name string, isDir bool, patterns []string) bool {
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if strings.ContainsAny(p, `/\`) {
-			if ok, _ := filepath.Match(p, path); ok {
-				return true
-			}
-			if isDir && strings.HasSuffix(p, "/**") {
-				base := strings.TrimSuffix(strings.TrimSuffix(p, "/**"), "/")
-				if ok, _ := filepath.Match(base, name); ok {
-					return true
-				}
-			}
-			continue
-		}
-		if ok, _ := filepath.Match(p, name); ok {
-			return true
-		}
-	}
-	return false
 }
 
 func infoOf(info fs.FileInfo) index.FileInfo {

@@ -15,13 +15,14 @@ import (
 	"time"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
+	"github.com/PerryLink/dsh-locator/engine/internal/scan"
 )
 
 // maxWatchedDirs bounds open descriptors. macOS defaults to a modest
 // RLIMIT_NOFILE, and one descriptor per directory is the price of kqueue
 // vnode watches. Directories beyond the cap are still indexed; their changes
 // are picked up by the periodic rebuild (refreshIntervalMs) and by
-// locator_rebuild.
+// locator_rebuild. The effective budget is min(--watch-max-dirs, this).
 const maxWatchedDirs = 4096
 
 type watchedDir struct {
@@ -39,7 +40,12 @@ type watcher struct {
 	rootsWatch int
 	dirsFailed int
 	degraded   bool
-	reasons    []string
+	// limit is the descriptor budget actually in force; limited records that
+	// the budget (not a failure) truncated coverage.
+	limit    int
+	limited  bool
+	excluder *scan.Excluder
+	reasons  []string
 
 	kq      int
 	mu      sync.Mutex
@@ -48,7 +54,6 @@ type watcher struct {
 	paths   map[string]int
 	names   map[string]*watchedDir
 	closed  bool
-	warned  bool
 }
 
 func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
@@ -56,10 +61,16 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kqueue: %w", err)
 	}
+	limit := opt.maxDirs()
+	if limit > maxWatchedDirs {
+		limit = maxWatchedDirs
+	}
 	w := &watcher{
 		ix:         ix,
 		roots:      opt.Roots,
 		excludes:   opt.Excludes,
+		excluder:   newExcluder(opt),
+		limit:      limit,
 		onError:    opt.OnError,
 		onDegraded: opt.OnDegraded,
 		kq:         kq,
@@ -104,7 +115,7 @@ func (w *watcher) Health() Health {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	reasons := w.reasons
-	degraded := w.degraded || w.rootsWatch < len(w.roots) || w.dirsFailed > 0
+	degraded := w.degraded || w.limited || w.rootsWatch < len(w.roots) || w.dirsFailed > 0
 	if w.rootsWatch < len(w.roots) && len(reasons) == 0 {
 		reasons = []string{fmt.Sprintf("%d of %d root(s) could not be watched", len(w.roots)-w.rootsWatch, len(w.roots))}
 	}
@@ -114,6 +125,8 @@ func (w *watcher) Health() Health {
 		Dirs:     len(w.dirs),
 		Degraded: degraded,
 		Reason:   strings.Join(reasons, "; "),
+		Limit:    w.limit,
+		Limited:  w.limited,
 	}
 }
 
@@ -157,7 +170,7 @@ func (w *watcher) addTree(root string, indexChildren bool) {
 		if !d.IsDir() {
 			return nil
 		}
-		if path != root && excluded(path, d.Name(), w.excludes) {
+		if path != root && w.excluder.Skip(path, d.Name(), true) {
 			return fs.SkipDir
 		}
 		if !w.addDir(path) {
@@ -186,15 +199,14 @@ func (w *watcher) addDir(path string) bool {
 		w.mu.Unlock()
 		return true
 	}
-	if len(w.dirs) >= maxWatchedDirs {
-		if !w.warned {
-			w.warned = true
-			w.mu.Unlock()
-			reason := fmt.Sprintf("kqueue watch limit reached (%d directories); deeper changes rely on the periodic rebuild", maxWatchedDirs)
+	if len(w.dirs) >= w.limit {
+		first := !w.limited
+		w.limited = true
+		w.mu.Unlock()
+		if first {
+			reason := fmt.Sprintf("kqueue watch limit reached (%d directories); deeper changes rely on the periodic rebuild", w.limit)
 			w.report(errors.New(reason))
 			w.markDegraded(reason)
-		} else {
-			w.mu.Unlock()
 		}
 		return false
 	}
@@ -247,7 +259,7 @@ func (w *watcher) upsertChildren(dir string) {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if excluded(filepath.Join(dir, name), name, w.excludes) {
+		if w.excluder.Skip(filepath.Join(dir, name), name, false) {
 			continue
 		}
 		path := filepath.Join(dir, name)
@@ -376,7 +388,7 @@ func (w *watcher) reconcile(dir string, entry *watchedDir) {
 
 func (w *watcher) addChild(dir, name string) {
 	path := filepath.Join(dir, name)
-	if excluded(path, name, w.excludes) {
+	if w.excluder.Skip(path, name, false) {
 		return
 	}
 	info, err := os.Lstat(path)
@@ -391,26 +403,6 @@ func (w *watcher) addChild(dir, name string) {
 	if info.IsDir() {
 		w.addTree(path, true)
 	}
-}
-
-// excluded mirrors the scanner's base-name rules.
-func excluded(path, name string, patterns []string) bool {
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if strings.ContainsAny(p, `/\`) {
-			if ok, _ := filepath.Match(p, path); ok {
-				return true
-			}
-			continue
-		}
-		if ok, _ := filepath.Match(p, name); ok {
-			return true
-		}
-	}
-	return false
 }
 
 // noteDirFailure counts a directory that could not be watched. The periodic

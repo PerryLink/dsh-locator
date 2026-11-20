@@ -15,6 +15,20 @@ type matcher struct {
 	notExts   map[string]bool
 	wholeWord bool
 	caseSens  bool
+
+	// Extension filters are answered from bitmaps over the index extension ids
+	// once prepareExts ran under the read lock; a map lookup per record showed up
+	// in wide query profiles. extImpossible means the include filter names only
+	// extensions the index has never seen, so the query matches nothing.
+	extInclude    []uint64
+	extExclude    []uint64
+	extPrepared   bool
+	extImpossible bool
+
+	// rePlan is a literal shortcut for regex queries: a literal prefix/middle
+	// that every match must contain. Cheap prefilter first, regexp only when it
+	// passes; a fully literal regexp skips the engine entirely.
+	rePlan regexPlan
 }
 
 // matchTerm is one bare query term in its normalized search form.
@@ -26,8 +40,11 @@ type matchTerm struct {
 	// the query is case-insensitive.
 	lower string
 	neg   bool
-	// wildcard terms use glob matching only.
+	// wildcard terms use glob matching only. globKind/globLit are a precomputed
+	// fast path for the common single-star shapes ("*.go", "prefix*").
 	wildcard bool
+	globKind globKind
+	globLit  string
 	// han is true when the term contains a Han character.
 	han bool
 	// parts splits a mixed Han+Latin term. Pure Han or pure Latin terms leave
@@ -70,6 +87,7 @@ func newMatcher(q *Query) (*matcher, error) {
 			return nil, err
 		}
 		m.re = re
+		m.rePlan = planRegex(pat)
 		return m, nil
 	}
 	for _, t := range q.Terms {
@@ -85,6 +103,9 @@ func newMatchTerm(t Term, caseSens bool) matchTerm {
 	mt.raw = normalizeText(t.Value, false)
 	mt.lower = normalizeText(t.Value, true)
 	mt.wildcard = strings.ContainsAny(mt.raw, "*?")
+	if mt.wildcard {
+		mt.globKind, mt.globLit = planGlob(mt.searchForm(caseSens))
+	}
 	mt.han = containsHan(mt.raw)
 	if mt.han && !mt.wildcard && mixedHan(mt.searchForm(caseSens)) {
 		mt.parts = splitHanRuns(mt.searchForm(caseSens))
@@ -118,14 +139,26 @@ func mixedHan(s string) bool {
 
 func (m *matcher) matches(ix *Index, id int32) bool {
 	r := &ix.recs[id]
+	if m.extImpossible {
+		return false
+	}
+	if m.extPrepared {
+		if m.extInclude != nil && !bitsTest(m.extInclude, r.Ext) {
+			return false
+		}
+		if m.extExclude != nil && bitsTest(m.extExclude, r.Ext) {
+			return false
+		}
+	} else {
+		ext := ix.extOfID(r.Ext)
+		if m.exts != nil && !m.exts[ext] {
+			return false
+		}
+		if m.notExts != nil && m.notExts[ext] {
+			return false
+		}
+	}
 	name := ix.matchNameLocked(id)
-	ext := ix.extOfID(r.Ext)
-	if m.exts != nil && !m.exts[ext] {
-		return false
-	}
-	if m.notExts != nil && m.notExts[ext] {
-		return false
-	}
 	if m.q.DirsOnly && !r.IsDir() {
 		return false
 	}
@@ -145,7 +178,10 @@ func (m *matcher) matches(ix *Index, id int32) bool {
 		return false
 	}
 	if m.re != nil {
-		if !m.re.MatchString(name) {
+		if !m.rePlan.prefilter(name) {
+			return false
+		}
+		if !m.rePlan.skipRegex && !m.re.MatchString(name) {
 			return false
 		}
 	} else {
@@ -185,6 +221,28 @@ func (m *matcher) termMatches(ix *Index, id int32, name string, t *matchTerm) bo
 		}
 	}
 	if t.wildcard {
+		switch t.globKind {
+		case globAll:
+			return true
+		case globLiteralPrefix:
+			// Pattern "literal*": the name must start with literal.
+			if m.caseSens {
+				return strings.HasPrefix(name, t.globLit)
+			}
+			return hasPrefixFold(hay, t.globLit)
+		case globLiteralSuffix:
+			// Pattern "*literal": the name must end with literal.
+			if m.caseSens {
+				return strings.HasSuffix(name, t.globLit)
+			}
+			return hasSuffixFold(hay, t.globLit)
+		case globLiteralContains:
+			// Pattern "*literal*": the name must contain literal.
+			if m.caseSens {
+				return strings.Contains(name, t.globLit)
+			}
+			return indexOfFold(hay, t.globLit, false) >= 0
+		}
 		if m.caseSens {
 			return globMatch(name, t.raw, true)
 		}
@@ -281,6 +339,12 @@ func containsWord(hay, needle string, caseSens bool) bool {
 	}
 }
 
+// foldIndexByteThreshold is where the SIMD-backed IndexByte candidate search
+// starts to beat the inline byte loop. Basenames are usually well below it, so
+// short names keep the allocation-free loop and the IndexByte call overhead is
+// only paid for long names.
+const foldIndexByteThreshold = 64
+
 func indexOfFold(hay, needle string, caseSens bool) int {
 	if caseSens {
 		return strings.Index(hay, needle)
@@ -288,21 +352,62 @@ func indexOfFold(hay, needle string, caseSens bool) int {
 	if len(needle) == 0 {
 		return 0
 	}
+	if len(hay) < foldIndexByteThreshold {
+		// Inline scan: stays in this frame, so short names cost exactly the
+		// pre-0.20 byte loop with no call overhead.
+		first := needle[0]
+		for i := 0; i+len(needle) <= len(hay); i++ {
+			if foldByte(hay[i]) != first {
+				continue
+			}
+			ok := true
+			for j := 1; j < len(needle); j++ {
+				if foldByte(hay[i+j]) != needle[j] {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				return i
+			}
+		}
+		return -1
+	}
 	first := needle[0]
-	for i := 0; i+len(needle) <= len(hay); i++ {
-		if foldByte(hay[i]) != first {
-			continue
+	// The needle is in search form (lower case). Only two bytes can start a
+	// folded match: the lower byte itself and its upper twin, so SIMD-backed
+	// IndexByte skips the non-matching runs instead of folding every byte.
+	upper := first
+	if first >= 'a' && first <= 'z' {
+		upper = first - ('a' - 'A')
+	}
+	offset := 0
+	last := len(hay) - len(needle)
+	for offset <= last {
+		rel := strings.IndexByte(hay[offset:], first)
+		if upper != first {
+			if j := strings.IndexByte(hay[offset:], upper); j >= 0 && (rel < 0 || j < rel) {
+				rel = j
+			}
+		}
+		if rel < 0 {
+			return -1
+		}
+		start := offset + rel
+		if start > last {
+			return -1
 		}
 		ok := true
 		for j := 1; j < len(needle); j++ {
-			if foldByte(hay[i+j]) != needle[j] {
+			if foldByte(hay[start+j]) != needle[j] {
 				ok = false
 				break
 			}
 		}
 		if ok {
-			return i
+			return start
 		}
+		offset = start + 1
 	}
 	return -1
 }

@@ -1107,3 +1107,133 @@ describe('locator_explore', () => {
   })
 })
 
+
+describe('locator_status 0.20.0 observability', () => {
+  function enginePayload() {
+    return {
+      version: '0.20.0', platform: 'linux/amd64', roots: ['/tmp'], entries: 3, files: 3, dirs: 0,
+      nameBytes: 10, deleted: 0, watching: true, scanning: false, usn: false, uptimeSec: 1, stateDir: '/tmp/state',
+      rssBytes: 111_000_000, hwmBytes: 222_000_000, watchDirs: 55_000, watchLimit: 120_000,
+      watchLimited: true, watchInitializing: true, snapshotBytes: 40_000_000, saveBytes: 39_000_000,
+      saveMs: 210, saveCount: 3, queueDepth: 2, generation: 42, builtAt: 1_700_000_000_000,
+      queryCount: 9, lastQueryMs: 1.5, recentQueryMs: [1, 2, 2.5], heapBytes: 90_000_000,
+      numGC: 7, refreshBackoffMs: 4_000,
+    }
+  }
+
+  it('uses the runtime status cache and forwards the engine resource gauges', async () => {
+    let cachedCalls = 0
+    let ttlSeen: number | undefined
+    const runtime = {
+      start: () => {},
+      status: { running: true },
+      roots: ['/tmp'],
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      engineStatus: async () => {
+        throw new Error('the status tool must prefer the pushed stats cache')
+      },
+      engineStatusCached: async (ttlMs?: number) => {
+        cachedCalls += 1
+        ttlSeen = ttlMs
+        return enginePayload()
+      },
+    } as unknown as LocatorRuntime
+    const tool = makeStatusTool(runtime)
+    const value = await tool.execute({}, fakeExec())
+    expect(cachedCalls).toBe(1)
+    expect(ttlSeen).toBe(1_000)
+    expect(value).toMatchObject({
+      rssBytes: 111_000_000,
+      hwmBytes: 222_000_000,
+      watchDirs: 55_000,
+      watchLimit: 120_000,
+      watchLimited: true,
+      watchInitializing: true,
+      snapshotBytes: 40_000_000,
+      saveBytes: 39_000_000,
+      saveMs: 210,
+      saveCount: 3,
+      queueDepth: 2,
+      generation: 42,
+      builtAt: 1_700_000_000_000,
+      lastQueryMs: 1.5,
+      recentQueryMs: [1, 2, 2.5],
+      heapBytes: 90_000_000,
+      numGC: 7,
+      refreshBackoffMs: 4_000,
+    })
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    const text = tool.output.render({}, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(text).toContain('resources:')
+    expect(text).toContain('rss ')
+    expect(text).toContain('watch 55000/120000')
+    expect(text).toContain('watch-limited')
+    expect(text).toContain('snapshot ')
+  })
+
+  it('passes the content diagnostics block through with a valid schema', async () => {
+    const diagnostics = {
+      coverage: { indexedFiles: 10, candidateFiles: 12, ratio: 0.833, bodyBytes: 100, budgetBytes: 200, fileBudget: 0, truncated: false, evictedDocs: 2, sessions: 1, messages: 2 },
+      dbBytes: 300, walBytes: 4, dbBudgetBytes: 400, dbOverBudget: false, ftsOptimizedAt: 0,
+      lastRefreshMs: 5, lastRefreshMode: 'fast', engineGeneration: 1, symbolsPerFile: 500, extractWorker: true,
+    }
+    const runtime = {
+      start: () => {},
+      status: { running: true },
+      roots: ['/tmp'],
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      engineStatus: async () => enginePayload(),
+    } as unknown as LocatorRuntime
+    const content = { status: () => contentState(), diagnostics: () => diagnostics } as unknown as ContentIndex
+    const tool = makeStatusTool(runtime, content)
+    const value = await tool.execute({}, fakeExec())
+    expect((value as { content?: { diagnostics?: unknown } }).content?.diagnostics).toEqual(diagnostics)
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    const text = tool.output.render({}, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(text).toContain('content resources:')
+    expect(text).toContain('coverage 10 / 12')
+    expect(text).toContain('evicted 2')
+    expect(text).toContain('refresh 5 ms (fast)')
+  })
+
+  it('keeps the status output valid when the content store has no diagnostics', async () => {
+    const runtime = {
+      start: () => {},
+      status: { running: true },
+      roots: ['/tmp'],
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      engineStatus: async () => enginePayload(),
+    } as unknown as LocatorRuntime
+    const content = { status: () => contentState() } as unknown as ContentIndex
+    const tool = makeStatusTool(runtime, content)
+    const value = await tool.execute({}, fakeExec())
+    expect((value as { content?: { diagnostics?: unknown } }).content?.diagnostics).toBeUndefined()
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+  })
+})
+
+describe('locator_search content tookMs (0.20.0 P0-15)', () => {
+  it('reports the real content query time instead of zero', async () => {
+    const content = {
+      status: () => contentState(),
+      authorizedSessionIds: () => new Set<string>(),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search() {
+        await new Promise(resolve => setTimeout(resolve, 25))
+        return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+      },
+    } as unknown as ContentIndex
+    const rt = fakeSearchRuntime([], [])
+    const tool = makeSearchTool(rt, { content })
+    const value = await tool.execute({ query: 'needle', mode: 'content' }, {} as never) as { tookMs?: number }
+    expect(typeof value.tookMs).toBe('number')
+    expect(value.tookMs).toBeGreaterThanOrEqual(20)
+  })
+})

@@ -67,13 +67,17 @@ func usage() {
 
 usage:
   indexd scan    --state DIR --root PATH [--root PATH...] [--exclude GLOB...]
+                 [--include-caches]
   indexd query   --state DIR [--limit N] [--offset N] [--sort name|path|size|mtime|ext]
                  [--desc] [--json] [--files] [--folders] [--regex] [--case]
                  [--whole-word] QUERY...
   indexd status  --state DIR [--json]
   indexd serve   --state DIR [--root PATH...] [--exclude GLOB...] [--no-watch]
+                 [--include-caches] [--watch-max-dirs N]
                  [--refresh DUR] [--no-incremental-refresh]
                  [--save-debounce DUR] [--save-max-interval DUR]
+                 [--snapshot-compression none|zstd]
+                 [--memory-limit-mb N]
   indexd usn-probe [--volume C:] [--root 'C:\\Users\\me'] [--limit 10]
                    [--enumerate=false] [--json]
 
@@ -99,6 +103,7 @@ func cmdScan(args []string) error {
 	follow := fs.Bool("follow", false, "follow directory symlinks")
 	workers := fs.Int("workers", 0, "directory reader concurrency (0 = CPU count)")
 	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
+	includeCaches := fs.Bool("include-caches", false, "index toolchain/package caches (Go module cache, Cargo, Rustup, .local/lib, site-packages, ...)")
 	memoryLimitMB := fs.Int("memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -118,6 +123,7 @@ func cmdScan(args []string) error {
 	st, err := scan.Run(ctx, ix, scan.Options{
 		Roots:          roots,
 		Excludes:       excludes,
+		IncludeCaches:  *includeCaches,
 		FollowSymlinks: *follow,
 		Workers:        *workers,
 		WindowsUSN:     *useUSN,
@@ -233,13 +239,24 @@ func cmdStatus(args []string) error {
 	if info, err := os.Stat(snap); err == nil {
 		bytes = info.Size()
 	}
+	var journalBytes int64
+	var format uint32
+	if info, ierr := index.ReadSnapshotInfo(snap); ierr == nil {
+		format = info.Version
+	}
+	if fi, ferr := os.Stat(filepath.Join(*state, index.JournalName)); ferr == nil {
+		journalBytes = fi.Size()
+	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(map[string]any{"meta": meta, "stats": s, "bytes": bytes})
+		return enc.Encode(map[string]any{
+			"meta": meta, "stats": s, "bytes": bytes,
+			"snapshotFormat": format, "journalBytes": journalBytes,
+		})
 	}
 	fmt.Printf("entries  %d (%d files, %d dirs)\n", s.Entries, s.Files, s.Dirs)
-	fmt.Printf("snapshot %s\n", humanSize(bytes))
+	fmt.Printf("snapshot %s (format v%d, journal %s)\n", humanSize(bytes), format, humanSize(journalBytes))
 	fmt.Printf("built    %s\n", meta.BuiltAt.Format(time.RFC3339))
 	fmt.Printf("platform %s\n", meta.Platform)
 	fmt.Printf("roots    %s\n", strings.Join(meta.Roots, ", "))
@@ -266,8 +283,15 @@ func cmdServe(args []string) error {
 	saveMax := fs.Duration("save-max-interval", 0, "force a snapshot write at most this long after changes (0 = 5m)")
 	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
 	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
+	includeCaches := fs.Bool("include-caches", false, "index and watch toolchain/package caches (disabled by default)")
+	watchMaxDirs := fs.Int("watch-max-dirs", 0, "cap watched directories across all roots (0 = 120000; the rest rely on the periodic refresh)")
+	snapshotCompression := fs.String("snapshot-compression", "none", "snapshot payload compression: none|zstd")
 	memoryLimitMB := fs.Int("memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	compression, err := index.ParseCompression(*snapshotCompression)
+	if err != nil {
 		return err
 	}
 	applyMemoryLimit(*memoryLimitMB)
@@ -283,6 +307,9 @@ func cmdServe(args []string) error {
 			_ = ix
 		}
 	}
+	if *watchMaxDirs < 0 {
+		return errors.New("--watch-max-dirs must not be negative")
+	}
 	if len(roots) == 0 {
 		return errors.New("serve needs --root or an existing snapshot")
 	}
@@ -297,6 +324,8 @@ func cmdServe(args []string) error {
 		StateDir:        *state,
 		Roots:           roots,
 		Excludes:        excludes,
+		IncludeCaches:   *includeCaches,
+		WatchMaxDirs:    *watchMaxDirs,
 		Watch:           !*noWatch,
 		RefreshInterval: *refresh,
 		// Incremental refreshes are on by default; --no-incremental-refresh
@@ -304,6 +333,7 @@ func cmdServe(args []string) error {
 		DisableIncrementalRefresh: *noIncremental,
 		SaveDebounce:              *saveDebounce,
 		SaveMaxInterval:           *saveMax,
+		SnapshotCompression:       compression,
 		ScanWorkers:               *workers,
 		USN:                       *useUSN,
 		Version:                   version,

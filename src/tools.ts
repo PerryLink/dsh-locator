@@ -18,7 +18,7 @@ import {
   type ContentRequest,
 } from './find.ts'
 import { fileRef } from './refs.ts'
-import type { LocatorRuntime, SearchHit } from './runtime.ts'
+import { engineResourceFields, type EngineStatus, type LocatorRuntime, type SearchHit } from './runtime.ts'
 import { resolveWithinRoots, withinRoots } from './reveal.ts'
 import { applyOutputBudget, Scope, DEFAULT_OUTPUT_BUDGET_CHARS } from './scope.ts'
 
@@ -121,12 +121,40 @@ const STATUS_OUTPUT = {
     refreshEntries: { type: 'integer' },
     refreshTookMs: { type: 'integer' },
     refreshAt: { type: 'integer' },
+    // 0.20.0 engine resource/observability fields (all optional; absent when the
+    // running engine does not report them).
+    generation: { type: 'integer', description: 'Index generation (moves on every real mutation).' },
+    builtAt: { type: 'integer', description: 'Epoch ms of the snapshot the index was built from.' },
+    rssBytes: { type: 'integer', description: 'Engine resident set size in bytes.' },
+    hwmBytes: { type: 'integer', description: 'Engine peak resident set size in bytes.' },
+    watchDirs: { type: 'integer', description: 'Directories watched by the native watcher.' },
+    watchLimit: { type: 'integer', description: 'Configured watcher directory budget (0 = no budget/unknown).' },
+    watchLimited: { type: 'boolean', description: 'The watcher hit its directory budget; the rest is refreshed periodically.' },
+    watchInitializing: { type: 'boolean', description: 'The asynchronous watcher install is still running.' },
+    snapshotBytes: { type: 'integer', description: 'On-disk snapshot size in bytes.' },
+    saveBytes: { type: 'integer', description: 'Bytes written by the last snapshot save.' },
+    saveMs: { type: 'integer', description: 'Wall-clock cost of the last snapshot save, in ms.' },
+    saveCount: { type: 'integer', description: 'Snapshot saves since engine start.' },
+    queueDepth: { type: 'integer', description: 'Pending refresh/scan work items.' },
+    queryCount: { type: 'integer', description: 'Completed engine query RPCs since start.' },
+    lastQueryMs: { type: 'number', description: 'Wall-clock cost of the last query RPC, in ms.' },
+    recentQueryMs: { type: 'array', items: { type: 'number' }, description: 'Recent query durations in ms, newest last.' },
+    heapBytes: { type: 'integer', description: 'Go heap size in bytes.' },
+    numGC: { type: 'integer', description: 'Completed GC cycles.' },
+    refreshBackoffMs: { type: 'integer', description: 'Current refresh retry backoff in ms.' },
     content: {
       type: 'object',
       additionalProperties: false,
       properties: {
         enabled: { type: 'boolean' },
         ...CONTENT_STATE_SCHEMA.properties,
+        // 0.20.0 content observability: coverage/db bytes/refresh mode. Passed
+        // through opaquely (content owns the shape), so nested fields stay open.
+        diagnostics: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'Content coverage/db-byte/refresh diagnostics (shape owned by the content layer).',
+        },
       },
     },
     scope: {
@@ -416,6 +444,9 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           return { ok: false as const, query: args.query, mode, error: 'content-index-unavailable', hits: [], contentHits: [], warnings: [] }
         }
         options.ensure?.()
+        // 0.20.0 P0-15: report the real wall-clock cost of the content query;
+        // this used to be 0 because no tookMs was emitted for content modes.
+        const contentStarted = Date.now()
         const request: ContentRequest = {
           query: args.query,
           limit: mode === 'count' ? 1 : limit,
@@ -468,6 +499,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
               warnings: [...new Set(countWarnings)],
               state: result.state,
               scope: result.scope,
+              tookMs: Date.now() - contentStarted,
             }
           }
           const warnings = [...result.warnings]
@@ -511,6 +543,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
             warnings: [...new Set(warnings)],
             state: result.state,
             scope: result.scope,
+            tookMs: Date.now() - contentStarted,
             ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
           }
         } catch (error) {
@@ -682,6 +715,27 @@ const REPO_MAP_OUTPUT = {
     error: { type: 'string' },
   },
 } as const
+
+/** Engine status through the runtime's 1 s stats cache when it provides one. */
+async function statusEngine(rt: LocatorRuntime): Promise<EngineStatus | undefined> {
+  const candidate = (rt as unknown as {
+    engineStatusCached?: (ttlMs?: number) => Promise<EngineStatus | undefined>
+  }).engineStatusCached
+  if (typeof candidate === 'function') return await candidate.call(rt, 1_000)
+  return await rt.engineStatus()
+}
+
+/** Read-only 0.20.0 content diagnostics (coverage/db bytes/refresh mode). */
+function contentDiagnosticsOf(content: ContentIndex): Record<string, unknown> {
+  const candidate = (content as unknown as { diagnostics?: () => unknown }).diagnostics
+  if (typeof candidate !== 'function') return {}
+  try {
+    const value = candidate.call(content)
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? { diagnostics: value } : {}
+  } catch {
+    return {}
+  }
+}
 
 /** Snapshot the content state for a symbol view, tolerating embedder fakes. */
 function contentStateOf(content: ContentIndex): ContentState | undefined {
@@ -957,6 +1011,25 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           refreshEntries?: number
           refreshTookMs?: number
           refreshAt?: number
+          generation?: number
+          builtAt?: number
+          rssBytes?: number
+          hwmBytes?: number
+          watchDirs?: number
+          watchLimit?: number
+          watchLimited?: boolean
+          watchInitializing?: boolean
+          snapshotBytes?: number
+          saveBytes?: number
+          saveMs?: number
+          saveCount?: number
+          queueDepth?: number
+          queryCount?: number
+          lastQueryMs?: number
+          recentQueryMs?: number[]
+          heapBytes?: number
+          numGC?: number
+          refreshBackoffMs?: number
           content?: {
             enabled?: boolean
             files?: number
@@ -969,6 +1042,21 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
             progress?: { phase?: string; scanned?: number; indexed?: number; total?: number; path?: string; startedAt?: number }
             warnings?: string[]
             refs?: { total?: number; byKind?: Record<string, number> }
+            diagnostics?: {
+              coverage?: {
+                indexedFiles?: number
+                candidateFiles?: number | null
+                ratio?: number | null
+                evictedDocs?: number
+                truncated?: boolean
+              }
+              dbBytes?: number
+              walBytes?: number
+              dbOverBudget?: boolean
+              lastRefreshMs?: number
+              lastRefreshMode?: string
+              engineGeneration?: number | null
+            }
           }
           scope?: {
             notSearchable?: string[]
@@ -995,6 +1083,24 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           '  state: ' + (v.stateDir ?? ''),
           '  engine: ' + (v.binary ?? '') + (v.version === undefined ? '' : ' (' + v.version + ', ' + (v.platform ?? '') + ')'),
         ]
+        // 0.20.0 resource gauges: only what the running engine reported.
+        const resources: string[] = []
+        if (v.rssBytes !== undefined) {
+          resources.push('rss ' + formatSize(v.rssBytes) + (v.hwmBytes === undefined ? '' : ' / hwm ' + formatSize(v.hwmBytes)))
+        }
+        if (v.watchDirs !== undefined) {
+          resources.push('watch ' + String(v.watchDirs) + (v.watchLimit === undefined || v.watchLimit === 0 ? '' : '/' + String(v.watchLimit)))
+        }
+        if (v.watchLimited === true) resources.push('watch-limited')
+        if (v.watchInitializing === true) resources.push('watch-initializing')
+        if (v.snapshotBytes !== undefined) resources.push('snapshot ' + formatSize(v.snapshotBytes))
+        if (v.saveBytes !== undefined) {
+          resources.push('last save ' + formatSize(v.saveBytes) + (v.saveMs === undefined ? '' : ' in ' + String(v.saveMs) + ' ms'))
+        }
+        if (v.lastQueryMs !== undefined) resources.push('last query ' + v.lastQueryMs.toFixed(1) + ' ms')
+        if (v.queueDepth !== undefined) resources.push('queue ' + String(v.queueDepth))
+        if (v.heapBytes !== undefined) resources.push('heap ' + formatSize(v.heapBytes))
+        if (resources.length > 0) lines.push('  resources: ' + resources.join(' · '))
         if (v.refreshFallback === true) lines.push('  fallback: periodic rebuild is active (native watcher incomplete)')
         if (v.refreshMode !== undefined || v.refreshTookMs !== undefined || (v.watchUnwatchedRoots?.length ?? 0) > 0) {
           const skipped = v.refreshSkippedRoots?.length ?? v.watchUnwatchedRoots?.length ?? 0
@@ -1012,6 +1118,27 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
               .map(([kind, count]) => kind + ' ' + String(count))
               .join(', ')
             lines.push('  refs: ' + String(v.content.refs.total ?? 0) + (kinds === '' ? '' : ' (' + kinds + ')'))
+          }
+          const diagnostics = v.content.diagnostics
+          if (diagnostics !== undefined) {
+            const parts: string[] = []
+            const coverage = diagnostics.coverage
+            if (typeof diagnostics.dbBytes === 'number') {
+              parts.push('db ' + formatSize(diagnostics.dbBytes) + (typeof diagnostics.walBytes === 'number' && diagnostics.walBytes > 0 ? ' + wal ' + formatSize(diagnostics.walBytes) : ''))
+            }
+            if (coverage !== undefined && typeof coverage.indexedFiles === 'number') {
+              const candidate = typeof coverage.candidateFiles === 'number' ? ' / ' + String(coverage.candidateFiles) : ''
+              const ratio = typeof coverage.ratio === 'number' ? ' (' + (coverage.ratio * 100).toFixed(1) + '%)' : ''
+              parts.push('coverage ' + String(coverage.indexedFiles) + candidate + ratio)
+            }
+            if (coverage !== undefined && typeof coverage.evictedDocs === 'number' && coverage.evictedDocs > 0) {
+              parts.push('evicted ' + String(coverage.evictedDocs))
+            }
+            if (typeof diagnostics.lastRefreshMs === 'number' && diagnostics.lastRefreshMs > 0) {
+              parts.push('refresh ' + String(diagnostics.lastRefreshMs) + ' ms' + (typeof diagnostics.lastRefreshMode === 'string' && diagnostics.lastRefreshMode !== '' ? ' (' + diagnostics.lastRefreshMode + ')' : ''))
+            }
+            if (diagnostics.dbOverBudget === true) parts.push('db over budget')
+            if (parts.length > 0) lines.push('  content resources: ' + parts.join(' · '))
           }
         }
         const scopeInfo = v.scope
@@ -1033,7 +1160,9 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
     async execute() {
       rt.start()
       const status = rt.status
-      const engine = await rt.engineStatus()
+      // 0.20.0 P0-12: answer from the engine's pushed stats copy for up to 1 s
+      // instead of paying an IPC round-trip on every status poll.
+      const engine = await statusEngine(rt)
       const config = (rt.config ?? {}) as Partial<Config>
       const scopeDescription = (scope ?? EMPTY_STATUS_SCOPE).describe()
       const hookWarnings = validateHookCommands({
@@ -1061,10 +1190,13 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           ...(engine.refreshTookMs === undefined ? {} : { refreshTookMs: engine.refreshTookMs }),
           ...(engine.refreshAt === undefined ? {} : { refreshAt: engine.refreshAt }),
         }),
+        // 0.20.0 observability: rss/watch/snapshot/save/query gauges, forwarded
+        // only when the running engine reports them.
+        ...engineResourceFields(engine),
         scanning: status.scanning !== undefined,
         stateDir: engine?.stateDir ?? rt.stateDir,
         binary: rt.binary,
-        ...(content === undefined ? {} : { content: { enabled: true, ...content.status() } }),
+        ...(content === undefined ? {} : { content: { enabled: true, ...content.status(), ...contentDiagnosticsOf(content) } }),
         scope: {
           ...scopeDescription,
           outputBudgetChars: outputBudgetChars(config),

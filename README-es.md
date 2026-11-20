@@ -92,7 +92,7 @@ En resumen: la **idea** de Everything (índice persistente + consultas estructur
 dsh plugin --profile web add dsh-locator
 
 # fijar una versión
-dsh plugin --profile web add dsh-locator@0.19.3
+dsh plugin --profile web add dsh-locator@0.20.0
 
 # rama principal de GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -239,7 +239,7 @@ Cada campo es un campo de configuración de Schemastery; sobrescribe la entrada 
 | `refreshIntervalMs` | `1800000` | Cadencia de reconstrucción cuando no hay watcher nativo (kqueue o fallo del watcher); `0` la desactiva. |
 | `scanWorkers` | `0` | Concurrencia de lectura de directorios; `0` usa el número de CPU. |
 | `windowsUsn` | `false` | Probar la enumeración USN/MFT de NTFS antes del recorrido (Windows, administrador; con reserva automática). |
-| `memoryLimitMB` | `0` | Límite blando del heap Go del motor en MiB; `0` lo deja a `GOMEMLIMIT`/`GOGC`. |
+| `memoryLimitMB` | `0` | Límite blando del heap Go en MiB; `0` = automático (25% de la RAM, 384–1024 MiB); un valor positivo lo fija. |
 | `contentIndex` | `true` | Construir el índice de cuerpos y mensajes de sesión; `false` deja la búsqueda por nombre con un coste de contenido casi nulo. |
 | `contentLazy` | `true` | Construir el índice de contenido en la primera búsqueda en lugar de al iniciar. |
 | `contentMaxFileBytes` | `1000000` | Bytes leídos de un archivo de texto. |
@@ -403,7 +403,19 @@ DeepSeek Harness
 
 ## Memoria
 
-El motor es un único proceso Go y respeta las variables estándar `GOMEMLIMIT` y `GOGC` (o `memoryLimitMB` en la configuración). Un índice de 1,2–1,5 M de entradas alcanza varios cientos de MB de RSS con el GC por defecto; usa `GOMEMLIMIT=600MiB` (límite blando, el runtime cambia CPU por memoria) o `GOGC=50` cuando el host vaya justo de RAM. Ninguno cambia el formato de la instantánea. En la instalación en vivo usada para las cifras anteriores, el proceso anfitrión de DSH (incluida la caché de páginas de la base de contenido) rondaba los 700 MB de RSS con el índice construido, y la latencia del host en reposo se mantenía en p50 2 ms.
+El motor es un único proceso Go; respeta `GOMEMLIMIT`/`GOGC` y `memoryLimitMB`, donde `0` (por defecto) calcula un límite automático (25% de la RAM, 384–1024 MiB). Un motor 0.20 carga un snapshot de 1,5 M de entradas en ~186 MB de heap y se estabiliza en ~335 MB de RSS con el watcher instalado (límite de 512 MiB); la versión anterior necesitaba ~700 MB en el mismo punto. Ninguno cambia el formato del snapshot. Con la caché de páginas de la base de contenido, el proceso anfitrión de DSH rondaba los 700 MB de RSS en la instalación en vivo, con latencia en reposo de p50 2 ms.
+
+## Notas de actualización 0.20.0
+
+- **Alcance del índice**: las cachés de toolchains/paquetes (`~/go/pkg/mod`, `.cargo*`, `.rustup`, `.local/lib`, pnpm store, ...) se excluyen por defecto (~75% menos entradas); `includeCaches: true` restaura el comportamiento 0.19. Los snapshots 0.19 convergen en la primera actualización diff; `locator_rebuild` lo hace inmediato.
+- **Memoria y persistencia**: `memoryLimitMB: 0` ahora es automático (25% de la RAM, 384–1024 MiB); carga de snapshot en streaming (~81 MB menos); autosave según el último cambio (80–90% menos escrituras); guardado sin lock de lectura; compactación fuera del lock con umbral del 5%; snapshot zstd opcional y snapshot incremental base+journal.
+- **Watcher y refresco**: el watcher Linux se instala desde el índice en memoria (sin recorrer el árbol), es asíncrono y respeta `watchMaxDirs`; los roots 9p/DrvFs usan diff upsert (sin reescritura si no hay cambios, backoff exponencial).
+- **Búsquedas**: consultas de nombres 27–88% menos CPU (IndexByte, glob con comodín único, bitmaps ext/pinyin, pre-filtro de regex, top-k); contenido 10–80× más rápido en palabras comunes (bm25 adaptativo, SQL separado página/recuento, caché TTL+LRU, cancelación, 2 workers).
+- **Índice de contenido**: ruta rápida por generation (<0.3 s sin cambios), evicción de presupuesto + coverage, transacciones de 250 escrituras, optimize FTS, 500 símbolos/archivo, extracción en worker (8 MiB), sesiones en streaming + cola incremental + límite 64 MiB, throttling adaptativo.
+- **Panel y HTTP**: `/combined` asíncrono con modo `compact`, cancelación al desconectar, panel en dos fases (nombres ~90 ms, contenido a los 300 ms, sin contenido con <3 caracteres, LRU 20), límite de 300 filas y `loadMore` incremental.
+- **Configuración**: 17 claves nuevas (ver la tabla de la versión en inglés) y `contentExtractMaxBytes` pasa a 8 MiB; `memoryLimitMB=0` ahora significa automático.
+- **Cambios de comportamiento**: las cachés ya no se buscan por nombre por defecto; `status.builtAt` en milisegundos; `watching` puede ser false mientras el watcher se instala en segundo plano. El esquema FTS v4 se aplaza (~100 MB de beneficio frente a migrar 4 GB).
+- `443 tests`; seis engines reconstruidos en 0.20.0.
 
 ## Notas de actualización 0.19.2
 

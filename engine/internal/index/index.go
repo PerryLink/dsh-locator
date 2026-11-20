@@ -3,6 +3,7 @@ package index
 import (
 	"io/fs"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,22 @@ type Index struct {
 	// raw bytes (full-width forms, compatibility ideographs, non-ASCII case).
 	folded   map[int32]string
 	foldBits []uint64 // one bit per record id: folded[id] exists
+
+	// deferDerived suppresses per-record derived-table maintenance while a
+	// snapshot or journal is being replayed; buildDerivedLocked then runs once
+	// for the whole arena.
+	deferDerived bool
+
+	// journal records mutations since the last full base snapshot (nil when
+	// off/unsupported). Guarded by mu like every other arena field.
+	journal *journalState
+
+	// statsMu guards Stats' memoised result. Stats takes mu.RLock internally,
+	// so it must never be called while the caller holds mu.
+	statsMu    sync.Mutex
+	statsCache Stats
+	statsGen   uint64
+	statsValid bool
 }
 
 // New creates an empty index.
@@ -90,11 +107,17 @@ func (ix *Index) AddRoot(root string) int32 {
 		// The roots list is part of the snapshot even when the record itself
 		// was already present.
 		ix.gen++
+		if ix.journalActiveLocked() {
+			ix.journalAddRootLocked(root)
+		}
 		return id
 	}
 	id := ix.appendLocked(root, -1, FileInfo{Mode: fs.ModeDir}, 0)
 	ix.roots = append(ix.roots, id)
 	ix.gen++
+	if ix.journalActiveLocked() {
+		ix.journalAddRootLocked(root)
+	}
 	return id
 }
 
@@ -136,6 +159,9 @@ func (ix *Index) appendLocked(name string, parent int32, info FileInfo, frn uint
 	// Insert after append: Path(id) must be resolvable during collision checks.
 	ix.table.set(nameForKey(ix.pathLocked(id)), id, ix)
 	ix.addDerivedLocked(id, name)
+	if ix.journalActiveLocked() {
+		ix.journalPutLocked(ix.pathLocked(id), &ix.recs[id])
+	}
 	return id
 }
 
@@ -144,6 +170,9 @@ func (ix *Index) appendLocked(name string, parent int32, info FileInfo, frn uint
 // published). The function is intentionally cheap for ASCII names: pinyin work
 // only happens when the name contains a Han character.
 func (ix *Index) addDerivedLocked(id int32, name string) {
+	if ix.deferDerived {
+		return
+	}
 	ix.py.grow(len(ix.recs))
 	// Root records store their absolute path in the name arena (pathLocked
 	// reconstructs the path from it); index the search forms of the record's own
@@ -167,19 +196,50 @@ func (ix *Index) addDerivedLocked(id int32, name string) {
 
 // buildDerivedLocked rebuilds every search-only structure from the record
 // arena. It is used after Load and after Compact renumbered the records.
+//
+// The whole-disk case is overwhelmingly ASCII names, so this walks every name
+// exactly once for the non-ASCII test and skips pinyin/NFKC for the rest. The
+// pinyin offset and bitmap tables are preallocated instead of grown per record
+// (the old addDerivedLocked path called py.grow for every entry as a no-op).
 func (ix *Index) buildDerivedLocked() {
 	ix.py.reset()
-	// Preallocate the offset table: growing it one uint32 at a time for a
-	// multi-million-record snapshot reallocated the slice thousands of times
-	// and added tens of megabytes to the peak RSS of Load.
-	ix.py.offs = make([]uint32, len(ix.recs))
 	ix.folded = nil
 	ix.foldBits = nil
-	for i := range ix.recs {
-		if ix.recs[i].Deleted() {
+	n := len(ix.recs)
+	ix.py.offs = make([]uint32, n)
+	// Allocate the presence bitmap up front: go-pinyin work is rare, but a
+	// lazily grown bitmap made the build append one word per record range.
+	ix.py.has = make([]uint64, (n+63)>>6)
+	for i := 0; i < n; i++ {
+		r := &ix.recs[i]
+		if r.Deleted() {
 			continue
 		}
-		ix.addDerivedLocked(int32(i), ix.nameLocked(int32(i)))
+		name := unsafeString(ix.names[r.NameOff : r.NameOff+r.NameLen])
+		if r.Parent < 0 {
+			// Root records store their absolute path in the arena; only the
+			// last component is searchable (see searchNameLocked).
+			name = filepath.Base(name)
+		}
+		if !hasNonASCII(name) {
+			continue
+		}
+		if containsHan(name) {
+			if full, initials, ok := pinyinKeys(name); ok {
+				ix.py.set(int32(i), full, initials)
+			}
+		}
+		if folded, ok := foldedName(name); ok {
+			if ix.folded == nil {
+				ix.folded = make(map[int32]string)
+			}
+			bit := int(i) >> 6
+			if bit >= len(ix.foldBits) {
+				ix.foldBits = append(ix.foldBits, make([]uint64, bit+1-len(ix.foldBits))...)
+			}
+			ix.foldBits[bit] |= 1 << uint(i&63)
+			ix.folded[int32(i)] = folded
+		}
 	}
 }
 
@@ -200,7 +260,7 @@ func (ix *Index) foldedName(id int32) (string, bool) {
 // pinyinOf returns the record's pinyin keys. The caller holds the index read
 // lock.
 func (ix *Index) pinyinOf(id int32) (full, initials string, ok bool) {
-	if ix.py.empty() {
+	if !ix.py.hasKey(id) {
 		return "", "", false
 	}
 	return ix.py.get(id)
@@ -246,6 +306,9 @@ func (ix *Index) RemovePath(full string) bool {
 	ix.recs[id].Flags |= FlagDeleted
 	ix.nDelet++
 	ix.gen++
+	if ix.journalActiveLocked() {
+		ix.journalDeleteLocked(full)
+	}
 	return true
 }
 
@@ -318,9 +381,19 @@ func (ix *Index) pathLocked(id int32) string {
 }
 
 // Stats summarizes the index without touching disk.
+//
+// The file/dir split is an O(records) walk (7.4ms on a 1.5M-entry index), and
+// status polls it every second. The result is memoised by generation: every
+// mutation advances gen, so a cache hit is always exact. Stats must not be
+// called while holding ix.mu (it takes the read lock itself).
 func (ix *Index) Stats() Stats {
+	ix.statsMu.Lock()
+	defer ix.statsMu.Unlock()
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	if ix.statsValid && ix.statsGen == ix.gen {
+		return ix.statsCache
+	}
 	s := Stats{
 		Records:    len(ix.recs),
 		Dirs:       0,
@@ -341,12 +414,181 @@ func (ix *Index) Stats() Stats {
 		}
 	}
 	s.Entries = s.Files + s.Dirs
+	ix.statsCache = s
+	ix.statsGen = ix.gen
+	ix.statsValid = true
 	return s
 }
 
 // Compact rewrites the arenas, dropping tombstones and rebuilding the path
-// table. It is O(entries) and is called when deletions accumulate.
+// table. It is called when deletions accumulate.
+//
+// The rebuild is copy-on-write: the arenas are copied under the read lock, the
+// compacted records, name arena, path table and derived tables are computed
+// without any lock, and the swap happens under the write lock only if the
+// generation did not move. A concurrent mutation aborts the attempt and leaves
+// the index untouched; the caller retries later. This keeps the write-lock
+// stall at microseconds instead of the ~1.3s the old in-place rebuild held it.
 func (ix *Index) Compact() {
+	for attempt := 0; attempt < 4; attempt++ {
+		if ix.tryCompactOnce() {
+			return
+		}
+		runtime.Gosched()
+	}
+	// Heavy write traffic kept invalidating the snapshot; fall back to the
+	// in-place rebuild so compaction is still guaranteed to make progress.
+	ix.compactLocked()
+}
+
+// tryCompactOnce performs one copy-on-write compaction attempt and reports
+// whether it committed. The caller holds no lock.
+func (ix *Index) tryCompactOnce() bool {
+	ix.mu.RLock()
+	if ix.nDelet == 0 {
+		ix.mu.RUnlock()
+		return true
+	}
+	gen := ix.gen
+	// Copy the records: their fields are mutated in place by metadata updates,
+	// so handing the live arena to the lock-free phase would race. The name
+	// arena is append-only and its existing bytes never change, so a slice
+	// header is enough. Slots and roots are small and are copied for the same
+	// reason as records.
+	oldRecs := append([]Record(nil), ix.recs...)
+	names := ix.names
+	oldSlots := append([]int32(nil), ix.table.slots...)
+	roots := append([]int32(nil), ix.roots...)
+	nDelet := ix.nDelet
+	ix.mu.RUnlock()
+
+	live := len(oldRecs) - nDelet
+	if live < 0 {
+		return false
+	}
+	deadNames := 0
+	hasOrphans := false
+	for i := range oldRecs {
+		r := &oldRecs[i]
+		if r.Deleted() {
+			deadNames += int(r.NameLen)
+			continue
+		}
+		if r.Parent >= 0 && int(r.Parent) < len(oldRecs) && oldRecs[r.Parent].Deleted() {
+			hasOrphans = true
+		}
+	}
+	// Rewrite the name arena once 20% of it is dead. It is also required when a
+	// deleted parent leaves live children: their absolute path must become the
+	// stored name because parentless records store the whole path.
+	rebuildNames := hasOrphans || deadNames*5 > len(names)
+	var newNames []byte
+	if rebuildNames {
+		newNames = make([]byte, 0, len(names)-deadNames+64)
+	}
+	newRecs := make([]Record, 0, live)
+	remap := make([]int32, len(oldRecs))
+	for i := range remap {
+		remap[i] = -1
+	}
+	for i := range oldRecs {
+		old := &oldRecs[i]
+		if old.Deleted() {
+			continue
+		}
+		name := unsafeString(names[old.NameOff : old.NameOff+old.NameLen])
+		rec := *old
+		if old.Parent >= 0 && int(old.Parent) < len(remap) {
+			if p := remap[old.Parent]; p >= 0 {
+				rec.Parent = p
+			} else {
+				rec.Parent = -1
+				name = pathInArena(oldRecs, names, int32(i))
+			}
+		} else {
+			rec.Parent = -1
+		}
+		if rebuildNames {
+			rec.NameOff = uint32(len(newNames))
+			newNames = append(newNames, name...)
+			rec.NameLen = uint32(len(name))
+		}
+		remap[i] = int32(len(newRecs))
+		newRecs = append(newRecs, rec)
+	}
+
+	// Remap the open-addressing table in place instead of rehashing every path:
+	// the slot position of a key is unchanged (paths did not change), only the
+	// record id stored in the slot moves. pathMatchesLocked validates the path
+	// on lookup, so no hash needs to be recomputed.
+	newSlots := oldSlots
+	count, tombs := 0, 0
+	for i, v := range newSlots {
+		switch {
+		case v == 0:
+		case v < 0:
+			tombs++
+		default:
+			id := remap[v-1]
+			if id < 0 {
+				newSlots[i] = -1
+				tombs++
+				continue
+			}
+			newSlots[i] = id + 1
+			count++
+		}
+	}
+	if count != len(newRecs) {
+		// The table and the records disagree (corrupt snapshot); let the
+		// in-place fallback rebuild the table from paths.
+		return false
+	}
+	newRoots := make([]int32, 0, len(roots))
+	for _, id := range roots {
+		if int(id) >= 0 && int(id) < len(remap) && remap[id] >= 0 {
+			newRoots = append(newRoots, remap[id])
+		}
+	}
+	arenaNames := names
+	if rebuildNames {
+		arenaNames = newNames
+	}
+	// Record ids changed, so the id-addressed pinyin and folded-name tables
+	// must be rebuilt. Do that on a scratch Index: it is pure CPU on local
+	// data, so it does not need the lock either.
+	tmp := &Index{names: arenaNames, recs: newRecs}
+	tmp.buildDerivedLocked()
+
+	// Test seam: lets a test mutate the index between the copy and the commit.
+	if compactPhaseHook != nil {
+		compactPhaseHook()
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.gen != gen {
+		return false
+	}
+	ix.recs = newRecs
+	ix.names = arenaNames
+	ix.roots = newRoots
+	ix.table.reset(newSlots, count)
+	ix.table.tombs = tombs
+	ix.nDelet = 0
+	ix.py = tmp.py
+	ix.folded = tmp.folded
+	ix.foldBits = tmp.foldBits
+	ix.gen++
+	return true
+}
+
+// compactPhaseHook is a test-only seam invoked between the lock-free compaction
+// build and its commit. Production builds leave it nil.
+var compactPhaseHook func()
+
+// compactLocked is the pre-existing in-place rebuild, kept as the fallback for
+// a compaction that keeps losing the generation race.
+func (ix *Index) compactLocked() {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	if ix.nDelet == 0 {
@@ -365,15 +607,20 @@ func (ix *Index) Compact() {
 			continue
 		}
 		name := unsafeString(ix.names[old.NameOff : old.NameOff+old.NameLen])
-		off := uint32(len(names))
-		names = append(names, name...)
 		rec := *old
-		rec.NameOff = off
 		if old.Parent >= 0 && int(old.Parent) < len(remap) {
-			rec.Parent = remap[old.Parent]
+			if p := remap[old.Parent]; p >= 0 {
+				rec.Parent = p
+			} else {
+				rec.Parent = -1
+				name = ix.pathLocked(int32(i))
+			}
 		} else {
 			rec.Parent = -1
 		}
+		rec.NameOff = uint32(len(names))
+		names = append(names, name...)
+		rec.NameLen = uint32(len(name))
 		remap[i] = int32(len(recs))
 		recs = append(recs, rec)
 	}
@@ -384,16 +631,46 @@ func (ix *Index) Compact() {
 	for id := range ix.recs {
 		ix.table.set(ix.pathLocked(int32(id)), int32(id), ix)
 	}
-	for i := range ix.roots {
-		if int(ix.roots[i]) < len(remap) {
-			ix.roots[i] = remap[ix.roots[i]]
+	keptRoots := ix.roots[:0]
+	for _, id := range ix.roots {
+		if int(id) < len(remap) && remap[id] >= 0 {
+			keptRoots = append(keptRoots, remap[id])
 		}
 	}
-	// Record ids changed, so the id-addressed pinyin and folded-name tables
-	// must be rebuilt. This is O(entries) and only runs when tombstones
-	// dominate, right before a snapshot write.
+	ix.roots = keptRoots
 	ix.buildDerivedLocked()
 	ix.gen++
+}
+
+// pathInArena reconstructs an absolute path from a copied record/name arena.
+func pathInArena(recs []Record, names []byte, id int32) string {
+	if id < 0 || int(id) >= len(recs) {
+		return ""
+	}
+	var chain [32]int32
+	n := 0
+	for cur := id; cur >= 0 && n < len(chain); cur = recs[cur].Parent {
+		chain[n] = cur
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	nameAt := func(id int32) string {
+		r := &recs[id]
+		return unsafeString(names[r.NameOff : r.NameOff+r.NameLen])
+	}
+	first := nameAt(chain[n-1])
+	var b strings.Builder
+	b.Grow(len(first) + 32*n)
+	b.WriteString(first)
+	for i := n - 2; i >= 0; i-- {
+		if !strings.HasSuffix(b.String(), string(filepath.Separator)) {
+			b.WriteByte(byte(filepath.Separator))
+		}
+		b.WriteString(nameAt(chain[i]))
+	}
+	return b.String()
 }
 
 func flagsFor(mode fs.FileMode, keep Flags) Flags {
@@ -472,6 +749,9 @@ func (ix *Index) RemoveSubtree(path string) int {
 				ix.recs[i].Flags |= FlagDeleted
 				ix.nDelet++
 				removed++
+				if ix.journalActiveLocked() {
+					ix.journalDeleteLocked(p)
+				}
 			}
 		}
 	}
@@ -528,30 +808,17 @@ func (ix *Index) addLocked(full string, info FileInfo) int32 {
 // rewrite a multi-hundred-megabyte snapshot on a timer even when nothing had
 // changed.
 func (ix *Index) addLockedFRN(full string, info FileInfo, frn uint64) int32 {
+	id, _ := ix.addOrUpdateLocked(full, info, frn)
+	return id
+}
+
+// addOrUpdateLocked is addLockedFRN with a "new record" flag, used by the
+// subtree diff to count created entries. The caller holds the write lock through
+// addLockedFRN/AddBatch; DiffSubtree calls it directly while holding the lock.
+func (ix *Index) addOrUpdateLocked(full string, info FileInfo, frn uint64) (int32, bool) {
 	full = cleanPath(full)
 	if id := ix.table.get(full, ix); id >= 0 {
-		r := &ix.recs[id]
-		changed := false
-		if r.Size != info.Size {
-			r.Size = info.Size
-			changed = true
-		}
-		if r.Mtime != info.Mtime {
-			r.Mtime = info.Mtime
-			changed = true
-		}
-		if flags := flagsFor(info.Mode, r.Flags); flags != r.Flags {
-			r.Flags = flags
-			changed = true
-		}
-		if frn != 0 && r.FRN != frn {
-			r.FRN = frn
-			changed = true
-		}
-		if changed {
-			ix.gen++
-		}
-		return id
+		return ix.updateLocked(id, info, frn), false
 	}
 	parent := int32(-1)
 	if dir := filepath.Dir(full); dir != full {
@@ -563,7 +830,127 @@ func (ix *Index) addLockedFRN(full string, info FileInfo, frn uint64) int32 {
 	}
 	id := ix.appendLocked(name, parent, info, frn)
 	ix.gen++
+	return id, true
+}
+
+// updateLocked refreshes the persisted fields of an existing record and reports
+// whether anything actually changed (which is what moves the generation).
+func (ix *Index) updateLocked(id int32, info FileInfo, frn uint64) int32 {
+	changed := ix.updateFieldsLocked(id, info, frn)
+	if changed {
+		ix.gen++
+		if ix.journalActiveLocked() {
+			ix.journalPutLocked(ix.pathLocked(id), &ix.recs[id])
+		}
+	}
 	return id
+}
+
+// updateFieldsLocked updates the fields of one record without touching the
+// generation; callers decide what the change means.
+func (ix *Index) updateFieldsLocked(id int32, info FileInfo, frn uint64) bool {
+	r := &ix.recs[id]
+	changed := false
+	if r.Size != info.Size {
+		r.Size = info.Size
+		changed = true
+	}
+	if r.Mtime != info.Mtime {
+		r.Mtime = info.Mtime
+		changed = true
+	}
+	if flags := flagsFor(info.Mode, r.Flags); flags != r.Flags {
+		r.Flags = flags
+		changed = true
+	}
+	if frn != 0 && r.FRN != frn {
+		r.FRN = frn
+		changed = true
+	}
+	return changed
+}
+
+// addChildLocked indexes one direct child of an already-indexed directory. It
+// skips the parent lookup the scanner already paid for (the batch knows its
+// directory record), which removes one path hash per scanned entry.
+func (ix *Index) addChildLocked(full string, parent int32, info FileInfo, frn uint64) (int32, bool) {
+	full = cleanPath(full)
+	if id := ix.table.get(full, ix); id >= 0 {
+		return ix.updateLocked(id, info, frn), false
+	}
+	if int(parent) < 0 || int(parent) >= len(ix.recs) || ix.recs[parent].Deleted() || !ix.recs[parent].IsDir() {
+		return ix.addOrUpdateLocked(full, info, frn)
+	}
+	name := full
+	if sep := lastPathSep(full); sep >= 0 {
+		name = full[sep+1:]
+	} else {
+		parent = -1
+	}
+	id := ix.appendLocked(name, parent, info, frn)
+	ix.gen++
+	return id, true
+}
+
+// AddBatchAt indexes many direct children of one directory under one lock. It is
+// the scanner's hot path: the caller already resolved the directory record, so
+// no per-item parent lookup or filepath.Dir allocation is needed.
+func (ix *Index) AddBatchAt(parent int32, items []AddItem) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, item := range items {
+		ix.addChildLocked(item.Path, parent, item.Info, item.FRN)
+	}
+}
+
+// pathMatchesLocked reports whether a record's absolute path equals key without
+// materialising the path string. The path table probes it once or more per
+// lookup; ix.pathLocked there accounted for 28.9% of a cold scan.
+func (ix *Index) pathMatchesLocked(id int32, key string) bool {
+	if id < 0 || int(id) >= len(ix.recs) {
+		return false
+	}
+	cur := id
+	for depth := 0; depth <= len(ix.recs); depth++ {
+		if int(cur) < 0 || int(cur) >= len(ix.recs) {
+			return false
+		}
+		r := &ix.recs[cur]
+		name := unsafeString(ix.names[r.NameOff : r.NameOff+r.NameLen])
+		if r.Parent < 0 {
+			// Root (or orphan) records store their whole absolute path in the
+			// name arena. A volume root keeps a trailing separator in that
+			// string, while pathLocked does not repeat it.
+			if pathsEqual(name, key) {
+				return true
+			}
+			// A volume root (or "/" itself) keeps a trailing separator in the
+			// stored name, while pathLocked does not repeat it for children.
+			last := len(name) - 1
+			return last >= 0 && isPathSepByte(name[last]) && pathsEqual(name[:last], key)
+		}
+		if len(key) <= len(name) {
+			return false
+		}
+		off := len(key) - len(name)
+		if !pathsEqual(name, key[off:]) || !isPathSepByte(key[off-1]) {
+			return false
+		}
+		key = key[:off-1]
+		cur = r.Parent
+	}
+	return false
+}
+
+// lastPathSep returns the byte offset of the last platform path separator in p,
+// or -1. It mirrors filepath separator handling without allocating.
+func lastPathSep(p string) int {
+	for i := len(p) - 1; i >= 0; i-- {
+		if isPathSepByte(p[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // FRNPaths snapshots the FRN -> current path map for live records. It is used

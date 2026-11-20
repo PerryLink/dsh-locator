@@ -7,11 +7,17 @@
  *   POST /dsh-locator/search   { query, limit, offset, sort, desc, ... }
  *   GET  /dsh-locator/search?q=...&limit=...&offset=...&mode=names|content|count&json=1
  *   POST /dsh-locator/status   {}
+ *   POST /dsh-locator/combined { query, limit, contentLimit, compact, ... }
  *
- * The search route accepts both methods on purpose: the panel keeps the POST
- * JSON-body contract, while scripts and other tools get a plain, citable GET
- * query API (Everything-style HTTP) behind the exact same trust fence, the
- * same auth policy and the same same-origin check.
+ * **Method contract, per route.** `/dsh-locator/search` accepts both POST and
+ * GET on purpose: the panel keeps the POST JSON-body contract, while scripts and
+ * other tools get a plain, citable GET query API (Everything-style HTTP) behind
+ * the exact same trust fence, the same auth policy and the same same-origin
+ * check. Every other route is POST-only and requires `application/json` (415
+ * otherwise); GET carries its parameters in the query string, ignores a request
+ * body, and needs no content-type. `json=1` is accepted on GET for historical
+ * compatibility with the documented curl examples — every response on every
+ * route is already JSON.
 
  * Security is fail-closed. The routes only exist when the host's `connection`
  * service — the browser authentication + Host/Origin trust fence — is
@@ -33,9 +39,10 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
 import type { ContentHit, ContentIndex } from './content.ts'
 import type { ContentSearchOptions } from './content-search.ts'
-import { readContextLines, runContentSearchRequest, type CallerIdentity, type ContentRequest } from './find.ts'
+import { readContextLines, runContentSearchRequest, type CallerIdentity, type ContentRequest, type ContentRequestResult } from './find.ts'
 import { applyOutputBudget, DEFAULT_OUTPUT_BUDGET_CHARS, type Scope } from './scope.ts'
-import { readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
+import { isAbortError, readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
+import { engineResourceFields, type EngineStatus } from './runtime.ts'
 import {
   executableFileRejection,
   openAtLine,
@@ -120,12 +127,29 @@ export interface CapabilityHttpHandlers {
   preflight: (capability: string, args?: Record<string, unknown>) => Promise<unknown>
 }
 
+/** Optional /combined behavior knobs (0.20.0); every field is additive. */
+export interface CombinedHttpOptions {
+  /** Character budget for one /combined response; 0/undefined keeps it unbudgeted. */
+  combinedBudgetChars?: number
+  /** Parallel stat/hash enrichment limit for /combined. */
+  combinedEnrichConcurrency?: number
+  /** Maximum files hashed per /combined response; 0 disables hashes. */
+  combinedHashMaxHits?: number
+  /** Freshness-cache lifetime for /combined enrichment, in ms (0 disables). */
+  combinedCacheTtlMs?: number
+}
+
+/** Options for {@link registerHttp}. */
+export interface HttpOptions extends CombinedHttpOptions {
+  connectionOptional?: boolean
+}
+
 export function registerHttp(
   ctx: Context,
   rt: LocatorRuntime,
   content?: ContentIndex,
   ensure?: () => void,
-  options: { connectionOptional?: boolean } = {},
+  options: HttpOptions = {},
   capabilities?: CapabilityHttpHandlers,
   scope?: Scope,
 ): void {
@@ -143,7 +167,7 @@ export function registerHttp(
     // so this remains fail-closed.
     const route = (
       path: string,
-      run: (body: Record<string, unknown>) => Promise<unknown>,
+      run: (body: Record<string, unknown>, res: ServerResponse) => Promise<unknown>,
     ): void => {
       scoped.effect(() => server.register({ kind: 'exact', path, auth: 'required', handler: handler(scoped, run, options.connectionOptional === true) }))
     }
@@ -159,7 +183,7 @@ export function registerHttp(
     }))
     route('/dsh-locator/status', async () => await status(rt, content, scope))
     route('/dsh-locator/reveal', async body => await reveal(rt, body))
-    route('/dsh-locator/combined', async body => await combined(rt, content, ensure, body))
+    route('/dsh-locator/combined', async (body, res) => await combined(rt, content, ensure, body, res, options))
     if (content !== undefined) {
       route('/dsh-locator/content/rebuild', async body => {
         ensure?.()
@@ -199,7 +223,7 @@ export function registerHttp(
  */
 function handler(
   scoped: Context,
-  run: (body: Record<string, unknown>) => Promise<unknown>,
+  run: (body: Record<string, unknown>, res: ServerResponse) => Promise<unknown>,
   connectionOptional = false,
 ): (req: IncomingMessage, res: ServerResponse, peer?: unknown) => Promise<void> {
   return async (req, res, peer) => {
@@ -228,10 +252,12 @@ function handler(
       return
     }
     try {
-      const value = await run(body)
+      const value = await run(body, res)
       sendJson(res, 200, { ok: true, ...asRecord(value) })
     } catch (error) {
-      sendJson(res, 200, { ok: false, error: messageOf(error) })
+      // A client disconnect cancels the work; there is nobody left to read the
+      // error, so report it only if the response is still writable.
+      sendJson(res, 200, { ok: false, error: isAbortError(error) ? 'request-aborted' : messageOf(error) })
     }
   }
 }
@@ -267,10 +293,10 @@ function searchHandler(
         return
       }
       try {
-        const value = await search(rt, content, ensure, scope, body)
+        const value = await search(rt, content, ensure, scope, body, res)
         sendJson(res, 200, { ok: true, ...asRecord(value) })
       } catch (error) {
-        sendJson(res, 200, { ok: false, error: messageOf(error) })
+        sendJson(res, 200, { ok: false, error: isAbortError(error) ? 'request-aborted' : messageOf(error) })
       }
       return
     }
@@ -293,10 +319,10 @@ function searchHandler(
       return
     }
     try {
-      const value = await search(rt, content, ensure, scope, body)
+      const value = await search(rt, content, ensure, scope, body, res)
       sendJson(res, 200, { ok: true, ...asRecord(value) })
     } catch (error) {
-      sendJson(res, 200, { ok: false, error: messageOf(error) })
+      sendJson(res, 200, { ok: false, error: isAbortError(error) ? 'request-aborted' : messageOf(error) })
     }
   }
 }
@@ -519,6 +545,87 @@ export function originRejection(headers: IncomingHttpHeaders): 403 | undefined {
 }
 
 /**
+ * Abort signal tied to the response lifecycle.
+ *
+ * Node emits `close` on the response both on a normal finish and on a client
+ * disconnect, so only an unfinished response means "the caller went away".
+ * `req.on('close')` is deliberately not used: Node also emits it when a normal
+ * request has been fully read, which would cancel every POST mid-query.
+ * @param res - the response being written.
+ * @returns the request-scoped signal and a disposer.
+ */
+function abortOnDisconnect(res: ServerResponse): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController()
+  const target = res as unknown as {
+    on?: (event: string, listener: () => void) => unknown
+    off?: (event: string, listener: () => void) => unknown
+    removeListener?: (event: string, listener: () => void) => unknown
+    writableFinished?: boolean
+  }
+  const onClose = (): void => {
+    if (target.writableFinished === true) return
+    if (!controller.signal.aborted) controller.abort()
+  }
+  if (typeof target.on !== 'function') return { signal: controller.signal, dispose: () => {} }
+  try {
+    target.on.call(res, 'close', onClose)
+  } catch {
+    return { signal: controller.signal, dispose: () => {} }
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      const off = typeof target.off === 'function'
+        ? target.off
+        : typeof target.removeListener === 'function'
+          ? target.removeListener
+          : undefined
+      if (off === undefined) return
+      try { off.call(res, 'close', onClose) } catch { /* the response is already gone */ }
+    },
+  }
+}
+
+/**
+ * Wrap one content store so every `search` call carries an AbortSignal.
+ *
+ * The `ContentIndex.search` signature stays positional (find.ts and the tools
+ * call it that way); cancellation travels inside the options object, which the
+ * content layer reads. Every other method is bound to the real store so a class
+ * using private fields keeps working through the proxy.
+ * @param content - the real content store.
+ * @param signal - request-scoped abort signal.
+ * @returns a store view whose searches are cancellable.
+ */
+function withAbortSignal(content: ContentIndex, signal: AbortSignal): ContentIndex {
+  const store = content as unknown as {
+    search: (query: string, limit: number, options?: ContentSearchOptions) => Promise<unknown>
+  }
+  return new Proxy(content as object, {
+    get(object, key) {
+      if (key === 'search') {
+        return (query: string, limit: number, options?: ContentSearchOptions) =>
+          // ContentSearchOptions.signal is declared by content-search.ts; the
+          // content layer cancels the worker (or checks at entry) and rejects
+          // with a DOMException named AbortError.
+          store.search.call(content, query, limit, { ...(options ?? {}), signal })
+      }
+      const value = Reflect.get(object, key)
+      return typeof value === 'function' ? value.bind(content) : value
+    },
+  }) as ContentIndex
+}
+
+/** Engine status through the runtime's 1 s stats cache when it provides one. */
+async function cachedEngineStatus(rt: LocatorRuntime): Promise<EngineStatus | undefined> {
+  const candidate = (rt as unknown as {
+    engineStatusCached?: (ttlMs?: number) => Promise<EngineStatus | undefined>
+  }).engineStatusCached
+  if (typeof candidate === 'function') return await candidate.call(rt, 1_000)
+  return await rt.engineStatus()
+}
+
+/**
  * One search call for both carriers. The result stays additive: the historical
  * total/returned/offset/truncated/tookMs/hits fields are unchanged, and mode,
  * totalCount, nextOffset and budget are added for paging.
@@ -529,6 +636,7 @@ async function search(
   ensure: (() => void) | undefined,
   scopeRules: Scope | undefined,
   raw: Record<string, unknown>,
+  res: ServerResponse,
 ): Promise<unknown> {
   const body = raw as SearchBody
   const mode = body.mode === 'content' || body.mode === 'count' ? body.mode : 'names'
@@ -557,7 +665,17 @@ async function search(
       ...(typeof body.pathPrefix === 'string' && body.pathPrefix !== '' ? { pathPrefix: body.pathPrefix } : {}),
     }
     const caller: CallerIdentity = {}
-    const result = await runContentSearchRequest(content, request, rt.roots, false, caller)
+    // Propagate a client disconnect into the content store: the query runs in a
+    // worker, and without a signal a hung-up GET would still burn a full scan.
+    const controller = abortOnDisconnect(res)
+    const started = Date.now()
+    let result: ContentRequestResult
+    try {
+      result = await runContentSearchRequest(withAbortSignal(content, controller.signal), request, rt.roots, false, caller)
+    } finally {
+      controller.dispose()
+    }
+    const tookMs = Date.now() - started
     if (!result.ok) return { ok: false, mode, query, error: result.error, warnings: result.warnings }
     if (mode === 'count') {
       return {
@@ -568,9 +686,11 @@ async function search(
         contentCount: result.count,
         hits: [],
         truncated: false,
+        tookMs,
       }
     }
     const filtered = scopeRules === undefined ? result.hits : scopeRules.filterContent(result.hits).hits
+    const scopedDropped = result.hits.length - filtered.length
     const withContext = contextLines <= 0
       ? filtered
       : await Promise.all(filtered.map(async hit => {
@@ -579,7 +699,12 @@ async function search(
           return context === undefined ? hit : { ...hit, context: context.lines, contextStart: context.start }
         }))
     const budgeted = applyOutputBudget(withContext, budgetChars)
-    const truncated = result.hits.length >= limit || budgeted.budget.dropped > 0
+    const lossy = scopedDropped > 0 || budgeted.budget.dropped > 0
+    const truncated = result.hits.length >= limit || lossy
+    // Advance by the whole underlying page when the scope filter or the output
+    // budget dropped rows inside it; advancing by the kept prefix would page
+    // into duplicates and need one request per dropped row (0.20.0 P0-15).
+    const nextOffset = offset + (lossy ? result.hits.length : budgeted.items.length)
     return {
       ok: true,
       mode,
@@ -588,8 +713,8 @@ async function search(
       returned: budgeted.items.length,
       offset,
       truncated,
-      ...(truncated ? { nextOffset: offset + budgeted.items.length } : {}),
-      tookMs: 0,
+      ...(truncated ? { nextOffset } : {}),
+      tookMs,
       hits: budgeted.items,
       budget: budgeted.budget,
       count: result.count,
@@ -625,7 +750,9 @@ async function search(
   })
   const scoped = scopeRules === undefined ? mapped : scopeRules.filterSearchable(mapped).hits
   const budgeted = applyOutputBudget(scoped, budgetChars)
-  const truncated = result.truncated || budgeted.budget.dropped > 0 || scoped.length < mapped.length
+  const lossy = scoped.length < mapped.length || budgeted.budget.dropped > 0
+  const truncated = result.truncated || lossy
+  const nextOffset = result.offset + (lossy ? mapped.length : budgeted.items.length)
   return {
     mode: 'names',
     query,
@@ -633,7 +760,7 @@ async function search(
     totalCount: result.total,
     returned: budgeted.items.length,
     offset: result.offset,
-    ...(truncated ? { nextOffset: result.offset + budgeted.items.length } : {}),
+    ...(truncated ? { nextOffset } : {}),
     truncated,
     indexing: result.indexing === true,
     tookMs: result.tookNs / 1e6,
@@ -652,34 +779,47 @@ async function combined(
   content: ContentIndex | undefined,
   ensure: (() => void) | undefined,
   raw: Record<string, unknown>,
+  res: ServerResponse,
+  options: HttpOptions = {},
 ): Promise<unknown> {
   rt.start()
-  const deps: CombinedDeps = {
-    search: async args => await rt.search(args),
-    maxResults: rt.config.maxResults,
-    roots: rt.roots,
-    ...(content === undefined ? {} : {
-      contentSearch: async (query: string, limit: number, options: ContentSearchOptions) =>
-        await content.search(query, limit, options),
-      contentStatus: () => content.status(),
-      contentIndexedMtime: (hit: ContentHit) => content.indexedMtime(hit.kind, hit.path, hit.messageId),
-      ...(ensure === undefined ? {} : { ensure }),
-    }),
-  }
-  const request = readCombinedRequest(raw, rt.config.maxResults)
-  if (request.rootPrefix !== null) {
-    const resolved = resolveWithinRoots(request.rootPrefix, rt.roots)
-    request.rootPrefix = resolved === undefined ? null : resolved.path
-  }
-  const result = await runCombinedSearch(deps, request)
-  return {
-    query: request.query,
-    rootPrefix: request.rootPrefix,
-    matchMode: request.matchMode,
-    caseSensitive: request.caseSensitive,
-    wholeWord: request.wholeWord,
-    sessionId: request.sessionId,
-    ...result,
+  const controller = abortOnDisconnect(res)
+  try {
+    const deps: CombinedDeps = {
+      search: async args => await rt.search(args),
+      maxResults: rt.config.maxResults,
+      roots: rt.roots,
+      ...(content === undefined ? {} : {
+        contentSearch: async (query: string, limit: number, searchOptions: ContentSearchOptions) =>
+          await content.search(query, limit, searchOptions),
+        contentStatus: () => content.status(),
+        contentIndexedMtime: (hit: ContentHit) => content.indexedMtime(hit.kind, hit.path, hit.messageId),
+        ...(ensure === undefined ? {} : { ensure }),
+      }),
+    }
+    const request = readCombinedRequest(raw, rt.config.maxResults)
+    if (request.rootPrefix !== null) {
+      const resolved = resolveWithinRoots(request.rootPrefix, rt.roots)
+      request.rootPrefix = resolved === undefined ? null : resolved.path
+    }
+    const result = await runCombinedSearch(deps, request, {
+      ...(options.combinedBudgetChars === undefined ? {} : { budgetChars: options.combinedBudgetChars }),
+      ...(options.combinedEnrichConcurrency === undefined ? {} : { enrichConcurrency: options.combinedEnrichConcurrency }),
+      ...(options.combinedHashMaxHits === undefined ? {} : { hashMaxHits: options.combinedHashMaxHits }),
+      ...(options.combinedCacheTtlMs === undefined ? {} : { cacheTtlMs: options.combinedCacheTtlMs }),
+      signal: controller.signal,
+    })
+    return {
+      query: request.query,
+      rootPrefix: request.rootPrefix,
+      matchMode: request.matchMode,
+      caseSensitive: request.caseSensitive,
+      wholeWord: request.wholeWord,
+      sessionId: request.sessionId,
+      ...result,
+    }
+  } finally {
+    controller.dispose()
   }
 }
 
@@ -770,10 +910,28 @@ async function openPath(rt: LocatorRuntime, raw: Record<string, unknown>): Promi
   }
 }
 
+/**
+ * Read-only 0.20.0 content diagnostics (coverage/db bytes/refresh mode) as an
+ * optional nested block. The call is O(1) and must never fail the status route.
+ * @param content - the content store.
+ * @returns `{ diagnostics }` or an empty object.
+ */
+export function contentDiagnostics(content: ContentIndex): Record<string, unknown> {
+  const candidate = (content as unknown as { diagnostics?: () => unknown }).diagnostics
+  if (typeof candidate !== 'function') return {}
+  try {
+    const value = candidate.call(content)
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? { diagnostics: value } : {}
+  } catch {
+    return {}
+  }
+}
+
 async function status(rt: LocatorRuntime, content?: ContentIndex, scope?: Scope): Promise<unknown> {
   rt.start()
-  const engine = await rt.engineStatus()
-  const contentState = content === undefined ? { enabled: false } : { enabled: true, ...content.status() }
+  // Served from the pushed stats cache for up to 1 s (0.20.0 P0-12).
+  const engine = await cachedEngineStatus(rt)
+  const contentState = content === undefined ? { enabled: false } : { enabled: true, ...content.status(), ...contentDiagnostics(content) }
   return {
     running: rt.status.running,
     entries: engine?.entries ?? 0,
@@ -798,6 +956,7 @@ async function status(rt: LocatorRuntime, content?: ContentIndex, scope?: Scope)
     scanning: engine?.scanning === true || rt.status.scanning !== undefined,
     stateDir: engine?.stateDir ?? rt.stateDir,
     version: engine?.version ?? '',
+    ...engineResourceFields(engine),
     content: contentState,
     scope: {
       ...(scope?.describe() ?? { notSearchable: [], notReadable: [], notIndexed: [], activeRules: 0 }),

@@ -3,7 +3,7 @@
  * @module dsh-locator/tools
  */
 import type { ContentIndex } from './content.ts';
-import type { LocatorRuntime } from './runtime.ts';
+import { type LocatorRuntime } from './runtime.ts';
 import { Scope } from './scope.ts';
 /** Validated rebuild scope: only narrowing of the configured roots/excludes is allowed. */
 export interface RebuildScope {

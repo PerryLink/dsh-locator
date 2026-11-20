@@ -13,6 +13,16 @@
  * trigram are rejected instead of degrading into a full-table LIKE/GLOB scan,
  * and the whole-word post-filter stops after a fixed number of rows, body bytes
  * or milliseconds and reports a bounded count.
+ *
+ * 0.20.0 adds three policies on top of that:
+ * - adaptive rank (P0-6): one bounded count of the raw match set decides whether
+ *   ORDER BY rank is affordable; wide sets page in rowid order and a cheap JS
+ *   sort orders the fetched page. Whole-word queries never rank.
+ * - split filter SQL (P1-3): the page keeps rowid-subquery filters (narrow
+ *   docs_meta sets turn into FTS rowid probes) while counts use docs-column
+ *   filters and a LIMIT, plus a kind-separated fast path for workspace scope.
+ * - a degraded profile (worker-driven) that forces bounded counts and no rank
+ *   after a query runs past its deadline.
  * @module dsh-locator/content-search
  */
 import type { DatabaseSync } from 'node:sqlite';
@@ -66,6 +76,17 @@ export interface ContentSearchOptions {
      * active session is indexed).
      */
     sessionUnavailable?: 'empty' | 'files-only';
+    /**
+     * Adaptive bm25 ordering (0.20.0, default on). Before paging, one bounded
+     * count of the raw match set decides the plan: up to
+     * RANK_ADAPTIVE_THRESHOLD matches keep ORDER BY rank, a wider set skips the
+     * full-corpus bm25 sort and pages in rowid order with a cheap JS sort. Rank
+     * cost grows with the number of documents that match at all (a word present
+     * in every document costs 70 ms of ranking versus 0.3 ms without rank), so
+     * the probe is cheap and the saving is large. false restores the 0.19
+     * "always rank" behavior for narrow queries.
+     */
+    rankAdaptive?: boolean;
     /** Drop session documents entirely (the unknown-session fallback). */
     excludeSessions?: boolean;
     /** Include archived sessions in this query (panel checkbox or config). */
@@ -86,6 +107,26 @@ export interface ContentSearchOptions {
     fileHitsAllRoots?: boolean;
     /** Override for the whole-word scan caps; production uses the defaults. */
     scanBudget?: ContentScanBudget;
+    /**
+     * Cooperative cancellation hook, installed by the search worker because a
+     * function cannot cross a postMessage boundary. Checked between scan rows
+     * and SQL statements; when it returns true the query stops early and reports
+     * error 'content-search-cancelled'.
+     */
+    isCancelled?: () => boolean;
+    /**
+     * Force the degraded profile: bounded counting and no bm25 sort. The worker
+     * switches it on for a while after a query ran past its deadline (around one
+     * second), so one pathological query cannot repeat on every keystroke.
+     */
+    degrade?: boolean;
+    /**
+     * Abort signal accepted at the ContentIndex layer (see the cancel protocol in
+     * content-search-worker.ts). searchContent is synchronous: it only checks
+     * aborted before starting and then returns 'content-search-cancelled'; the
+     * async layer turns that into an AbortError rejection.
+     */
+    signal?: AbortSignal;
 }
 /** Result of one content query. */
 export interface ContentSearchResult {
@@ -94,6 +135,14 @@ export interface ContentSearchResult {
     warnings: string[];
     error?: string;
 }
+/**
+ * Raw match count above which bm25 ordering stops paying for itself. The probe
+ * that reads it is a bounded count (a few hundred microseconds); ranking costs
+ * O(matches) and is the dominant cost for common words on a multi-GB corpus.
+ */
+export declare const RANK_ADAPTIVE_THRESHOLD = 2000;
+/** Counting cap applied while the worker is in its degraded profile. */
+export declare const DEGRADED_COUNT_LIMIT = 500;
 /** Text escaped for an FTS5 quoted phrase (`"` doubled). */
 export declare function quoteFts(text: string): string;
 /** Escape a literal for SQLite GLOB (`*`, `?`, `[`, `]`). */
@@ -153,11 +202,34 @@ export declare function locateMatch(body: string, terms: readonly string[], case
 /** 1-based line number of a byte offset. */
 export declare function lineOf(body: string, index: number): number;
 /**
+ * Put a read-only content connection into the search profile (P2).
+ *
+ * Search workers each get a 16 MiB page cache and a 256 MiB mmap window so
+ * repeated queries keep their FTS pages warm without touching the build
+ * connection. Failures are ignored: an older SQLite or a filesystem that
+ * rejects mmap must never stop search from working.
+ */
+export declare function configureSearchConnection(db: DatabaseSync): void;
+/**
  * Run one content query.
  *
  * Modes: `normal` (whitespace-separated substring terms), `extended`
  * (Notepad++ escapes, one literal phrase), `regex` (not executed server-side in
  * 0.9.0: returns `content-regex-not-supported`).
+ *
+ * Ordering (0.20.0, P0-6): a wide match set is not sorted by bm25. One bounded
+ * count of the raw match set first, then either ORDER BY rank (narrow) or a
+ * rowid-order page with a cheap JS sort (wide), because rank cost grows with
+ * the number of matching documents and dominates a common-word query. Whole-word
+ * queries never rank: their post-filter rewrites the result set anyway.
+ *
+ * Counting (0.20.0, P1-3): the page uses rowid-subquery filters while the count
+ * uses docs-column filters, and wide filtered sets report a bounded count
+ * instead of paying an O(match-set) exact COUNT.
+ *
+ * Cancellation: synchronous by design, so it only observes an already-aborted
+ * signal or a cancellation hook between SQL statements and scan rows; the async
+ * layer converts a cancelled result into an AbortError rejection.
  */
 export declare function searchContent(db: DatabaseSync, query: string, limit: number, options?: ContentSearchOptions): ContentSearchResult;
 export {};

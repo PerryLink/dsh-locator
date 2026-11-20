@@ -7,10 +7,18 @@
  * scope gating, the lazy-build guard for empty queries, per-group degradation,
  * match-option routing (content vs name engine), page counts and de-duplication
  * of a path that appears both as a body hit and a name hit.
+ *
+ * 0.20.0 (P0-9) moved evidence enrichment off the synchronous path: hit
+ * freshness/permissions/hash are computed with async `stat` calls under a small
+ * concurrency limit and a short TTL cache, so a 9p root no longer blocks the
+ * host event loop. Hashes are capped per page (default 5, `combinedHashMaxHits`)
+ * and skipped on slow/network filesystems. `compact` mode (P1) skips the
+ * enrichment entirely and strips the evidence fields for keystroke requests.
  * @module dsh-locator/combined
  */
 
-import { statSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import type { ContentHit, ContentProgress, ContentState } from './content.ts'
 import { checkContentQuery, decodeExtendedForNames } from './content-search.ts'
 import type {
@@ -23,6 +31,7 @@ import type {
 import { encodeSessionRef, fileRef, freshnessFor, sha256File } from './refs.ts'
 import type { RefFreshness, RefPermissions } from './refs.ts'
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts'
+import type { OutputBudget } from './scope.ts'
 
 /** Attach the citable ref to one content hit (session URI or path snapshot). */
 function contentHitRef<T extends { kind: string; sessionId?: string; path?: string }>(hit: T): T {
@@ -38,13 +47,12 @@ function nameHitRef(hit: SearchHit): SearchHit {
   return hit.dir ? hit : { ...hit, ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }
 }
 
-
-/** Additive evidence metadata attached to one combined hit for the panel. */
+/** One combined hit's additive evidence; every field is absent in compact mode. */
 export interface CombinedHitEvidence {
   /** Freshness of the hit's snapshot against the current bytes. */
-  freshness: RefFreshness
+  freshness?: RefFreshness
   /** The caller may read this hit; visibility mirrors the hit's scope. */
-  permissions: RefPermissions
+  permissions?: RefPermissions
   /** sha256 of the file bytes when cheap to compute (small name hits). */
   hash?: string
 }
@@ -58,8 +66,32 @@ export type CombinedNameHit = SearchHit & CombinedHitEvidence
 /** Only files up to this size get a hash on a name hit (panel evidence detail). */
 export const COMBINED_HASH_MAX_BYTES = 64 * 1024
 
-/** At most this many name hits per page are hashed, keeping keystroke latency low. */
-export const COMBINED_HASH_MAX_HITS = 20
+/** Default cap on hashed files per response (config: combinedHashMaxHits). */
+export const COMBINED_HASH_MAX_HITS = 5
+
+/** Default parallel stat/hash enrichment limit (config: combinedEnrichConcurrency). */
+export const COMBINED_ENRICH_CONCURRENCY = 8
+
+/** Default freshness-cache lifetime; a longer window trades staleness for latency. */
+export const COMBINED_ENRICH_CACHE_TTL_MS = 1_500
+
+/** Optional per-call knobs; the HTTP layer fills them from config. */
+export interface CombinedOptions {
+  /** Parallel stat/hash enrichment limit (default {@link COMBINED_ENRICH_CONCURRENCY}). */
+  enrichConcurrency?: number
+  /** Maximum files hashed per response; 0 disables hashes (default {@link COMBINED_HASH_MAX_HITS}). */
+  hashMaxHits?: number
+  /** Largest file that may be hashed (default {@link COMBINED_HASH_MAX_BYTES}). */
+  hashMaxBytes?: number
+  /** Enrichment TTL cache lifetime in ms; 0 disables the cache (default 1500). */
+  cacheTtlMs?: number
+  /** Skip hashing one path (default: slow/network mounts, 9p included). */
+  skipHash?: (path: string) => boolean
+  /** Character budget for the whole response; 0/undefined keeps it unbudgeted. */
+  budgetChars?: number
+  /** Abort enrichment/queries when the HTTP client goes away. */
+  signal?: AbortSignal
+}
 
 /**
  * Compare one hit snapshot (engine mtime/size) with the current stat. A page is
@@ -86,39 +118,204 @@ function isSha256(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 }
 
+/** Bound one async mapper to a concurrency limit, preserving input order. */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, run: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const width = Math.max(1, Math.trunc(Number.isFinite(limit) ? limit : 1))
+  if (items.length === 0) return []
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = cursor++
+      if (index >= items.length) return
+      results[index] = await run(items[index]!, index)
+    }
+  }
+  const workers: Array<Promise<void>> = []
+  for (let i = 0; i < Math.min(width, items.length); i++) workers.push(worker())
+  await Promise.all(workers)
+  return results
+}
+
+/** Filesystem types whose stat/read latency should not sit on the enrichment path. */
+const NETWORK_FSTYPES = new Set([
+  // WSL 9p/drvfs mounts of Windows drives, SMB/CIFS shares, NFS and network
+  // FUSE filesystems: a stat is acceptable, a full read for sha256 is not.
+  '9p', 'drvfs', 'cifs', 'smb3', 'smb', 'nfs', 'nfs4', 'afs', 'ceph', 'davfs',
+  'glusterfs', 'fuse.sshfs', 'fuse.rclone', 'fuse.9p', 'vboxsf', 'virtiofs',
+])
+
+const MOUNT_CACHE_TTL_MS = 60_000
+let mountCache: { at: number; prefixes: string[] } | undefined
+
+/** Decode the octal escapes /proc/self/mounts uses for spaces and friends. */
+function decodeMountPath(value: string): string {
+  return value
+    .replace(/\\040/g, ' ')
+    .replace(/\\011/g, '\t')
+    .replace(/\\012/g, '\n')
+    .replace(/\\134/g, '\\')
+}
+
+/** Mount points whose filesystem is slow enough to skip hashing (Linux). */
+function slowMountPrefixes(): string[] {
+  if (mountCache !== undefined && Date.now() - mountCache.at < MOUNT_CACHE_TTL_MS) return mountCache.prefixes
+  const prefixes: string[] = []
+  if (process.platform === 'linux') {
+    try {
+      for (const line of readFileSync('/proc/self/mounts', 'utf8').split('\n')) {
+        const parts = line.split(' ')
+        if (parts.length < 3) continue
+        const fstype = parts[2] ?? ''
+        if (!NETWORK_FSTYPES.has(fstype)) continue
+        const mountPoint = decodeMountPath(parts[1] ?? '').replace(/\/+$/, '')
+        if (mountPoint !== '' && mountPoint !== '/') prefixes.push(mountPoint)
+      }
+    } catch {
+      // A container without /proc simply gets no slow-mount hints.
+    }
+  }
+  mountCache = { at: Date.now(), prefixes }
+  return prefixes
+}
+
+/**
+ * Whether hashing this path is likely expensive (9p/CIFS/NFS/sshfs mounts, UNC
+ * shares). Freshness still needs one stat; only the byte-reading hash is skipped.
+ * @param path - absolute path.
+ * @returns true when the path lives on a slow/network filesystem.
+ */
+export function isSlowFilesystemPath(path: string): boolean {
+  if (process.platform === 'win32') return /^\\\\[^\\]+\\/.test(path)
+  if (process.platform === 'darwin') return path.startsWith('/Volumes/')
+  const normalized = path.replace(/\\/g, '/')
+  for (const prefix of slowMountPrefixes()) {
+    if (normalized === prefix || normalized.startsWith(prefix + '/')) return true
+  }
+  return false
+}
+
+/** One cached stat snapshot for the freshness cache. */
+interface CachedStat {
+  at: number
+  mtimeMs: number
+  size: number
+  isFile: boolean
+}
+
+const STAT_CACHE = new Map<string, CachedStat>()
+const HASH_CACHE = new Map<string, { at: number; hash: string | null }>()
+const ENRICH_CACHE_MAX_ENTRIES = 4096
+
+/** Drop every cached enrichment observation (tests and a state-dir switch). */
+export function resetCombinedEnrichCache(): void {
+  STAT_CACHE.clear()
+  HASH_CACHE.clear()
+  mountCache = undefined
+}
+
+/** Read one cache entry, dropping it when it is older than the TTL. */
+function cacheGet<T extends { at: number }>(map: Map<string, T>, key: string, ttlMs: number): T | undefined {
+  if (ttlMs <= 0) return undefined
+  const entry = map.get(key)
+  if (entry === undefined) return undefined
+  if (Date.now() - entry.at >= ttlMs) {
+    map.delete(key)
+    return undefined
+  }
+  return entry
+}
+
+/** Insert one cache entry, keeping the map bounded (oldest insertion first). */
+function cacheSet<T extends { at: number }>(map: Map<string, T>, key: string, value: T): void {
+  map.set(key, value)
+  if (map.size <= ENRICH_CACHE_MAX_ENTRIES) return
+  for (const oldest of map.keys()) {
+    map.delete(oldest)
+    if (map.size <= ENRICH_CACHE_MAX_ENTRIES) break
+  }
+}
+
+/** Current stat behind a short TTL cache; undefined when the path is gone. */
+async function cachedStat(path: string, ttlMs: number): Promise<CachedStat | undefined> {
+  const cached = cacheGet(STAT_CACHE, path, ttlMs)
+  if (cached !== undefined) return cached
+  let entry: CachedStat
+  try {
+    const info = await stat(path)
+    entry = { at: Date.now(), mtimeMs: info.mtimeMs, size: info.size, isFile: info.isFile() }
+  } catch {
+    // Do cache a negative result: a missing page is common while files move.
+    entry = { at: Date.now(), mtimeMs: 0, size: -1, isFile: false }
+  }
+  cacheSet(STAT_CACHE, path, entry)
+  return entry
+}
+
+/** sha256 of one small file behind a TTL cache keyed by the stat identity. */
+async function cachedHash(path: string, mtimeMs: number, size: number, maxBytes: number, ttlMs: number): Promise<string | undefined> {
+  const key = path + '\u0000' + String(mtimeMs) + '\u0000' + String(size)
+  const cached = cacheGet(HASH_CACHE, key, ttlMs)
+  if (cached !== undefined) return cached.hash ?? undefined
+  let hash: string | null = null
+  if (size <= maxBytes) {
+    const computed = await sha256File(path, maxBytes)
+    if (computed !== null && isSha256(computed)) hash = computed
+  }
+  cacheSet(HASH_CACHE, key, { at: Date.now(), hash })
+  return hash ?? undefined
+}
+
+/** Remove the evidence-rich fields from one hit (compact mode). */
+function stripEvidence<T extends Record<string, unknown>>(hit: T): T {
+  const { ref, hash, freshness, permissions, ...rest } = hit
+  void ref
+  void hash
+  void freshness
+  void permissions
+  return rest as T
+}
+
 /** Enrich one page of name hits with freshness, permissions and an optional hash. */
-async function enrichNameHits(hits: readonly SearchHit[]): Promise<CombinedNameHit[]> {
+async function enrichNameHits(hits: readonly SearchHit[], options: ResolvedCombinedOptions): Promise<CombinedNameHit[]> {
   const observedAt = Date.now()
-  let hashed = 0
-  return await Promise.all(hits.map(async hit => {
+  let hashBudget = options.hashMaxHits
+  return await mapLimit(hits, options.enrichConcurrency, async hit => {
     const permissions: RefPermissions = {
       read: 'allowed',
       visibility: 'roots',
       reason: hit.dir ? 'directory hit from the configured index roots' : 'name hit from the configured index roots',
     }
-    let info: ReturnType<typeof statSync> | undefined
-    try { info = statSync(hit.path) } catch { info = undefined }
+    const info = await cachedStat(hit.path, options.cacheTtlMs)
+    const missing = info === undefined || info.size < 0
     const snapshot = hit.dir ? { mtime: hit.mtime } : { mtime: hit.mtime, size: hit.size }
-    const freshness = freshnessForHit(snapshot, info === undefined ? undefined : { mtimeMs: info.mtimeMs, size: info.size }, observedAt)
-    if (hit.dir || info === undefined || !info.isFile()) return { ...hit, freshness, permissions }
+    const freshness = freshnessForHit(
+      snapshot,
+      missing ? undefined : { mtimeMs: info.mtimeMs, size: info.size },
+      observedAt,
+    )
+    if (hit.dir || missing || !info.isFile) return { ...hit, freshness, permissions }
     let hash: string | undefined
-    if (hashed < COMBINED_HASH_MAX_HITS && info.size <= COMBINED_HASH_MAX_BYTES) {
-      hashed += 1
-      const computed = await sha256File(hit.path, COMBINED_HASH_MAX_BYTES)
-      if (computed !== null) hash = computed
+    if (hashBudget > 0 && info.size <= options.hashMaxBytes && !options.skipHash(hit.path)) {
+      hashBudget -= 1
+      hash = await cachedHash(hit.path, info.mtimeMs, info.size, options.hashMaxBytes, options.cacheTtlMs)
     }
     return { ...hit, freshness, permissions, ...(hash === undefined ? {} : { hash }) }
-  }))
+  })
 }
 
 /**
  * Enrich one page of content hits with permissions (always) and freshness when
  * the host supplies a content-index snapshot lookup; a hit that already carries
- * a hash (future find/content field) passes it through unchanged.
+ * a hash (find/content field) passes it through unchanged.
  */
-async function enrichContentHits(hits: readonly (ContentHit & { ref?: string })[], deps: CombinedDeps): Promise<CombinedContentHit[]> {
+async function enrichContentHits(
+  hits: readonly (ContentHit & { ref?: string })[],
+  deps: CombinedDeps,
+  options: ResolvedCombinedOptions,
+): Promise<CombinedContentHit[]> {
   const observedAt = Date.now()
-  return await Promise.all(hits.map(async hit => {
+  return await mapLimit(hits, options.enrichConcurrency, async hit => {
     const permissions: RefPermissions = hit.kind === 'session'
       ? { read: 'allowed', visibility: 'session', reason: 'session messages are scoped to the caller workspace' }
       : { read: 'allowed', visibility: 'roots', reason: 'content hit from the configured index roots' }
@@ -126,9 +323,9 @@ async function enrichContentHits(hits: readonly (ContentHit & { ref?: string })[
     try { indexedAt = deps.contentIndexedMtime?.(hit) } catch { indexedAt = undefined }
     let freshness: RefFreshness = { state: 'unknown', observedAt }
     if (indexedAt !== undefined) {
-      let current: ReturnType<typeof statSync> | undefined
-      try { current = statSync(hit.path) } catch { current = undefined }
-      freshness = current === undefined ? { state: 'missing', observedAt } : freshnessFor(indexedAt, current.mtimeMs, observedAt)
+      const info = await cachedStat(hit.path, options.cacheTtlMs)
+      const missing = info === undefined || info.size < 0
+      freshness = missing ? { state: 'missing', observedAt } : freshnessFor(indexedAt, info.mtimeMs, observedAt)
     }
     const existing = (hit as { hash?: unknown }).hash
     return {
@@ -137,7 +334,7 @@ async function enrichContentHits(hits: readonly (ContentHit & { ref?: string })[
       permissions,
       ...(isSha256(existing) ? { hash: existing } : {}),
     }
-  }))
+  })
 }
 
 /** Strip trailing separators from a root so prefix checks are unambiguous. */
@@ -201,11 +398,13 @@ export interface CombinedRequest {
   /** How much counting work the groups may spend. */
   count: ContentCountMode
   countLimit: number
+  /** Keystroke mode: skip evidence enrichment and strip ref/hash/freshness/permissions. */
+  compact: boolean
 }
 
 /** One name-index group: files or directories. */
 export interface NameGroup {
-  /** Hits carry additive freshness/permissions/hash evidence fields. */
+  /** Hits carry additive freshness/permissions/hash evidence fields (absent in compact). */
   hits: CombinedNameHit[]
   returned: number
   total: number
@@ -221,7 +420,7 @@ export interface NameGroup {
 
 /** The content group: body/session hits plus the index state at query time. */
 export interface ContentGroup {
-  /** Hits carry additive freshness/permissions evidence fields. */
+  /** Hits carry additive freshness/permissions evidence fields (absent in compact). */
   hits: CombinedContentHit[]
   returned: number
   /** True when the group was cut off by its page limit. */
@@ -249,6 +448,10 @@ export interface CombinedResponse {
   content?: ContentGroup
   files?: NameGroup
   dirs?: NameGroup
+  /** True when the response was produced in compact (evidence-free) mode. */
+  compact?: boolean
+  /** Character-budget report; present only when `budgetChars > 0`. */
+  budget?: OutputBudget
   tookMs: number
 }
 
@@ -269,6 +472,40 @@ export interface CombinedDeps {
   roots?: string[]
 }
 
+/** A {@link CombinedOptions} with every default resolved. */
+interface ResolvedCombinedOptions {
+  enrichConcurrency: number
+  hashMaxHits: number
+  hashMaxBytes: number
+  cacheTtlMs: number
+  skipHash: (path: string) => boolean
+  budgetChars: number
+  signal?: AbortSignal
+}
+
+/** Resolve the per-call knobs once per request. */
+function resolveOptions(options: CombinedOptions): ResolvedCombinedOptions {
+  const positiveInt = (value: number | undefined, fallback: number): number => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+    return Math.max(0, Math.trunc(value))
+  }
+  return {
+    enrichConcurrency: Math.max(1, positiveInt(options.enrichConcurrency, COMBINED_ENRICH_CONCURRENCY)),
+    hashMaxHits: positiveInt(options.hashMaxHits, COMBINED_HASH_MAX_HITS),
+    hashMaxBytes: positiveInt(options.hashMaxBytes, COMBINED_HASH_MAX_BYTES) || COMBINED_HASH_MAX_BYTES,
+    cacheTtlMs: positiveInt(options.cacheTtlMs, COMBINED_ENRICH_CACHE_TTL_MS),
+    skipHash: options.skipHash ?? isSlowFilesystemPath,
+    budgetChars: positiveInt(options.budgetChars, 0),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  }
+}
+
+/** Whether one error is the abort rejection of a cancelled store query. */
+export function isAbortError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'AbortError') return true
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ABORT_ERR'
+}
+
 /**
  * Read the three scope flags from a request body. Anything that is not an
  * explicit `false` counts as enabled, so a panel that only sends `{ content:
@@ -282,6 +519,11 @@ export function readScopes(body: Record<string, unknown>): CombinedScopes {
     files: body.files !== false,
     dirs: body.dirs !== false,
   }
+}
+
+/** Accept the compact spellings the panel/plan use: true, 1 and "1". */
+function compactFlag(value: unknown): boolean {
+  return value === true || value === 1 || value === '1'
 }
 
 /**
@@ -313,6 +555,7 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
     includeArchived: body.includeArchived === true,
     count: countMode(body.count),
     countLimit: clamp(body.countLimit, 1, 5000, 1000),
+    compact: compactFlag(body.compact),
   }
 }
 
@@ -349,11 +592,17 @@ export function dedupeNameHits<T extends SearchHit>(
  * minutes and gigabytes for no results. Failures are contained per group so a
  * broken content cache still shows name results.
  * @param deps - stores and the lazy-start hook.
- * @param request - normalized request.
+ * @param input - normalized request.
+ * @param options - per-call enrichment/budget knobs (config-backed).
  * @returns grouped result in content → files → dirs order.
  */
-export async function runCombinedSearch(deps: CombinedDeps, input: CombinedRequest): Promise<CombinedResponse> {
+export async function runCombinedSearch(
+  deps: CombinedDeps,
+  input: CombinedRequest,
+  options: CombinedOptions = {},
+): Promise<CombinedResponse> {
   const started = Date.now()
+  const resolved = resolveOptions(options)
   const request = input.rootPrefix === null
     ? input
     : { ...input, rootPrefix: authorizedRootPrefix(input.rootPrefix, deps.roots ?? []) }
@@ -365,9 +614,9 @@ export async function runCombinedSearch(deps: CombinedDeps, input: CombinedReque
   // the panel can show `content-query-too-short` without starting a build.
   const askContent = wantsContent && query.trim() !== ''
 
-  const contentPromise = wantsContent ? contentGroup(deps, request, askContent) : Promise.resolve(undefined)
-  const filesPromise = scopes.files ? nameGroup(deps, request, true) : Promise.resolve(undefined)
-  const dirsPromise = scopes.dirs ? nameGroup(deps, request, false) : Promise.resolve(undefined)
+  const contentPromise = wantsContent ? contentGroup(deps, request, askContent, resolved) : Promise.resolve(undefined)
+  const filesPromise = scopes.files ? nameGroup(deps, request, true, resolved) : Promise.resolve(undefined)
+  const dirsPromise = scopes.dirs ? nameGroup(deps, request, false, resolved) : Promise.resolve(undefined)
   const [content, files, dirs] = await Promise.all([contentPromise, filesPromise, dirsPromise])
 
   const dedupedFiles = files === undefined
@@ -383,18 +632,72 @@ export async function runCombinedSearch(deps: CombinedDeps, input: CombinedReque
         }
       })()
 
-  return {
+  const response: CombinedResponse = {
     scopes,
     contentEnabled,
     ...(content === undefined ? {} : { content }),
     ...(dedupedFiles === undefined ? {} : { files: dedupedFiles }),
     ...(dirs === undefined ? {} : { dirs }),
+    ...(request.compact ? { compact: true } : {}),
     tookMs: Date.now() - started,
   }
+  if (resolved.budgetChars > 0) applyCombinedBudget(response, resolved.budgetChars)
+  return response
+}
+
+/**
+ * Fit a combined response inside a character budget by dropping the tail of the
+ * lowest-priority groups first: dirs, then files, then content hits. Structural
+ * fields (counts, state, warnings) are always kept; each trimmed group reports
+ * `returned`/`truncated` and the response carries a {@link OutputBudget} block.
+ * @param response - response to trim in place.
+ * @param limitChars - soft cap on the serialized response size.
+ */
+export function applyCombinedBudget(response: CombinedResponse, limitChars: number): void {
+  const budget: OutputBudget = { limitChars, usedChars: 0, truncated: false, dropped: 0 }
+  response.budget = budget
+  const measure = (): number => JSON.stringify(response).length
+  const sizeOf = (hit: unknown): number => JSON.stringify(hit).length + 1
+  const groups: Array<ContentGroup | NameGroup> = []
+  if (response.dirs !== undefined) groups.push(response.dirs)
+  if (response.files !== undefined) groups.push(response.files)
+  if (response.content !== undefined) groups.push(response.content)
+  // Cheap estimate first: base (no hits) plus an approximate per-hit cost.
+  let estimate = measure()
+  for (const group of groups) {
+    for (const hit of group.hits) estimate += sizeOf(hit)
+    estimate -= JSON.stringify(group.hits).length
+  }
+  for (const group of groups) {
+    if (group.hits.length === 0) continue
+    const hits = group.hits as unknown[]
+    while (hits.length > 0 && estimate > limitChars) {
+      const removed = hits.pop() as unknown
+      estimate -= sizeOf(removed)
+      budget.dropped += 1
+      group.returned = hits.length
+      group.truncated = true
+    }
+    if (measure() <= limitChars) break
+  }
+  // The estimate ignores commas; if the real payload is still too big, trim by
+  // measuring (the page is bounded, so this loop is short).
+  for (const group of groups) {
+    while (group.hits.length > 0 && measure() > limitChars) {
+      group.hits.pop()
+      budget.dropped += 1
+      group.returned = group.hits.length
+      group.truncated = true
+    }
+    if (measure() <= limitChars) break
+  }
+  const size = measure()
+  budget.usedChars = size
+  budget.truncated = budget.dropped > 0 || size > limitChars
 }
 
 /** Page through a directory-shaped name query. */
-async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: boolean): Promise<NameGroup> {
+async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: boolean, options: ResolvedCombinedOptions): Promise<NameGroup> {
   const started = Date.now()
   const empty = (error?: string, warnings?: string[]): NameGroup => ({
     hits: [],
@@ -435,7 +738,12 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
     })
     const prefix = request.rootPrefix
     const selected = prefix === null ? result.hits : result.hits.filter(hit => pathUnderPrefix(hit.path, prefix))
-    const hits = await enrichNameHits(selected.map(nameHitRef))
+    let hits: CombinedNameHit[]
+    if (request.compact) {
+      hits = (prefix === null ? result.hits : selected).map(hit => stripEvidence(hit as SearchHit & Record<string, unknown>) as CombinedNameHit)
+    } else {
+      hits = await enrichNameHits(selected.map(nameHitRef), options)
+    }
     const narrowed = prefix !== null && hits.length !== result.hits.length
     return {
       hits,
@@ -451,12 +759,18 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
       ...(warnings.length === 0 ? {} : { warnings: [...new Set(warnings)] }),
     }
   } catch (error) {
+    if (isAbortError(error)) throw error
     return { ...empty(messageOf(error)), tookMs: Date.now() - started }
   }
 }
 
 /** Query the content store, or report its state without starting a build. */
-async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: boolean): Promise<ContentGroup> {
+async function contentGroup(
+  deps: CombinedDeps,
+  request: CombinedRequest,
+  ask: boolean,
+  options: ResolvedCombinedOptions,
+): Promise<ContentGroup> {
   const started = Date.now()
   const empty = (warnings: string[] = []): ContentGroup => {
     let state: ContentState | undefined
@@ -490,7 +804,7 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     return { ...empty(check.warnings), error: check.error ?? 'content-query-invalid', tookMs: Date.now() - started }
   }
   if (check.terms.length === 0) return empty()
-  const options: ContentSearchOptions = {
+  const options_: ContentSearchOptions = {
     matchMode: request.matchMode,
     caseSensitive: request.caseSensitive,
     wholeWord: request.wholeWord,
@@ -500,12 +814,20 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
     ...(request.sessionId === null ? {} : { sessionId: request.sessionId }),
     ...(request.rootPrefix === null ? {} : { pathPrefix: request.rootPrefix }),
     ...(request.includeArchived ? { includeArchived: true } : {}),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
   }
   try {
     deps.ensure?.()
-    const result = await deps.contentSearch(request.query, request.contentLimit, options)
+    const queryStarted = Date.now()
+    const result = await deps.contentSearch(request.query, request.contentLimit, options_)
+    // tookMs is the store's own query cost, matching the name group's
+    // engine-reported tookMs; enrichment is reported by the group's latency only.
+    const queryTookMs = Date.now() - queryStarted
     const state = deps.contentStatus?.()
-    const hits = await enrichContentHits(result.hits.map(contentHitRef), deps)
+    const rawHits = request.compact
+      ? result.hits.map(hit => stripEvidence(hit as ContentHit & Record<string, unknown>) as ContentHit & { ref?: string })
+      : result.hits.map(contentHitRef)
+    const hits = request.compact ? rawHits as CombinedContentHit[] : await enrichContentHits(rawHits, deps, options)
     return {
       hits,
       returned: hits.length,
@@ -518,10 +840,11 @@ async function contentGroup(deps: CombinedDeps, request: CombinedRequest, ask: b
       messages: state?.messages ?? 0,
       truncated: state?.truncated ?? false,
       ...(state?.progress === undefined ? {} : { progress: state.progress }),
-      tookMs: Date.now() - started,
+      tookMs: queryTookMs,
       ...(result.error === undefined ? {} : { error: result.error }),
     }
   } catch (error) {
+    if (isAbortError(error)) throw error
     return { ...empty(), error: messageOf(error), tookMs: Date.now() - started }
   }
 }

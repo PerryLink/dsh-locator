@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
@@ -26,7 +27,7 @@ type volumeGroup struct {
 // tryUSNScan enumerates each involved volume's MFT. It returns handled=false
 // (with no error) when USN is unavailable on any volume, so the caller can
 // fall back to the portable walk.
-func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []string) (bool, Stats, error) {
+func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []string, excl *Excluder) (bool, Stats, error) {
 	start := time.Now()
 	groups := make(map[string]*volumeGroup, 2)
 	for _, root := range roots {
@@ -89,6 +90,9 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 			Roots:      group.roots,
 			Excludes:   opt.Excludes,
 		})
+		// BuildItems knows the pre-0.20 exclude globs; the cache-tree rule and
+		// the precompiled matcher live in Excluder, so filter here as well.
+		items, buildStats = filterUSNItems(items, excl, buildStats)
 		for _, root := range group.roots {
 			ix.AddRoot(root)
 			if info, statErr := os.Stat(root); statErr == nil {
@@ -108,17 +112,78 @@ func tryUSNScan(ctx context.Context, ix *index.Index, opt Options, roots []strin
 		st.Files += buildStats.Files
 		st.Dirs += buildStats.Dirs
 		st.Skipped += buildStats.Skipped
-		startChangeWatcher(ctx, volume, journal, records, group, ix, opt)
+		startChangeWatcher(ctx, volume, journal, records, group, ix, opt, excl)
 	}
 	st.Took = time.Since(start)
 	return true, st, nil
+}
+
+// filterUSNItems drops MFT items that only the cache-tree rule (or a glob the
+// USN applier cannot express) excludes, and keeps the build statistics honest.
+func filterUSNItems(items []index.AddItem, excl *Excluder, st usn.BuildStats) ([]index.AddItem, usn.BuildStats) {
+	if excl == nil || excl.Empty() {
+		return items, st
+	}
+	kept := items[:0]
+	for _, item := range items {
+		if excl.SkipPath(item.Path, item.Info.Mode.IsDir()) {
+			st.Skipped++
+			st.Entries--
+			if item.Info.Mode.IsDir() {
+				st.Dirs--
+			} else {
+				st.Files--
+			}
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept, st
+}
+
+// filterUSNRecords resolves each journal record to its current path and drops
+// the ones inside an excluded subtree, so the change applier stays consistent
+// with the portable scanner default.
+func filterUSNRecords(records []usn.Record, paths usn.ChangePaths, excl *Excluder) []usn.Record {
+	if excl == nil || excl.Empty() {
+		return records
+	}
+	kept := records[:0]
+	for _, record := range records {
+		if record.Name == "" {
+			kept = append(kept, record)
+			continue
+		}
+		parent := paths[record.ParentFRN]
+		if parent == "" {
+			kept = append(kept, record)
+			continue
+		}
+		if excl.SkipPath(joinUSNPath(parent, record.Name), record.IsDir()) {
+			continue
+		}
+		kept = append(kept, record)
+	}
+	return kept
+}
+
+// joinUSNPath mirrors the separator handling of the journal applier.
+func joinUSNPath(parent, name string) string {
+	sep := "\\"
+	if strings.Contains(parent, "/") {
+		sep = "/"
+	}
+	if strings.HasSuffix(parent, sep) {
+		return parent + name
+	}
+	return parent + sep + name
 }
 
 // startChangeWatcher polls the change journal and applies create/delete/rename
 // records. It owns the volume handle from here on and closes it when ctx ends.
 // Failures are reported once and stop the watcher; the portable watcher and
 // locator_rebuild remain available.
-func startChangeWatcher(ctx context.Context, volume *usn.Volume, journal usn.Journal, records []usn.Record, group *volumeGroup, ix *index.Index, opt Options) {
+func startChangeWatcher(ctx context.Context, volume *usn.Volume, journal usn.Journal, records []usn.Record, group *volumeGroup, ix *index.Index, opt Options, excl *Excluder) {
 	paths := usn.PathsFromRecords(records, group.root)
 	go func() {
 		defer volume.Close()
@@ -141,6 +206,13 @@ func startChangeWatcher(ctx context.Context, volume *usn.Volume, journal usn.Jou
 			}
 			if len(batch) == 0 {
 				continue
+			}
+			before := len(batch)
+			batch = filterUSNRecords(batch, paths, excl)
+			if len(batch) < before {
+				// Dropped records can still affect path resolution for later
+				// journal entries; keeping the filtered set consistent is enough
+				// because a later full refresh converges.
 			}
 			usn.ApplyChanges(batch, paths, ix, opt.Excludes, group.roots)
 			lastUSN = batch[len(batch)-1].USN + 1

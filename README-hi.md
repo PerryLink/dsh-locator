@@ -92,7 +92,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # संस्करण तय करें
-dsh plugin --profile web add dsh-locator@0.19.3
+dsh plugin --profile web add dsh-locator@0.20.0
 
 # GitHub मुख्य ब्रांच
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -240,7 +240,7 @@ Web GUI में कहीं भी `Ctrl+Shift+F` दबाएँ, या ब
 | `refreshIntervalMs` | `1800000` | नेटिव watcher न होने पर रीबिल्ड अंतराल (kqueue या watcher विफलता); `0` बंद। |
 | `scanWorkers` | `0` | स्कैन में डायरेक्टरी पढ़ने की समानांतरता; `0` = CPU संख्या। |
 | `windowsUsn` | `false` | वॉक से पहले NTFS USN/MFT आज़माएँ (Windows, एडमिन; विफलता पर अपने आप वॉक)। |
-| `memoryLimitMB` | `0` | इंजन का Go सॉफ़्ट हीप लिमिट (MiB); `0` = `GOMEMLIMIT`/`GOGC` पर छोड़ें। |
+| `memoryLimitMB` | `0` | Go सॉफ़्ट हीप लिमिट (MiB); `0` = auto (RAM का 25%, 384–1024 MiB); धनात्मक मान स्थिर करता है। |
 | `contentIndex` | `true` | बॉडी और सेशन-संदेश इंडेक्स बनाएँ; `false` पर केवल नाम खोज, कंटेंट लागत लगभग शून्य। |
 | `contentLazy` | `true` | कंटेंट इंडेक्स पहली सामग्री खोज पर बनाएँ, शुरू में नहीं। |
 | `contentMaxFileBytes` | `1000000` | एक टेक्स्ट फ़ाइल से पढ़े जाने वाले बाइट। |
@@ -404,7 +404,19 @@ DeepSeek Harness
 
 ## मेमोरी
 
-इंजन एक Go प्रोसेस है और मानक `GOMEMLIMIT` और `GOGC` (या कॉन्फ़िग में `memoryLimitMB`) मानता है। 1.2–1.5 M एंट्री का इंडेक्स डिफ़ॉल्ट GC के साथ कई सौ MB RSS तक जाता है; होस्ट पर RAM कम हो तो `GOMEMLIMIT=600MiB` (सॉफ़्ट सीमा, रनटाइम CPU देकर मेमोरी बचाता है) या `GOGC=50` रखें। इनसे स्नैपशॉट फ़ॉर्मेट नहीं बदलता। ऊपर के आँकड़ों वाले लाइव सेटअप में DSH होस्ट प्रोसेस (कंटेंट डेटाबेस पेज कैश सहित) इंडेक्स बने रहने पर लगभग 700 MB RSS पर था, और खाली बैठे होस्ट की देरी p50 2ms रही।
+इंजन एक Go प्रोसेस है; `GOMEMLIMIT`/`GOGC` और `memoryLimitMB` मानता है, जहाँ `0` (डिफ़ॉल्ट) auto सीमा निकालता है (RAM का 25%, 384–1024 MiB)। 0.20 इंजन 1.5 M एंट्री का snapshot ~186 MB heap में लोड करता है और watcher के साथ ~335 MB RSS पर रहता है (512 MiB सीमा); पिछला संस्करण वहीं ~700 MB लेता था। स्नैपशॉट फ़ॉर्मेट नहीं बदलता। कंटेंट DB पेज कैश सहित DSH होस्ट प्रोसेस लाइव सेटअप में ~700 MB RSS और idle देरी p50 2 ms रही।
+
+## 0.20.0 अपग्रेड नोट्स
+
+- **डिफ़ॉल्ट इंडेक्स सीमा**: toolchain/package caches (`~/go/pkg/mod`, `.cargo*`, `.rustup`, `.local/lib`, pnpm store, ...) अब नाम इंडेक्स/वॉचर से डिफ़ॉल्ट रूप से बाहर हैं (~75% कम entries); `includeCaches: true` पुराना व्यवहार लौटाता है। पुराने 0.19 snapshots पहली diff refresh में सिमट जाते हैं; तुरंत के लिए `locator_rebuild`।
+- **मेमोरी और persistence**: `memoryLimitMB: 0` अब auto (RAM का 25%, 384–1024 MiB); snapshot streaming load (~81 MB कम), one-pass pinyin/fold, autosave अंतिम बदलाव पर (80–90% कम लिखावट), save बिना read-lock, compaction write-lock के बाहर (5% threshold), वैकल्पिक zstd और base+journal incremental snapshot।
+- **Watcher/refresh**: Linux watcher मेमोरी इंडेक्स से सीधे लगता है (पूरा walk नहीं), async, `watchMaxDirs` सीमा; 9p/DrvFs roots upsert-diff (बदलाव न हो तो लिखावट नहीं, exponential backoff)।
+- **खोज**: नाम क्वेरी 27–88% कम CPU; सामान्य शब्दों पर content 10–80× तेज़ (adaptive bm25, page/count SQL, TTL+LRU cache, cancellation, 2 workers)।
+- **कंटेंट इंडेक्स**: generation fast path (<0.3 s बिना बदलाव), budget eviction + coverage, 250-write transactions, FTS optimize, 500 symbols/file, worker में extraction (8 MiB), streaming sessions + incremental tail + 64 MiB head cap, adaptive throttling।
+- **पैनल/HTTP**: `/combined` async + `compact`, disconnect पर cancel, दो-चरण खोज (नाम ~90 ms, 300 ms बाद content, <3 अक्षर पर content नहीं, LRU 20), 300 पंक्ति सीमा + incremental loadMore।
+- **कॉन्फ़िगरेशन**: 17 नई keys (अंग्रेज़ी तालिका देखें); `contentExtractMaxBytes` अब 8 MiB; `memoryLimitMB=0` का अर्थ अब auto।
+- **व्यवहार परिवर्तन**: caches डिफ़ॉल्ट रूप से नाम-खोज में नहीं; `status.builtAt` ms में; watcher async install के दौरान `watching` कुछ समय false। FTS schema v4 स्थगित (~100 MB लाभ बनाम 4 GB migration)।
+- `443 tests`; छह engines 0.20.0 पर rebuild।
 
 ## 0.19.2 अपग्रेड नोट्स
 

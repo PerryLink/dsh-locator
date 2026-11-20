@@ -3,7 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Config } from '../src/config.ts'
-import { engineServeArgs, LocatorRuntime } from '../src/runtime.ts'
+import {
+  AUTO_MEMORY_MAX_MB,
+  AUTO_MEMORY_MIN_MB,
+  LocatorRuntime,
+  autoMemoryLimitMB,
+  engineResourceFields,
+  engineServeArgs,
+} from '../src/runtime.ts'
 
 const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, process.platform === 'win32' ? 'indexd.exe' : 'indexd')
 
@@ -57,16 +64,178 @@ afterAll(() => {
   for (const cleanup of cleanups.reverse()) cleanup()
 })
 
+/** A runtime whose RPC layer is replaced by one capturing callback. */
+function fakeRpcRuntime(): { rt: LocatorRuntime; calls: Array<{ method: string; params: Record<string, unknown> }> } {
+  const rt = new LocatorRuntime(config(), [], '/state', '/nonexistent-indexd', process.cwd())
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+  Object.assign(rt, {
+    request: async (method: string, params: Record<string, unknown> = {}) => {
+      calls.push({ method, params })
+      return {}
+    },
+  })
+  return { rt, calls }
+}
+
+/** One engine status payload as the engine will send it in 0.20.0. */
+function statusPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: '0.20.0',
+    platform: 'linux/amd64',
+    roots: ['/root'],
+    entries: 5,
+    files: 4,
+    dirs: 1,
+    nameBytes: 100,
+    deleted: 0,
+    watching: true,
+    scanning: false,
+    usn: false,
+    uptimeSec: 3,
+    stateDir: '/state',
+    ...overrides,
+  }
+}
+
+describe('automatic memory limit', () => {
+  it('clamps a quarter of physical memory to 384-1024 MiB', () => {
+    expect(AUTO_MEMORY_MIN_MB).toBe(384)
+    expect(AUTO_MEMORY_MAX_MB).toBe(1024)
+    expect(autoMemoryLimitMB(512 * 1024 * 1024)).toBe(384) // 128 -> clamped up
+    expect(autoMemoryLimitMB(2 * 1024 * 1024 * 1024)).toBe(512) // 512 exactly
+    expect(autoMemoryLimitMB(8 * 1024 * 1024 * 1024)).toBe(1024) // 2048 -> clamped down
+    expect(autoMemoryLimitMB(15.7 * 1024 * 1024 * 1024)).toBe(1024)
+    expect(autoMemoryLimitMB(0)).toBe(384)
+    expect(autoMemoryLimitMB(Number.NaN)).toBe(384)
+  })
+})
+
 describe('engine serve arguments', () => {
   it('passes the incremental-refresh switch only when it is explicitly off', () => {
     const base = config()
     const incremental = engineServeArgs(base, ['/root'], '/state')
-    expect(incremental).toEqual(['serve', '--state', '/state', '--root', '/root', '--exclude', 'node_modules', '--exclude', '.git', '--refresh', '1800000ms'])
+    // memoryLimitMB is always present now; 0 means the machine-sized auto value.
+    expect(incremental).toEqual([
+      'serve', '--state', '/state', '--root', '/root',
+      '--exclude', 'node_modules', '--exclude', '.git',
+      '--refresh', '1800000ms',
+      '--memory-limit-mb', String(autoMemoryLimitMB()),
+    ])
     expect(engineServeArgs({ ...base, watch: false }, ['/root'], '/state')).toContain('--no-watch')
     const legacy = engineServeArgs({ ...base, refreshIncremental: false }, ['/root'], '/state')
     expect(legacy).toContain('--no-incremental-refresh')
     const explicit = engineServeArgs({ ...base, refreshIncremental: true }, ['/root'], '/state')
     expect(explicit).not.toContain('--no-incremental-refresh')
+  })
+
+  it('pins an explicit memory limit instead of the automatic one', () => {
+    const args = engineServeArgs({ ...config(), memoryLimitMB: 512 }, ['/root'], '/state')
+    expect(args[args.indexOf('--memory-limit-mb') + 1]).toBe('512')
+    // A fractional value is truncated to whole MiB.
+    const fractional = engineServeArgs({ ...config(), memoryLimitMB: 400.9 }, ['/root'], '/state')
+    expect(fractional[fractional.indexOf('--memory-limit-mb') + 1]).toBe('400')
+  })
+
+  it('passes the 0.20.0 resource flags only when configured', () => {
+    const base = config()
+    expect(engineServeArgs(base, ['/root'], '/state')).not.toContain('--include-caches')
+    expect(engineServeArgs({ ...base, includeCaches: true }, ['/root'], '/state')).toContain('--include-caches')
+
+    // Hand-built configs without the optional fields keep the engine defaults.
+    expect(engineServeArgs(base, ['/root'], '/state')).not.toContain('--watch-max-dirs')
+    const limited = engineServeArgs({ ...base, watchMaxDirs: 60_000 }, ['/root'], '/state')
+    expect(limited[limited.indexOf('--watch-max-dirs') + 1]).toBe('60000')
+    expect(engineServeArgs({ ...base, watchMaxDirs: 0 }, ['/root'], '/state')).not.toContain('--watch-max-dirs')
+
+    // Compression stays opt-in so the pre-wave2 engine never sees an unknown flag.
+    expect(engineServeArgs({ ...base, snapshotCompression: 'none' }, ['/root'], '/state')).not.toContain('--snapshot-compression')
+    const zstd = engineServeArgs({ ...base, snapshotCompression: 'zstd' }, ['/root'], '/state')
+    expect(zstd[zstd.indexOf('--snapshot-compression') + 1]).toBe('zstd')
+  })
+})
+
+describe('dump narrowing options', () => {
+  it('forwards since/mtimeFrom only when they are positive finite numbers', async () => {
+    const { rt, calls } = fakeRpcRuntime()
+    await rt.dump(0, 100)
+    await rt.dump(5, 50, { since: 7, mtimeFrom: 1_700_000_000_000 })
+    await rt.dump(0, 10, { since: 0, mtimeFrom: -1 })
+    expect(calls.map(call => call.params)).toEqual([
+      { after: 0, limit: 100 },
+      { after: 5, limit: 50, since: 7, mtimeFrom: 1_700_000_000_000 },
+      { after: 0, limit: 10 },
+    ])
+    expect(calls.every(call => call.method === 'dump')).toBe(true)
+  })
+})
+
+describe('engine status cache', () => {
+  it('serves a fresh stats copy within the TTL and refreshes after it', async () => {
+    const { rt, calls } = fakeRpcRuntime()
+    let statusCalls = 0
+    Object.assign(rt, {
+      request: async (method: string) => {
+        calls.push({ method, params: {} })
+        if (method !== 'status') return {}
+        statusCalls++
+        return statusPayload()
+      },
+    })
+    const first = await rt.engineStatusCached(1_000)
+    expect(first?.entries).toBe(5)
+    expect(statusCalls).toBe(1)
+    // A second poll within the TTL must not pay another IPC round-trip.
+    const second = await rt.engineStatusCached(1_000)
+    expect(second).toBe(first)
+    expect(statusCalls).toBe(1)
+    // TTL 0 forces a real refresh.
+    await rt.engineStatusCached(0)
+    expect(statusCalls).toBe(2)
+  })
+
+  it('copies the 0.20.0 observability fields off the status payload', async () => {
+    const { rt } = fakeRpcRuntime()
+    Object.assign(rt, {
+      request: async (method: string) => method === 'status'
+        ? statusPayload({
+            rssBytes: 123_456_789,
+            hwmBytes: 200_000_000,
+            watchDirs: 55_000,
+            watchLimit: 120_000,
+            watchLimited: true,
+            watchInitializing: true,
+            snapshotBytes: 40_000_000,
+            saveBytes: 39_000_000,
+            saveMs: 210,
+            saveCount: 3,
+            generation: 42,
+            builtAt: 1_700_000_000_000,
+            queueDepth: 2,
+            queryCount: 9,
+            lastQueryMs: 1.5,
+            recentQueryMs: [1, 2, 2.5],
+            heapBytes: 90_000_000,
+            numGC: 7,
+            refreshBackoffMs: 4_000,
+          })
+        : {},
+    })
+    const engine = await rt.engineStatus()
+    expect(engine).toMatchObject({
+      rssBytes: 123_456_789,
+      watchDirs: 55_000,
+      watchLimit: 120_000,
+      watchLimited: true,
+      watchInitializing: true,
+      snapshotBytes: 40_000_000,
+      generation: 42,
+      builtAt: 1_700_000_000_000,
+      recentQueryMs: [1, 2, 2.5],
+    })
+    const fields = engineResourceFields(engine)
+    expect(fields).toMatchObject({ rssBytes: 123_456_789, saveCount: 3, recentQueryMs: [1, 2, 2.5] })
+    expect(fields).not.toHaveProperty('version')
+    expect(engineResourceFields(undefined)).toEqual({})
   })
 })
 
@@ -120,6 +289,15 @@ describe.skipIf(!existsSync(binary))('locator engine integration', () => {
     const status = await rt.engineStatus()
     expect(status?.entries).toBeGreaterThanOrEqual(6)
     expect(status?.watching).toBe(true)
+
+    // A first dump page reports a generation; asking again with the same
+    // generation short-circuits to the unchanged fast path.
+    const page = await rt.dump(0, 100)
+    expect(typeof page.generation).toBe('number')
+    const since = page.generation
+    const again = await rt.dump(0, 100, since === undefined ? {} : { since })
+    expect(again.unchanged).toBe(true)
+    expect(again.entries).toEqual([])
 
     await rt.stop()
   })

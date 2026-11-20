@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { strToU8, zipSync } from 'fflate'
 import { afterAll, describe, expect, it } from 'vitest'
-import { DOCUMENT_TEXT_EMPTY, DOCUMENT_TOO_LARGE, documentExtractFailed, documentFormat, extractDocument } from '../src/extract.ts'
+import { DOCUMENT_EXTRACT_TIMEOUT, DOCUMENT_TEXT_EMPTY, DOCUMENT_TOO_LARGE, documentExtractFailed, documentFormat, extractDocument, extractDocumentFromBuffer } from '../src/extract.ts'
 
 const cleanups: Array<() => void> = []
 afterAll(() => { for (const cleanup of cleanups.reverse()) cleanup() })
@@ -243,5 +243,37 @@ describe('extractDocument', () => {
   it('returns null for a missing file', async () => {
     const dir = tempDir('locator-extract-missing-')
     expect(await extractDocument(join(dir, 'missing.pdf'), { maxBytes: 1000 })).toBeNull()
+  })
+})
+
+describe('extractDocumentFromBuffer (P1 extraction worker seam)', () => {
+  it('extracts from bytes without reading the file again', async () => {
+    const data = minimalDocx('buffered locator marker')
+    const result = await extractDocumentFromBuffer('/virtual/sample.docx', Buffer.from(data), { maxBytes: 10 * 1024 * 1024 })
+    expect(result?.format).toBe('docx')
+    expect(result?.text).toContain('buffered locator marker')
+  })
+
+  it('enforces maxBytes on the supplied bytes', async () => {
+    const sink = warningSink()
+    const result = await extractDocumentFromBuffer('/virtual/sample.docx', Buffer.from(minimalDocx('too big')), { maxBytes: 4, onWarning: sink.onWarning })
+    expect(result).toBeNull()
+    expect(sink.codes).toEqual([DOCUMENT_TOO_LARGE])
+  })
+
+  it('returns null for a non-document path', async () => {
+    expect(await extractDocumentFromBuffer('/virtual/notes.txt', Buffer.from('plain'), { maxBytes: 100 })).toBeNull()
+  })
+
+  it('stops a long PDF at the cooperative deadline', async () => {
+    const pages = Array.from({ length: 300 }, (_, index) => 'page marker ' + String(index))
+    const sink = warningSink()
+    const result = await extractDocumentFromBuffer('/virtual/long.pdf', minimalPdf(pages), {
+      maxBytes: 10 * 1024 * 1024,
+      maxMs: 1,
+      onWarning: sink.onWarning,
+    })
+    expect(result).toBeNull()
+    expect(sink.codes).toContain(DOCUMENT_EXTRACT_TIMEOUT)
   })
 })

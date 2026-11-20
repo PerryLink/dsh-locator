@@ -15,6 +15,11 @@ import (
 type pinyinTable struct {
 	offs  []uint32 // 0 = no pinyin; otherwise offset+1 into arena
 	arena []byte
+	// has is one bit per record id. The dominant whole-disk case has a few
+	// thousand Han names among millions of ASCII ones; testing a 190 KB bitmap
+	// keeps the per-record fallback from streaming the 4-byte-per-record offset
+	// table through the cache on every query.
+	has []uint64
 }
 
 const pinyinHeader = 4 // uint16 full-pinyin length + uint16 initials length
@@ -23,13 +28,31 @@ const pinyinHeader = 4 // uint16 full-pinyin length + uint16 initials length
 func (t *pinyinTable) reset() {
 	t.offs = nil
 	t.arena = nil
+	t.has = nil
 }
 
-// grow ensures the table has one offset per record.
+// grow ensures the table has one offset (and one bitmap bit) per record.
 func (t *pinyinTable) grow(n int) {
 	for len(t.offs) < n {
 		t.offs = append(t.offs, 0)
 	}
+	words := (n + 63) >> 6
+	for len(t.has) < words {
+		t.has = append(t.has, 0)
+	}
+}
+
+// hasKey reports whether the record has pinyin keys. It is the cheap first
+// question in the query fallback; get() reads the arena only on a hit.
+func (t *pinyinTable) hasKey(id int32) bool {
+	if int(id) < 0 {
+		return false
+	}
+	word := int(id) >> 6
+	if word >= len(t.has) {
+		return false
+	}
+	return t.has[word]&(1<<uint(id&63)) != 0
 }
 
 func (t *pinyinTable) empty() bool { return len(t.arena) == 0 }
@@ -49,6 +72,11 @@ func (t *pinyinTable) set(id int32, full, initials string) {
 	t.arena = append(t.arena, full...)
 	t.arena = append(t.arena, initials...)
 	t.offs[id] = uint32(start + 1)
+	word := int(id) >> 6
+	if word >= len(t.has) {
+		t.grow(int(id) + 1)
+	}
+	t.has[word] |= 1 << uint(id&63)
 }
 
 // get returns the record's pinyin keys as zero-copy strings. The caller holds

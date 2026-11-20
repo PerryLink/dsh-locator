@@ -6,12 +6,19 @@ package watch
 import (
 	"context"
 	"errors"
+	"syscall"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
+	"github.com/PerryLink/dsh-locator/engine/internal/scan"
 )
 
 // ErrUnsupported means this platform has no change-notification backend yet.
 var ErrUnsupported = errors.New("filesystem watching is not supported on this platform")
+
+// DefaultMaxDirs is the default budget for watched directories across all
+// roots. Beyond it the remaining directories are covered by the periodic
+// incremental refresh instead of one kernel watch per directory.
+const DefaultMaxDirs = 120_000
 
 // Options configures a watcher.
 type Options struct {
@@ -19,6 +26,13 @@ type Options struct {
 	Roots []string
 	// Excludes skip subtrees from watching, using the same globs as the scan.
 	Excludes []string
+	// IncludeCaches keeps toolchain/package cache trees watched. The default
+	// false matches the scanner: those trees are excluded from the index, so
+	// watching them would only report changes the index does not keep.
+	IncludeCaches bool
+	// MaxDirs caps the number of watched directories across all roots. Zero uses
+	// DefaultMaxDirs. Backends that are recursive (Windows, FSEvents) ignore it.
+	MaxDirs int
 	// OnError receives non-fatal backend errors (watch limits, overflow).
 	OnError func(error)
 	// OnDegraded is called once when coverage becomes incomplete after startup
@@ -49,6 +63,13 @@ type Health struct {
 	// are rescanned. Backends that cannot attribute coverage per root leave it
 	// nil; the daemon then falls back to a full rebuild.
 	Coverage []RootCoverage `json:"coverage,omitempty"`
+	// Limit is the directory budget in effect when the backend enforces one
+	// (zero means the backend is recursive or does not report a budget).
+	Limit int `json:"limit,omitempty"`
+	// Limited is true when the budget or a kernel watch limit truncated
+	// coverage. The index is still complete; the truncated subtrees rely on the
+	// periodic refresh, so this is an intermediate state rather than a failure.
+	Limited bool `json:"limited,omitempty"`
 }
 
 // RootCoverage is the watcher state of one requested root.
@@ -59,6 +80,9 @@ type RootCoverage struct {
 	Watched bool `json:"watched"`
 	// Reason explains why an unwatched root is not covered.
 	Reason string `json:"reason,omitempty"`
+	// Limited is true when the root is partially watched because the directory
+	// budget ran out, as opposed to a failed or unsupported backend.
+	Limited bool `json:"limited,omitempty"`
 }
 
 // HealthReporter is implemented by backends that can describe their coverage.
@@ -78,12 +102,42 @@ func HealthOf(w Watcher) Health {
 	return Health{}
 }
 
+// errWatchLimit marks a watch that was not installed because the directory
+// budget (or a kernel watch limit) is exhausted. It is an intermediate state,
+// not a failure: the periodic refresh covers the unwatched subtrees.
+var errWatchLimit = errors.New("watch directory budget reached")
+
+// isWatchLimitErr reports backend errors that mean "out of watch capacity".
+func isWatchLimitErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, errWatchLimit) ||
+		errors.Is(err, syscall.ENOSPC) ||
+		errors.Is(err, syscall.EMFILE) ||
+		errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ENOMEM)
+}
+
 // Watcher applies filesystem changes to an index.
 type Watcher interface {
 	// Run blocks until ctx is cancelled or the backend fails.
 	Run(ctx context.Context) error
 	// Close releases the backend. It is safe to call more than once.
 	Close() error
+}
+
+// maxDirs returns the effective directory budget for this watcher.
+func (o Options) maxDirs() int {
+	if o.MaxDirs > 0 {
+		return o.MaxDirs
+	}
+	return DefaultMaxDirs
+}
+
+// newExcluder compiles the exclude rules once for the platform backend.
+func newExcluder(opt Options) *scan.Excluder {
+	return scan.NewExcluder(opt.Excludes, opt.IncludeCaches)
 }
 
 // New creates the platform watcher.

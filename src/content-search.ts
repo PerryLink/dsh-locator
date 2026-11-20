@@ -13,6 +13,16 @@
  * trigram are rejected instead of degrading into a full-table LIKE/GLOB scan,
  * and the whole-word post-filter stops after a fixed number of rows, body bytes
  * or milliseconds and reports a bounded count.
+ *
+ * 0.20.0 adds three policies on top of that:
+ * - adaptive rank (P0-6): one bounded count of the raw match set decides whether
+ *   ORDER BY rank is affordable; wide sets page in rowid order and a cheap JS
+ *   sort orders the fetched page. Whole-word queries never rank.
+ * - split filter SQL (P1-3): the page keeps rowid-subquery filters (narrow
+ *   docs_meta sets turn into FTS rowid probes) while counts use docs-column
+ *   filters and a LIMIT, plus a kind-separated fast path for workspace scope.
+ * - a degraded profile (worker-driven) that forces bounded counts and no rank
+ *   after a query runs past its deadline.
  * @module dsh-locator/content-search
  */
 
@@ -73,6 +83,17 @@ export interface ContentSearchOptions {
    * active session is indexed).
    */
   sessionUnavailable?: 'empty' | 'files-only'
+  /**
+   * Adaptive bm25 ordering (0.20.0, default on). Before paging, one bounded
+   * count of the raw match set decides the plan: up to
+   * RANK_ADAPTIVE_THRESHOLD matches keep ORDER BY rank, a wider set skips the
+   * full-corpus bm25 sort and pages in rowid order with a cheap JS sort. Rank
+   * cost grows with the number of documents that match at all (a word present
+   * in every document costs 70 ms of ranking versus 0.3 ms without rank), so
+   * the probe is cheap and the saving is large. false restores the 0.19
+   * "always rank" behavior for narrow queries.
+   */
+  rankAdaptive?: boolean
   /** Drop session documents entirely (the unknown-session fallback). */
   excludeSessions?: boolean
   /** Include archived sessions in this query (panel checkbox or config). */
@@ -93,6 +114,26 @@ export interface ContentSearchOptions {
   fileHitsAllRoots?: boolean
   /** Override for the whole-word scan caps; production uses the defaults. */
   scanBudget?: ContentScanBudget
+  /**
+   * Cooperative cancellation hook, installed by the search worker because a
+   * function cannot cross a postMessage boundary. Checked between scan rows
+   * and SQL statements; when it returns true the query stops early and reports
+   * error 'content-search-cancelled'.
+   */
+  isCancelled?: () => boolean
+  /**
+   * Force the degraded profile: bounded counting and no bm25 sort. The worker
+   * switches it on for a while after a query ran past its deadline (around one
+   * second), so one pathological query cannot repeat on every keystroke.
+   */
+  degrade?: boolean
+  /**
+   * Abort signal accepted at the ContentIndex layer (see the cancel protocol in
+   * content-search-worker.ts). searchContent is synchronous: it only checks
+   * aborted before starting and then returns 'content-search-cancelled'; the
+   * async layer turns that into an AbortError rejection.
+   */
+  signal?: AbortSignal
 }
 
 /** Result of one content query. */
@@ -119,6 +160,35 @@ const SNIPPET_MAX = 400
 const SCAN_MAX_ROWS = 5_000
 const SCAN_MAX_BYTES = 64 * 1024 * 1024
 const SCAN_MAX_MS = 800
+
+/**
+ * Raw match count above which bm25 ordering stops paying for itself. The probe
+ * that reads it is a bounded count (a few hundred microseconds); ranking costs
+ * O(matches) and is the dominant cost for common words on a multi-GB corpus.
+ */
+export const RANK_ADAPTIVE_THRESHOLD = 2_000
+
+/** Counting cap applied while the worker is in its degraded profile. */
+export const DEGRADED_COUNT_LIMIT = 500
+
+/**
+ * Candidate-rowid cap for the split workspace count. Above it the rowid probe
+ * list is so broad that the combined column count wins; below it the two narrow
+ * halves are an order of magnitude cheaper.
+ */
+const COMPOSITE_ROWID_LIMIT = 5_000
+
+/** docs_meta candidate count used as the split-count guard. */
+const COMPOSITE_CANDIDATE_SQL = "SELECT count(*) AS n FROM docs_meta WHERE path LIKE ? ESCAPE '\\'"
+
+/** Read-only connection pragmas for content search (worker and embedders). */
+const SEARCH_PRAGMAS: readonly string[] = [
+  'PRAGMA busy_timeout = 5000',
+  'PRAGMA query_only = ON',
+  'PRAGMA cache_size = -16384',
+  'PRAGMA mmap_size = 268435456',
+  'PRAGMA temp_store = MEMORY',
+]
 
 /** Bytes that count as "inside a word", matching the name engine. */
 const WORD_BYTE = /[A-Za-z0-9_]/
@@ -425,20 +495,199 @@ function normalizePathPrefix(prefix: string | null | undefined): string | null {
   return trimmed + sep
 }
 
-/** One query plan: the SQL WHERE fragment plus how to page/count it. */
-interface QueryPlan {
-  where: string
+/** One filter fragment: SQL and its parameters, in placeholder order. */
+interface FilterFragment {
+  sql: string
   params: Array<string | number>
+}
+
+/** Scope filters resolved from the query options. */
+interface PlanFilters {
+  sessionPath: string | null
+  pathPrefix: string | null
+  excludeSessions: boolean
+  fileHitsAllRoots: boolean
+  archivedExcluded: readonly string[]
+  allowedSessions: readonly string[] | null
+}
+
+/**
+ * Scope filters expressed as rowid subqueries: the page path.
+ *
+ * A narrow docs_meta set (one session log, one project subtree) becomes a
+ * handful of FTS rowid probes, which is far cheaper than ranking the whole
+ * corpus and filtering afterwards. Broad sets are exactly where probing every
+ * rowid used to blow up, so the count path uses the column form instead (see
+ * countFilters).
+ */
+function pageFilters(filters: PlanFilters): FilterFragment {
+  const { sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded, allowedSessions } = filters
+  const sql: string[] = []
+  const params: Array<string | number> = []
+  if (sessionPath !== null && pathPrefix !== null) {
+    // Workspace scope has two halves: session rows from the caller's session
+    // log, file rows under the caller's cwd. They must be composed by kind —
+    // ANDing the two path filters matched no row at all (0.11.0–0.11.6 bug),
+    // so file bodies were never searchable in workspace scope.
+    sql.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR (kind = 'file' AND rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\')))")
+    params.push(sessionPath, escapeLike(pathPrefix) + '%')
+  } else if (sessionPath !== null && fileHitsAllRoots) {
+    // The caller cwd is outside every indexed root: file documents come from
+    // the whole index, session documents still from the caller's session log.
+    sql.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR kind = 'file')")
+    params.push(sessionPath)
+  } else if (sessionPath !== null) {
+    // Pure session scope (panel "this conversation", sessionId-only requests).
+    sql.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
+    params.push(sessionPath)
+  } else if (pathPrefix !== null) {
+    // File scope without a session: session rows stay available as before.
+    sql.push(" AND (kind = 'session' OR rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\'))")
+    params.push(escapeLike(pathPrefix) + '%')
+  }
+  if (excludeSessions) sql.push(" AND kind = 'file'")
+  if (allowedSessions !== null) {
+    // Caller authorization for session documents; file documents are scoped by
+    // the roots/cwd filters instead. An empty allow-list keeps only files.
+    if (allowedSessions.length === 0) sql.push(" AND kind = 'file'")
+    else {
+      sql.push(` AND (kind = 'file' OR session_id IN (${allowedSessions.map(() => '?').join(', ')}))`)
+      params.push(...allowedSessions)
+    }
+  }
+  if (archivedExcluded.length > 0) {
+    // Archived session logs are indexed but hidden by default; file documents
+    // have no session id and must stay visible.
+    sql.push(` AND (kind = 'file' OR session_id IS NULL OR session_id NOT IN (${archivedExcluded.map(() => '?').join(', ')}))`)
+    params.push(...archivedExcluded)
+  }
+  return { sql: sql.join(''), params }
+}
+
+/**
+ * Scope filters expressed on the docs columns: the count path.
+ *
+ * Filtering an FTS match with rowid IN (SELECT ...) degrades badly when the
+ * subquery yields tens of thousands of rowids (a broad workspace prefix used
+ * to cost ~3.2 s versus a few hundred ms reading the UNINDEXED path column per
+ * match), and a count has no ORDER BY page to amortize that. The column form is
+ * a per-match predicate the FTS scan can fold in, and callers bound the work
+ * with LIMIT (see boundedCount).
+ *
+ * Pure session scope is the one exception: exactly one indexed session log is
+ * the narrowest filter there is (a single path equality, a handful of docs), so
+ * the rowid-subquery form stays cheapest for both exact and bounded counts.
+ */
+function countFilters(filters: PlanFilters): FilterFragment {
+  const { sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded, allowedSessions } = filters
+  const sql: string[] = []
+  const params: Array<string | number> = []
+  if (sessionPath !== null && pathPrefix !== null) {
+    sql.push(" AND ((kind = 'session' AND path = ?) OR (kind = 'file' AND path LIKE ? ESCAPE '\\'))")
+    params.push(sessionPath, escapeLike(pathPrefix) + '%')
+  } else if (sessionPath !== null && fileHitsAllRoots) {
+    sql.push(" AND ((kind = 'session' AND path = ?) OR kind = 'file')")
+    params.push(sessionPath)
+  } else if (sessionPath !== null) {
+    sql.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
+    params.push(sessionPath)
+  } else if (pathPrefix !== null) {
+    sql.push(" AND (kind = 'session' OR path LIKE ? ESCAPE '\\')")
+    params.push(escapeLike(pathPrefix) + '%')
+  }
+  if (excludeSessions) sql.push(" AND kind = 'file'")
+  if (allowedSessions !== null) {
+    if (allowedSessions.length === 0) sql.push(" AND kind = 'file'")
+    else {
+      sql.push(` AND (kind = 'file' OR session_id IN (${allowedSessions.map(() => '?').join(', ')}))`)
+      params.push(...allowedSessions)
+    }
+  }
+  if (archivedExcluded.length > 0) {
+    sql.push(` AND (kind = 'file' OR session_id IS NULL OR session_id NOT IN (${archivedExcluded.map(() => '?').join(', ')}))`)
+    params.push(...archivedExcluded)
+  }
+  return { sql: sql.join(''), params }
+}
+
+/** One query plan: matcher, filter fragments and paging/count policy. */
+interface QueryPlan {
+  /** The matcher alone: `docs MATCH ?` or `body GLOB ?`. */
+  matchWhere: string
+  matchParams: Array<string | number>
+  /** Matcher + scope filters as rowid subqueries (page path). */
+  pageWhere: string
+  pageParams: Array<string | number>
+  /** Matcher + scope filters on docs columns (count path). */
+  countWhere: string
+  countParams: Array<string | number>
   /** Literal terms used for whole-word checks and snippet location. */
   terms: string[]
   caseSensitive: boolean
   wholeWord: boolean
   /** Match the whole phrase as one literal (extended mode). */
   phrase: boolean
-  rankOrder: boolean
-  exactCount: boolean
-  /** GLOB counting is exact only below countLimit; above it is bounded. */
-  boundedCount: boolean
+  /** The bm25 rank column exists for this matcher (GLOB cannot rank). */
+  rankCapable: boolean
+  /** Counting means scanning every document (GLOB body): always bound it. */
+  countBounded: boolean
+  /** Scope filters are present, so a wide exact count is not worth paying. */
+  filtered: boolean
+  /**
+   * Workspace scope counted as two kind-separated halves, each with a narrow
+   * rowid probe set (see CompositeCountPlan). Absent for every other scope.
+   */
+  composite?: CompositeCountPlan
+}
+
+/**
+ * Kind-separated count plan for workspace scope (session log + cwd prefix).
+ *
+ * The combined filter is `(session rows from this log) OR (file rows under this
+ * prefix)`; counting it as one OR clause makes SQLite scan every match. Split
+ * in two, each half is driven by a narrow docs_meta rowid set instead, which is
+ * roughly an order of magnitude cheaper.
+ */
+interface CompositeCountPlan {
+  fileWhere: string
+  fileParams: Array<string | number>
+  /** null when no session document can pass the filters. */
+  sessionWhere: string | null
+  sessionParams: Array<string | number>
+  /** Escaped LIKE pattern for the docs_meta candidate-size guard. */
+  candidatePattern: string
+}
+
+/**
+ * Build the split count plan for workspace scope, if this plan has one.
+ *
+ * File documents are filtered by the cwd prefix only; session documents by the
+ * session log path plus the caller/archived authorization filters (file
+ * documents have no session id, so those filters never apply to them).
+ */
+function compositeCountPlan(
+  filters: PlanFilters,
+  matchWhere: string,
+  matchParams: Array<string | number>,
+): CompositeCountPlan | null {
+  const { sessionPath, pathPrefix, excludeSessions, allowedSessions, archivedExcluded } = filters
+  if (sessionPath === null || pathPrefix === null) return null
+  const pattern = escapeLike(pathPrefix) + '%'
+  const fileWhere = matchWhere + " AND kind = 'file' AND rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\')"
+  const sessionParams: Array<string | number> = [...matchParams, sessionPath]
+  let sessionWhere: string | null = matchWhere + " AND kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)"
+  if (excludeSessions === true || (allowedSessions !== null && allowedSessions.length === 0)) {
+    sessionWhere = null
+    sessionParams.length = 0
+  } else if (allowedSessions !== null) {
+    sessionWhere += ` AND session_id IN (${allowedSessions.map(() => '?').join(', ')})`
+    sessionParams.push(...allowedSessions)
+  }
+  if (sessionWhere !== null && archivedExcluded.length > 0) {
+    sessionWhere += ` AND (session_id IS NULL OR session_id NOT IN (${archivedExcluded.map(() => '?').join(', ')}))`
+    sessionParams.push(...archivedExcluded)
+  }
+  return { fileWhere, fileParams: [...matchParams, pattern], sessionWhere, sessionParams, candidatePattern: pattern }
 }
 
 function buildPlan(terms: readonly string[], options: {
@@ -452,101 +701,47 @@ function buildPlan(terms: readonly string[], options: {
   archivedExcluded: readonly string[]
   allowedSessions: readonly string[] | null
 }): QueryPlan | null {
-  const { caseSensitive, wholeWord, phrase, sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded, allowedSessions } = options
+  const { caseSensitive, wholeWord, phrase } = options
   if (terms.length === 0) return null
-  const suffix: string[] = []
-  const suffixParams: Array<string | number> = []
-  if (sessionPath !== null && pathPrefix !== null) {
-    // Workspace scope has two halves: session rows from the caller's session
-    // log, file rows under the caller's cwd. They must be composed by kind —
-    // ANDing the two path filters matched no row at all (0.11.0–0.11.6 bug),
-    // so file bodies were never searchable in workspace scope.
-    suffix.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR (kind = 'file' AND rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\')))")
-    suffixParams.push(sessionPath, escapeLike(pathPrefix) + '%')
-  } else if (sessionPath !== null && fileHitsAllRoots) {
-    // The caller cwd is outside every indexed root: file documents come from
-    // the whole index, session documents still from the caller's session log.
-    suffix.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR kind = 'file')")
-    suffixParams.push(sessionPath)
-  } else if (sessionPath !== null) {
-    // Pure session scope (panel "this conversation", sessionId-only requests).
-    suffix.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
-    suffixParams.push(sessionPath)
-  } else if (pathPrefix !== null) {
-    // File scope without a session: session rows stay available as before.
-    suffix.push(" AND (kind = 'session' OR rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\'))")
-    suffixParams.push(escapeLike(pathPrefix) + '%')
+  const filters: PlanFilters = {
+    sessionPath: options.sessionPath,
+    pathPrefix: options.pathPrefix,
+    excludeSessions: options.excludeSessions,
+    fileHitsAllRoots: options.fileHitsAllRoots,
+    archivedExcluded: options.archivedExcluded,
+    allowedSessions: options.allowedSessions,
   }
-  if (excludeSessions) suffix.push(" AND kind = 'file'")
-  if (allowedSessions !== null) {
-    // Caller authorization for session documents; file documents are scoped by
-    // the roots/cwd filters instead. An empty allow-list keeps only files.
-    if (allowedSessions.length === 0) suffix.push(" AND kind = 'file'")
-    else {
-      suffix.push(` AND (kind = 'file' OR session_id IN (${allowedSessions.map(() => '?').join(', ')}))`)
-      suffixParams.push(...allowedSessions)
-    }
-  }
-  if (archivedExcluded.length > 0) {
-    // Archived session logs are indexed but hidden by default; file documents
-    // have no session id and must stay visible.
-    suffix.push(` AND (kind = 'file' OR session_id IS NULL OR session_id NOT IN (${archivedExcluded.map(() => '?').join(', ')}))`)
-    suffixParams.push(...archivedExcluded)
-  }
-  const sessionClause = suffix.join('')
-
-  if (phrase) {
-    const literal = terms[0]!
-    if (caseSensitive) {
-      return {
-        where: 'body GLOB ?' + sessionClause,
-        params: ['*' + escapeGlob(literal) + '*', ...suffixParams],
-        terms: [literal],
-        caseSensitive,
-        wholeWord,
-        phrase,
-        rankOrder: false,
-        exactCount: true,
-        boundedCount: true,
-      }
-    }
+  const page = pageFilters(filters)
+  const count = countFilters(filters)
+  const filtered = page.sql !== ''
+  const plan = (matchWhere: string, matchParams: Array<string | number>, rankCapable: boolean, countBounded: boolean): QueryPlan => {
+    const composite = compositeCountPlan(filters, matchWhere, matchParams)
     return {
-      where: 'docs MATCH ?' + sessionClause,
-      params: [quoteFts(literal), ...suffixParams],
-      terms: [literal],
-      caseSensitive,
-      wholeWord,
-      phrase,
-      rankOrder: true,
-      exactCount: true,
-      boundedCount: false,
-    }
-  }
-
-  if (caseSensitive) {
-    return {
-      where: terms.map(() => 'body GLOB ?').join(' AND ') + sessionClause,
-      params: [...terms.map(term => '*' + escapeGlob(term) + '*'), ...suffixParams],
+      matchWhere,
+      matchParams,
+      pageWhere: matchWhere + page.sql,
+      pageParams: [...matchParams, ...page.params],
+      countWhere: matchWhere + count.sql,
+      countParams: [...matchParams, ...count.params],
       terms: [...terms],
       caseSensitive,
       wholeWord,
       phrase,
-      rankOrder: false,
-      exactCount: true,
-      boundedCount: true,
+      rankCapable,
+      countBounded,
+      filtered,
+      ...(composite === null ? {} : { composite }),
     }
   }
-  return {
-    where: 'docs MATCH ?' + sessionClause,
-    params: [terms.map(quoteFts).join(' AND '), ...suffixParams],
-    terms: [...terms],
-    caseSensitive,
-    wholeWord,
-    phrase,
-    rankOrder: true,
-    exactCount: true,
-    boundedCount: false,
+  if (phrase) {
+    const literal = terms[0]!
+    if (caseSensitive) return plan('body GLOB ?', ['*' + escapeGlob(literal) + '*'], false, true)
+    return plan('docs MATCH ?', [quoteFts(literal)], true, false)
   }
+  if (caseSensitive) {
+    return plan(terms.map(() => 'body GLOB ?').join(' AND '), terms.map(term => '*' + escapeGlob(term) + '*'), false, true)
+  }
+  return plan('docs MATCH ?', [terms.map(quoteFts).join(' AND ')], true, false)
 }
 
 /** One document row fetched for a hit. */
@@ -594,12 +789,18 @@ function buildHits(db: DatabaseSync, plan: QueryPlan, rowids: readonly number[],
 }
 
 /** Candidate rowids for one page (no post-filter). */
-function pageRowids(db: DatabaseSync, plan: QueryPlan, limit: number, offset = 0): { rowids: number[]; scores: Map<number, number> } {
+function pageRowids(
+  db: DatabaseSync,
+  plan: QueryPlan,
+  limit: number,
+  offset: number,
+  rankOrder: boolean,
+): { rowids: number[]; scores: Map<number, number> } {
   const scores = new Map<number, number>()
-  const sql = plan.rankOrder
-    ? `SELECT rowid AS rowid, rank AS score FROM docs WHERE ${plan.where} ORDER BY rank LIMIT ? OFFSET ?`
-    : `SELECT rowid AS rowid FROM docs WHERE ${plan.where} LIMIT ? OFFSET ?`
-  const rows = db.prepare(sql).all(...plan.params, limit, offset) as Array<{ rowid?: number; score?: number }>
+  const sql = rankOrder
+    ? `SELECT rowid AS rowid, rank AS score FROM docs WHERE ${plan.pageWhere} ORDER BY rank LIMIT ? OFFSET ?`
+    : `SELECT rowid AS rowid FROM docs WHERE ${plan.pageWhere} LIMIT ? OFFSET ?`
+  const rows = db.prepare(sql).all(...plan.pageParams, limit, offset) as Array<{ rowid?: number; score?: number }>
   const rowids: number[] = []
   for (const row of rows) {
     if (typeof row.rowid !== 'number') continue
@@ -609,20 +810,127 @@ function pageRowids(db: DatabaseSync, plan: QueryPlan, limit: number, offset = 0
   return { rowids, scores }
 }
 
-/** Exact COUNT over the plan's WHERE fragment. */
-function exactCount(db: DatabaseSync, plan: QueryPlan): number {
-  const row = db.prepare(`SELECT count(*) AS n FROM docs WHERE ${plan.where}`).get(...plan.params) as { n?: number } | undefined
+/** Exact COUNT over one WHERE fragment. */
+function exactCount(db: DatabaseSync, where: string, params: readonly (string | number)[]): number {
+  const row = db.prepare(`SELECT count(*) AS n FROM docs WHERE ${where}`).get(...params) as { n?: number } | undefined
   return Number(row?.n ?? 0)
 }
 
-/** Count up to `limit + 1` rows: exact below the cap, bounded at the cap. */
-function boundedCount(db: DatabaseSync, plan: QueryPlan, limit: number): ContentCount {
+/** Count up to limit + 1 rows: exact below the cap, bounded at the cap. */
+function boundedCount(db: DatabaseSync, where: string, params: readonly (string | number)[], limit: number): ContentCount {
   const row = db
-    .prepare(`SELECT count(*) AS n FROM (SELECT rowid FROM docs WHERE ${plan.where} LIMIT ?)`)
-    .get(...plan.params, limit + 1) as { n?: number } | undefined
+    .prepare(`SELECT count(*) AS n FROM (SELECT rowid FROM docs WHERE ${where} LIMIT ?)`)
+    .get(...params, limit + 1) as { n?: number } | undefined
   const value = Number(row?.n ?? 0)
   if (value > limit) return { value: limit, kind: 'bounded', limit }
   return { value, kind: 'exact' }
+}
+
+/** Exact count over the plan's column filter fragment. */
+function planExactCount(db: DatabaseSync, plan: QueryPlan): number {
+  return exactCount(db, plan.countWhere, plan.countParams)
+}
+
+/** Bounded count over the plan's column filter fragment. */
+function planBoundedCount(db: DatabaseSync, plan: QueryPlan, limit: number): ContentCount {
+  return boundedCount(db, plan.countWhere, plan.countParams, limit)
+}
+
+/**
+ * Count a workspace-scoped match set as its two narrow halves.
+ *
+ * Only possible when SQLite can drive each half from the docs_meta rowid set:
+ * the guard counts the prefix candidates first and gives up (returns null) when
+ * the rowid list would be broad enough to make random FTS probes slower than
+ * the combined column scan.
+ */
+function compositeCount(db: DatabaseSync, plan: QueryPlan, limit: number): ContentCount | null {
+  const composite = plan.composite
+  if (composite === undefined) return null
+  const candidates = db.prepare(COMPOSITE_CANDIDATE_SQL).get(composite.candidatePattern) as { n?: number } | undefined
+  if (Number(candidates?.n ?? 0) > COMPOSITE_ROWID_LIMIT) return null
+  const file = boundedCount(db, composite.fileWhere, composite.fileParams, limit)
+  const session = composite.sessionWhere === null
+    ? { value: 0, kind: 'exact' as const }
+    : boundedCount(db, composite.sessionWhere, composite.sessionParams, limit)
+  const total = file.value + session.value
+  if (file.kind === 'bounded' || session.kind === 'bounded' || total > limit) return { value: limit, kind: 'bounded', limit }
+  return { value: total, kind: 'exact' }
+}
+
+/**
+ * Bounded count of the raw match set, ignoring every scope filter.
+ *
+ * bm25 sort cost is driven by how many documents match at all, not by how many
+ * survive the scope filter: a session-scoped query for a word present in every
+ * document still ranks the whole match set. One bounded count of the matcher
+ * alone is the cheapest predictor of that cost (a few hundred microseconds) and
+ * is what decides adaptive rank ordering.
+ */
+function matchProbe(db: DatabaseSync, plan: QueryPlan, limit: number): ContentCount {
+  const row = db
+    .prepare(`SELECT count(*) AS n FROM (SELECT rowid FROM docs WHERE ${plan.matchWhere} LIMIT ?)`)
+    .get(...plan.matchParams, limit + 1) as { n?: number } | undefined
+  const value = Number(row?.n ?? 0)
+  if (value > limit) return { value: limit, kind: 'bounded', limit }
+  return { value, kind: 'exact' }
+}
+
+/** Result for a query the caller cancelled before it could finish. */
+function cancelledResult(): ContentSearchResult {
+  return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: ['content-search-cancelled'], error: 'content-search-cancelled' }
+}
+
+/**
+ * Number of path separators: a cheap "is this near the root" signal for wide,
+ * unranked pages.
+ */
+function pathDepth(path: string): number {
+  let depth = 0
+  for (let index = 0; index < path.length; index++) {
+    const code = path.charCodeAt(index)
+    if (code === 0x2f || code === 0x5c) depth++
+  }
+  return depth
+}
+
+/**
+ * Cheap relevance heuristic for a wide page that skipped bm25.
+ *
+ * At most MAX_LIMIT hits are in hand, so any JS sort is free. Documents whose
+ * title contains a query term come first, then shallower paths (a word that
+ * appears everywhere usually means a file near a root), then earlier match
+ * lines, then path order so a page is deterministic.
+ */
+function lightSortHits(hits: ContentHit[], plan: QueryPlan): ContentHit[] {
+  const needles = plan.terms.filter(term => term !== '').map(term => plan.caseSensitive ? term : term.toLowerCase())
+  const decorated = hits.map((hit, order) => {
+    const title = plan.caseSensitive ? hit.title : hit.title.toLowerCase()
+    let titleHits = 0
+    for (const needle of needles) if (title.includes(needle)) titleHits++
+    return { hit, order, titleHits, depth: pathDepth(hit.path), line: hit.line ?? Number.MAX_SAFE_INTEGER }
+  })
+  decorated.sort((a, b) =>
+    b.titleHits - a.titleHits
+    || a.depth - b.depth
+    || a.line - b.line
+    || a.hit.path.localeCompare(b.hit.path)
+    || a.order - b.order)
+  return decorated.map(entry => entry.hit)
+}
+
+/**
+ * Put a read-only content connection into the search profile (P2).
+ *
+ * Search workers each get a 16 MiB page cache and a 256 MiB mmap window so
+ * repeated queries keep their FTS pages warm without touching the build
+ * connection. Failures are ignored: an older SQLite or a filesystem that
+ * rejects mmap must never stop search from working.
+ */
+export function configureSearchConnection(db: DatabaseSync): void {
+  for (const sql of SEARCH_PRAGMAS) {
+    try { db.exec(sql) } catch { /* optional tuning */ }
+  }
 }
 
 /** A plan with a whole-word post-filter. */
@@ -630,6 +938,7 @@ interface WholeWordScan {
   rowids: number[]
   count: ContentCount
   warnings: string[]
+  error?: string
 }
 
 /**
@@ -641,6 +950,9 @@ interface WholeWordScan {
  * are all capped: on any cap the scan stops, keeps the rowids found so far and
  * reports a bounded count plus a `scan-capped` warning. Session-scoped scans go
  * through the same budget, so a huge session cannot run unbounded either.
+ *
+ * The candidate query never uses bm25: the whole-word post-filter rewrites the
+ * result set, so the rank order of the candidates is not the order of the hits.
  */
 function scanWholeWord(
   db: DatabaseSync,
@@ -651,13 +963,11 @@ function scanWholeWord(
   countLimit: number,
   sessionScoped: boolean,
   budget: { maxRows: number; maxBytes: number; maxMs: number },
+  isCancelled?: () => boolean,
 ): WholeWordScan {
   const warnings = new Set<string>()
   const rowids: number[] = []
-  const sql = plan.rankOrder
-    ? `SELECT rowid AS rowid FROM docs WHERE ${plan.where} ORDER BY rank`
-    : `SELECT rowid AS rowid FROM docs WHERE ${plan.where}`
-  const iterator = db.prepare(sql).iterate(...plan.params)
+  const iterator = db.prepare(`SELECT rowid AS rowid FROM docs WHERE ${plan.pageWhere}`).iterate(...plan.pageParams)
   const bodyStatement = db.prepare('SELECT body FROM docs WHERE rowid = ?')
   const deadline = performance.now() + budget.maxMs
   let count = 0
@@ -666,6 +976,7 @@ function scanWholeWord(
   let capped = false
   let exhausted = true
   for (const raw of iterator) {
+    if (isCancelled?.() === true) return { rowids: [], count: { value: 0, kind: 'unknown' }, warnings: ['content-search-cancelled'], error: 'content-search-cancelled' }
     scannedRows++
     if (scannedRows > budget.maxRows || scannedBytes >= budget.maxBytes || performance.now() > deadline) {
       capped = true
@@ -714,6 +1025,20 @@ function scanWholeWord(
  * Modes: `normal` (whitespace-separated substring terms), `extended`
  * (Notepad++ escapes, one literal phrase), `regex` (not executed server-side in
  * 0.9.0: returns `content-regex-not-supported`).
+ *
+ * Ordering (0.20.0, P0-6): a wide match set is not sorted by bm25. One bounded
+ * count of the raw match set first, then either ORDER BY rank (narrow) or a
+ * rowid-order page with a cheap JS sort (wide), because rank cost grows with
+ * the number of matching documents and dominates a common-word query. Whole-word
+ * queries never rank: their post-filter rewrites the result set anyway.
+ *
+ * Counting (0.20.0, P1-3): the page uses rowid-subquery filters while the count
+ * uses docs-column filters, and wide filtered sets report a bounded count
+ * instead of paying an O(match-set) exact COUNT.
+ *
+ * Cancellation: synchronous by design, so it only observes an already-aborted
+ * signal or a cancellation hook between SQL statements and scan rows; the async
+ * layer converts a cancelled result into an AbortError rejection.
  */
 export function searchContent(
   db: DatabaseSync,
@@ -725,6 +1050,11 @@ export function searchContent(
   const matchMode = options.matchMode ?? 'normal'
   const countMode = options.count ?? 'exact'
   const countLimit = clampCountLimit(options.countLimit)
+  const degraded = options.degrade === true
+  const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+  const isCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : null
+  const cancelled = (): boolean => isCancelled !== null && isCancelled()
+  if (options.signal?.aborted === true || cancelled()) return cancelledResult()
 
   if (matchMode === 'regex') {
     return {
@@ -761,31 +1091,55 @@ export function searchContent(
   })
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 
+  // The degraded profile keeps the worst query cheap: bounded counting and no
+  // bm25 sort. scanWholeWord already self-limits, so it only needs the count cap.
+  const effectiveCountLimit = degraded ? Math.min(countLimit, DEGRADED_COUNT_LIMIT) : countLimit
+  if (degraded) warnings.push('query-degraded')
+
   if (plan.wholeWord) {
     // Only a pure session scope may count without a bound; a workspace/file
     // prefix still scans a potentially large corpus, so keep counts bounded.
     const sessionScoped = options.sessionPath != null && pathPrefix === null && options.excludeSessions !== true && options.fileHitsAllRoots !== true
-    const scanned = scanWholeWord(db, plan, capped, Math.max(0, Math.trunc(options.offset ?? 0)), countMode, countLimit, sessionScoped, resolveScanBudget(options.scanBudget))
+    const scanned = scanWholeWord(db, plan, capped, offset, countMode, effectiveCountLimit, sessionScoped, resolveScanBudget(options.scanBudget), isCancelled ?? undefined)
     for (const warning of scanned.warnings) warnings.push(warning)
+    if (scanned.error !== undefined) return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [...new Set(warnings)], error: scanned.error }
     const hits = buildHits(db, plan, scanned.rowids, new Map())
     return { hits, count: scanned.count, warnings: [...new Set(warnings)] }
   }
 
+  // P0-6: one bounded probe of the raw match set decides whether bm25 ranking
+  // is affordable. Scope filters are intentionally ignored here: the rank cost
+  // is driven by the matcher, so a session-scoped query for a word present in
+  // every document is just as expensive to rank.
+  let rankOrder = plan.rankCapable && !degraded
+  let wide = false
+  if (rankOrder && options.rankAdaptive !== false) {
+    wide = matchProbe(db, plan, RANK_ADAPTIVE_THRESHOLD).kind === 'bounded'
+    rankOrder = !wide
+  }
+  if (cancelled()) return cancelledResult()
+
   let count: ContentCount
   if (countMode === 'none') {
     count = { value: 0, kind: 'unknown' }
-  } else if (countMode === 'bounded') {
-    count = boundedCount(db, plan, countLimit)
-    if (count.kind === 'bounded') warnings.push('bounded-count')
-  } else if (plan.exactCount && !plan.boundedCount) {
-    count = { value: exactCount(db, plan), kind: 'exact' }
   } else {
-    // GLOB patterns cannot count cheaply: cap the work and report the known
-    // floor plus a warning.
-    count = boundedCount(db, plan, countLimit)
-    if (count.kind === 'bounded') warnings.push('bounded-count')
+    // A wide or full-scan set first tries the split workspace count: two narrow
+    // rowid-driven halves instead of one OR-clause scan over every match.
+    const split = wide || plan.countBounded || degraded ? compositeCount(db, plan, effectiveCountLimit) : null
+    if (countMode === 'bounded' || plan.countBounded || degraded || (wide && plan.filtered)) {
+      // GLOB bodies, the degraded profile and wide filtered sets cannot be
+      // counted exactly without reading the whole match set: report the floor.
+      count = split ?? planBoundedCount(db, plan, effectiveCountLimit)
+      if (count.kind === 'bounded') warnings.push('bounded-count')
+    } else {
+      // Unfiltered FTS counts are cheap even for tens of thousands of matches.
+      count = { value: planExactCount(db, plan), kind: 'exact' }
+    }
   }
-  const page = pageRowids(db, plan, capped, Math.max(0, Math.trunc(options.offset ?? 0)))
-  const hits = buildHits(db, plan, page.rowids, page.scores)
+  if (cancelled()) return cancelledResult()
+
+  const page = pageRowids(db, plan, capped, offset, rankOrder)
+  let hits = buildHits(db, plan, page.rowids, page.scores)
+  if (!rankOrder) hits = lightSortHits(hits, plan)
   return { hits, count, warnings: [...new Set(warnings)] }
 }

@@ -30,8 +30,34 @@ export interface Config {
   refreshIncremental?: boolean
   /** Directory reader concurrency during scans; 0 uses the CPU count. */
   scanWorkers: number
-  /** Soft Go heap limit in MiB for the engine; 0 leaves it to GOMEMLIMIT/GOGC. */
+  /**
+   * Soft Go heap limit in MiB for the engine. 0 means "auto": the plugin
+   * derives a limit from the machine (clamp 25% of RAM to 384–1024 MiB) and
+   * passes it to the engine, which applies GOMEMLIMIT plus a GC after the
+   * snapshot/watcher load. Set a positive value to pin it; use a very large
+   * value to effectively disable the limit.
+   */
   memoryLimitMB: number
+  /**
+   * Include well-known toolchain and package caches (Go module cache, Cargo
+   * registry, Rustup, pip/npm/pnpm stores, .local/lib, site-packages) in the
+   * name index and watcher. Off by default: these trees are usually the
+   * majority of the entry count and almost never the thing a user searches
+   * for. Set true to restore the pre-0.20 behavior. The content index has its
+   * own independent cache excludes.
+   */
+  includeCaches?: boolean
+  /**
+   * Hard cap on watched directories across all roots (default 120000). When a
+   * root exceeds the budget the remaining directories are covered by the
+   * periodic incremental refresh instead of the native watcher.
+   */
+  watchMaxDirs?: number
+  /**
+   * Snapshot compression for the on-disk index: none (default) keeps the
+   * fastest load/save; zstd halves the file but adds a few hundred ms to both.
+   */
+  snapshotCompression?: 'none' | 'zstd'
   /** Index text-file bodies and DSH session messages into the content database. */
   contentIndex: boolean
   /**
@@ -66,8 +92,24 @@ export interface Config {
    * build cheap on a document-heavy disk.
    */
   contentExtractDocuments?: boolean
-  /** Largest document handed to the extractor in bytes (default 20 MiB; 0 unlimited). */
+  /** Largest document handed to the extractor in bytes (default 8 MiB; 0 unlimited). */
   contentExtractMaxBytes?: number
+  /** Evict the oldest indexed documents when the body budget is full (default true). */
+  contentEvict?: boolean
+  /** Maximum symbols stored per code file (default 500; lower keeps the symbols table small). */
+  contentSymbolsPerFile?: number
+  /** Hard budget for content.db in bytes (default 2 GB); oversize triggers an idle rebuild. */
+  contentMaxDbBytes?: number
+  /** Adaptive bm25: skip rank ordering for result sets above this hit threshold (default 2000). */
+  contentRankAdaptive?: boolean
+  /** Content search result cache entries (default 64; 0 disables the cache). */
+  contentQueryCacheSize?: number
+  /** Content search result cache TTL in ms (default 60000). */
+  contentQueryCacheTtlMs?: number
+  /** Largest session log read as a whole; bigger logs index only their head (default 64 MiB; 0 unlimited). */
+  contentSessionMaxBytes?: number
+  /** Pause/slow content builds when the machine is busy or on battery (default true). */
+  contentRefreshAdaptive?: boolean
   /** Index code symbols for locator_outline/locator_symbol/locator_repo_map (default true). */
   contentIndexSymbols?: boolean
   /** Largest code file considered for symbol extraction in bytes (default 512 KiB). */
@@ -170,6 +212,20 @@ export interface Config {
   startupTimeoutMs: number
   /** Per-request deadline for the engine. */
   requestTimeoutMs: number
+  /** Start the engine during plugin activation instead of the first search (default true). */
+  prewarm?: boolean
+  /** Optional character budget for /combined responses (0 keeps the old unbudgeted behavior). */
+  combinedBudgetChars?: number
+  /** Parallel stat/hash enrichment limit for panel /combined (default 8). */
+  combinedEnrichConcurrency?: number
+  /** Maximum files whose sha256 is computed per /combined response (default 5; 0 disables hashes). */
+  combinedHashMaxHits?: number
+  /**
+   * Resource preset applied on top of explicit settings: eco lowers memory,
+   * content, watch and refresh budgets; performance raises them; balanced
+   * keeps the documented defaults.
+   */
+  resourcePreset?: 'balanced' | 'eco' | 'performance'
   /**
    * Allow the panel HTTP routes to operate without the DSH connection service,
    * relying on the host's request authentication plus the same-origin Fetch
@@ -199,6 +255,9 @@ export const Config: Schema<Config> = Schema.object({
   refreshIncremental: Schema.boolean().default(true),
   scanWorkers: Schema.number().default(0),
   memoryLimitMB: Schema.number().default(0),
+  includeCaches: Schema.boolean().default(false),
+  watchMaxDirs: Schema.number().default(120_000),
+  snapshotCompression: Schema.union(['none', 'zstd']).default('none'),
   contentIndex: Schema.boolean().default(true),
   contentLazy: Schema.boolean().default(true),
   contentMaxFileBytes: Schema.number().default(1_000_000),
@@ -208,7 +267,15 @@ export const Config: Schema<Config> = Schema.object({
   contentIndexReasoning: Schema.boolean().default(false),
   contentIndexToolResults: Schema.boolean().default(false),
   contentExtractDocuments: Schema.boolean().default(true),
-  contentExtractMaxBytes: Schema.number().default(20_000_000),
+  contentExtractMaxBytes: Schema.number().default(8_000_000),
+  contentEvict: Schema.boolean().default(true),
+  contentSymbolsPerFile: Schema.number().default(500),
+  contentMaxDbBytes: Schema.number().default(2_000_000_000),
+  contentRankAdaptive: Schema.boolean().default(true),
+  contentQueryCacheSize: Schema.number().default(64),
+  contentQueryCacheTtlMs: Schema.number().default(60_000),
+  contentSessionMaxBytes: Schema.number().default(67_108_864),
+  contentRefreshAdaptive: Schema.boolean().default(true),
   contentIndexSymbols: Schema.boolean().default(true),
   contentSymbolMaxBytes: Schema.number().default(524_288),
   contentFullIndex: Schema.boolean().default(false),
@@ -261,6 +328,11 @@ export const Config: Schema<Config> = Schema.object({
   maxResults: Schema.number().default(100),
   startupTimeoutMs: Schema.number().default(120_000),
   requestTimeoutMs: Schema.number().default(15_000),
+  prewarm: Schema.boolean().default(true),
+  combinedBudgetChars: Schema.number().default(0),
+  combinedEnrichConcurrency: Schema.number().default(8),
+  combinedHashMaxHits: Schema.number().default(5),
+  resourcePreset: Schema.union(['balanced', 'eco', 'performance']).default('balanced'),
   httpConnectionOptional: Schema.boolean().default(false),
 })
 
@@ -303,4 +375,38 @@ export function validateHookCommands(config: Pick<Config, 'rerankCommand' | 'ocr
 export function contentLimits(config: Pick<Config, 'contentFullIndex' | 'contentMaxTotalBytes' | 'contentMaxFiles'>): { maxTotalBytes: number; maxFiles: number } {
   if (config.contentFullIndex) return { maxTotalBytes: 0, maxFiles: 0 }
   return { maxTotalBytes: config.contentMaxTotalBytes, maxFiles: config.contentMaxFiles }
+}
+const MIB = 1024 * 1024
+
+/** Resource presets layered on top of the explicit configuration. */
+export function applyResourcePreset(config: Config): Config {
+  const preset = config.resourcePreset ?? 'balanced'
+  if (preset === 'balanced') return config
+  if (preset === 'eco') {
+    return {
+      ...config,
+      memoryLimitMB: 256,
+      watchMaxDirs: Math.min(config.watchMaxDirs ?? 120_000, 60_000),
+      contentMaxTotalBytes: Math.min(config.contentMaxTotalBytes, 256 * MIB),
+      contentMaxFiles: Math.min(config.contentMaxFiles, 50_000),
+      contentExtractDocuments: false,
+      contentIndexSymbols: false,
+      contentRefreshMs: Math.max(config.contentRefreshMs, 1_800_000),
+      refreshIntervalMs: Math.max(config.refreshIntervalMs, 21_600_000),
+      combinedHashMaxHits: 0,
+      contentQueryCacheSize: Math.min(config.contentQueryCacheSize ?? 64, 32),
+    }
+  }
+  return {
+    ...config,
+    memoryLimitMB: Math.max(config.memoryLimitMB, 1024),
+    watchMaxDirs: Math.max(config.watchMaxDirs ?? 120_000, 200_000),
+    contentMaxTotalBytes: Math.max(config.contentMaxTotalBytes, 2_000_000_000),
+    contentMaxFiles: Math.max(config.contentMaxFiles, 500_000),
+    contentRefreshMs: Math.min(config.contentRefreshMs, 300_000),
+    refreshIntervalMs: Math.min(config.refreshIntervalMs, 600_000),
+    contentSymbolsPerFile: Math.max(config.contentSymbolsPerFile ?? 500, 1_000),
+    combinedHashMaxHits: Math.max(config.combinedHashMaxHits ?? 5, 20),
+    contentQueryCacheSize: Math.max(config.contentQueryCacheSize ?? 64, 256),
+  }
 }

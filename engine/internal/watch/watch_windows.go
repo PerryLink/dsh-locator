@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
+	"github.com/PerryLink/dsh-locator/engine/internal/scan"
 )
 
 const (
@@ -60,6 +61,7 @@ type watcher struct {
 	ix       *index.Index
 	roots    []string
 	excludes []string
+	excluder *scan.Excluder
 	onError  func(error)
 
 	onDegraded func(Health)
@@ -85,6 +87,7 @@ func newWatcher(ix *index.Index, opt Options) (Watcher, error) {
 		ix:         ix,
 		roots:      opt.Roots,
 		excludes:   opt.Excludes,
+		excluder:   newExcluder(opt),
 		onError:    opt.OnError,
 		onDegraded: opt.OnDegraded,
 		done:       make(chan struct{}),
@@ -430,24 +433,5 @@ func (w *watcher) upsert(path string) {
 }
 
 func (w *watcher) excludedPath(path string) bool {
-	if len(w.excludes) == 0 {
-		return false
-	}
-	volume := filepath.VolumeName(path)
-	rest := strings.TrimPrefix(path, volume)
-	for _, part := range strings.Split(rest, string(filepath.Separator)) {
-		if part == "" {
-			continue
-		}
-		for _, pattern := range w.excludes {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" || strings.ContainsAny(pattern, `/\`) {
-				continue
-			}
-			if ok, _ := filepath.Match(pattern, part); ok {
-				return true
-			}
-		}
-	}
-	return false
+	return w.excluder.SkipAnySegment(path)
 }

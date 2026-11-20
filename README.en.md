@@ -92,7 +92,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.19.3
+dsh plugin --profile web add dsh-locator@0.20.0
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -260,8 +260,13 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `watch` | `true` | Apply native filesystem notifications. |
 | `refreshIntervalMs` | `1800000` | Rebuild cadence when no native watcher is active (kqueue fallback or a watcher failure); `0` disables. |
 | `scanWorkers` | `0` | Directory reader concurrency during scans; `0` uses the CPU count. |
+| `includeCaches` | `false` | Index well-known toolchain/package caches (`~/go/pkg/mod`, `.cargo*`, `.rustup`, `.local/lib`, pnpm store, ...). Off removes ~75% of entries on a typical dev home; `true` restores 0.19 behaviour. |
+| `watchMaxDirs` | `120000` | Total watched-directory budget; directories beyond it are covered by the periodic incremental refresh. |
+| `snapshotCompression` | `'none'` | Snapshot compression; `zstd` roughly halves the file but adds a few hundred ms to load and save. |
+| `prewarm` | `true` | Start the engine during plugin activation (removes the first-request cold-start wait). |
+| `resourcePreset` | `'balanced'` | `eco` lowers memory/content/refresh budgets, `performance` raises them, `balanced` keeps the defaults. |
 | `windowsUsn` | `false` | Try the NTFS USN/MFT enumeration before the walk (Windows, administrator; falls back automatically). |
-| `memoryLimitMB` | `0` | Soft Go heap limit for the engine in MiB; `0` leaves it to `GOMEMLIMIT`/`GOGC`. |
+| `memoryLimitMB` | `0` | Soft Go heap limit in MiB; `0` means auto (25% of RAM clamped to 384–1024 MiB); a positive value pins it. |
 | `contentIndex` | `true` | Build the file-body and session-message index at all; `false` leaves name search with near-zero content overhead. |
 | `contentLazy` | `true` | Build the content index on the first content search instead of at plugin start. |
 | `contentMaxFileBytes` | `1000000` | Bytes read from one text file. |
@@ -278,7 +283,15 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `refreshIncremental` | `true` | Fallback refreshes rescan only roots the watcher cannot cover; `false` restores the 0.18 full rebuild. |
 | `contentIndexReasoning` | `false` | Index assistant reasoning/thinking blocks (toggling rebuilds session documents only). |
 | `contentExtractDocuments` | `true` | Extract PDF/Word/Excel/PowerPoint/EPUB bodies (lazy, failures only warn). |
-| `contentExtractMaxBytes` | `20000000` | Largest document handed to the extractor. |
+| `contentExtractMaxBytes` | `8000000` | Largest document handed to the extractor (runs in a worker thread with a 512 MB heap and a 5 s deadline). |
+| `contentEvict` | `true` | Evict the oldest documents when the body budget is full instead of freezing the index. |
+| `contentSymbolsPerFile` | `500` | Symbols kept per code file. |
+| `contentMaxDbBytes` | `2000000000` | `content.db` byte budget; oversize triggers one idle rebuild per six hours. |
+| `contentRankAdaptive` | `true` | Skip bm25 ordering for wide result sets (order-of-magnitude faster on common words). |
+| `contentQueryCacheSize` | `64` | Content search cache entries; `0` disables the cache. |
+| `contentQueryCacheTtlMs` | `60000` | Content search cache TTL. |
+| `contentSessionMaxBytes` | `67108864` | Largest session log read whole; bigger logs index only their head. |
+| `contentRefreshAdaptive` | `true` | Reduce background indexing work when the machine is busy or on battery. |
 | `contentIndexSymbols` | `true` | Build the code-symbol store behind `locator_outline`/`locator_symbol`/`locator_repo_map`. |
 | `contentSymbolMaxBytes` | `524288` | Largest code file considered for symbol extraction. |
 | `contentFullIndex` | `false` | One-switch full mode: overrides body/file caps to unlimited. |
@@ -286,6 +299,9 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `notSearchable` | `[]` | Globs never returned as hits (still readable). |
 | `notReadable` | `[]` | Globs agents must not read (content hits and evidence refs are refused). |
 | `outputBudgetChars` | `8000` | Per-tool-result character budget; `0` disables it. |
+| `combinedBudgetChars` | `0` | `/combined` panel-response budget; `0` keeps the old unbudgeted behaviour. |
+| `combinedEnrichConcurrency` | `8` | Parallel stat/hash enrichment limit for `/combined`. |
+| `combinedHashMaxHits` | `5` | Maximum files hashed per `/combined` response; `0` disables hashes. |
 | `urlFreshness` | `false` | Let `locator_resolve` revalidate URL refs with one bounded conditional HTTP request. |
 | `rerankCommand` | `''` | Optional external rerank command (`rerank/v1` JSON stdin/stdout). |
 | `ocrCommand` | `''` | Optional external OCR command (`ocr/v1` JSON stdin/stdout). |
@@ -297,32 +313,39 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 
 Measured on a WSL2 development machine (Linux, warm page cache) and a real home directory; your machine will differ with disk, file count, cache state and GC.
 
-**Name index**
+**Name index** (development machine, one `/home/yy` root, WSL2 ext4 warm page cache)
 
-| Metric | Result |
-|---|---|
-| Cold scan | ~1.50 M entries in 10–12 s |
-| Snapshot size | ~154 MB for 1.50 M entries |
-| Hot query (`locator_search`) | 6–25 ms for common queries; `path:` prefix scans ~70 ms |
-| Search while a rebuild runs | The old index keeps serving until the new one is ready |
-| Peak scan memory | Hundreds of MB; the engine is a child process and honours `memoryLimitMB` / `GOMEMLIMIT` |
+| Metric | 0.19.4 | 0.20.0 |
+|---|---|---|
+| Cold scan (default cache exclusion) | 2.40 M entries / 16.4 s / 754 MB peak | **0.48 M entries / 1.4 s / 164 MB** (−80% entries, ~12× faster) |
+| Snapshot size | 207 MB | **35 MB** |
+| Load + derived tables | 143–156 ms / heap 268 MB | **85–108 ms / heap 186 MB** |
+| Engine ready (incl. watcher) | ~2.4 s (150 k watches installed synchronously) | **~0.3 s** (watcher installs asynchronously) |
+| Common queries (`locator_search`) | func 13 ms / go 16 ms / `*.go` 21 ms / `ext:` 6.4 ms | **func 10.7 / go 6.0 / `*.go` 4.4 / `ext:` 3.3 ms** |
+| Regex query | `config.*test` ~102 ms | **~11 ms** |
+| Engine RSS (watcher installed) | ~700 MB | **~335 MB** (auto 512 MB limit) |
+| Incremental save (1 000 changes) | full 163 MB rewrite, 144 ms write-lock hold | **70.9 KB, 0.35–0.5 ms** (base untouched) |
+| Compact (~1.5 M entries) | ~0.9 s (864 ms write lock) / 850 MB peak | **120–190 ms (8–16 ms write lock) / 431 MB** |
 
 **Content index** (real home, 1 GB budget)
 
-| Metric | Result (0.7.x, real home) |
-|---|---|
-| Coverage | ~93.4 k text files / 93 sessions / 2,131 messages |
-| Full rebuild | ~3.5 min in the background; host p95 14 ms / max 115 ms during it |
-| Incremental refresh (no change) | ~12 s (dominated by the engine dump of 1.50 M entries) |
-| Idle host latency | p50 2 ms / p95 3 ms / max 6 ms |
-| Database size | ~3.1 GB (about 3× the body budget) |
-| Content query | ~100 ms for common words, a few ms for rare terms (worker thread, host unaffected) |
+| Metric | 0.19.4 | 0.20.0 |
+|---|---|---|
+| Common-word query (`the`, 30 hits) | 73 ms exact / 70 ms none | **5.3 ms / 1.6 ms** (13.8× / 43.7×) |
+| `function` (26.7 k hits) | 146 ms | **41 ms** |
+| Rare-term query | 8.8 ms | 13 ms (4 ms absolute difference, no practical impact) |
+| Incremental refresh (no change) | ~12 s (dump of 1.5 M entries) | **<0.3 s** (engine generation fast path) |
+| Full rebuild | ~3.5 min | **estimated 1.5–2 min** (250 writes/transaction + FTS optimize) |
+| Database size | ~4.1 GB (4.1× the body budget) | **estimated 2–3 GB** (cache exclusion, symbol cap, eviction, DB budget) |
+| Coverage | ~93.4 k files; new files freeze once the budget is full | Evicts oldest documents within the budget; new files stay indexable; `locator_status` reports coverage |
+| Host latency | Content queries run in a worker, host unaffected | Unchanged; `/combined` enrichment is asynchronous, so 9p roots no longer block the event loop |
 
 **Cheaper configurations**
 
 - Name search only: `contentIndex: false` drops content work to zero.
 - Keep content but use less disk: lower `contentMaxTotalBytes` (e.g. 256000000) or `contentMaxFileBytes`, or raise `contentRefreshMs`.
-- Cover more files: raise `contentMaxTotalBytes` / `contentMaxFiles` and check that `contentExcludes` does not exclude real document trees.
+- Cover more files: raise `contentMaxTotalBytes` / `contentMaxFiles` and check that `contentExcludes` does not exclude real document trees; with `contentEvict` (on by default) a full budget evicts the oldest documents instead of freezing.
+- Search toolchain caches too: `includeCaches: true` restores the 0.19 entry count; or use `resourcePreset: 'eco' | 'balanced' | 'performance'` for a one-switch profile.
 - The content database is a cache: deleting `stateDir` rebuilds it and never touches the source files.
 
 ## Platform support
@@ -439,7 +462,21 @@ DeepSeek Harness
 
 ## Memory
 
-The engine is a single Go process and honours the standard `GOMEMLIMIT` and `GOGC` environment variables (or `memoryLimitMB` in the config). A 1.2–1.5 M-entry index peaks around several hundred MB of RSS with the default GC; set `GOMEMLIMIT=600MiB` (soft limit, the runtime trades CPU for memory) or `GOGC=50` when the host is tight on RAM. Neither changes the snapshot format. In the live setup used for the numbers above, the DSH host process (including the content database page cache) sat around 700 MB RSS with the content index built, and idle host latency stayed at p50 2 ms.
+The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memoryLimitMB` knob, where `0` (the default) derives an automatic limit from the machine (25% of RAM clamped to 384–1024 MiB). A 0.20 engine loads a 1.5 M-entry snapshot into ~186 MB of heap and settles around 335 MB RSS with the watcher installed (512 MiB limit); the previous release needed ~700 MB in the same spot. Neither changes the snapshot format. With the content database page cache, the DSH host process sat around 700 MB RSS in the live setup, with idle latency around p50 2 ms.
+
+## 0.20.0 upgrade notes
+
+- **Default index scope**: toolchain/package caches (`~/go/pkg/mod`, `.cargo*`, `.rustup`, `.local/lib`, pnpm store, ...) are pruned from the name index and watcher by default (~75% fewer entries); `includeCaches: true` restores 0.19 behaviour. Old 0.19 snapshots keep cache entries until the first diff refresh — run `locator_rebuild` for an immediate shrink.
+- **Engine memory and persistence**: `memoryLimitMB: 0` now means auto (25% RAM, 384–1024 MiB); streamed snapshot load (~81 MB less heap); one-pass pinyin/fold derivation; autosave tracks the last change (80–90% less writing during active sessions); saving releases the read lock; compaction runs outside the write lock with a 5% tombstone threshold; optional zstd snapshots and a base+journal incremental snapshot.
+- **Watcher and fallback refresh**: the Linux watcher installs from the in-memory directory index (no full walk), runs asynchronously (ready no longer waits for ~10⁵ watches), honours `watchMaxDirs`, and 9p/DrvFs roots use an upsert diff (no subtree rescans, no snapshot write when nothing changed, exponential backoff).
+- **Name queries**: `IndexByte` folded matching, single-wildcard glob fast paths, ext/pinyin bitmaps, regex literal pre-filtering, streaming top-k, allocation-free scan path comparison and precompiled excludes — measured 27–88% lower query/scan CPU.
+- **Content queries**: adaptive bm25 (wide result sets skip rank), page/count filter SQL split, TTL+LRU cache with single-flight, worker cancellation (messages + SharedArrayBuffer) and a 2-worker pool, read-only PRAGMAs, automatic degradation past one second — common-word queries 10–80× faster.
+- **Content indexing**: generation fast path (no more full 1.5 M-entry dumps; unchanged refresh <0.3 s), budget eviction with coverage diagnostics, 250-write transactions and WAL checkpoints, FTS optimize after full builds, 500-symbol cap with generated-code skipping, extraction in a worker (8 MiB default cap), streamed multi-frame session decoding with append-only tails and a 64 MiB head cap, load/PSI/battery adaptive throttling.
+- **repo_map/symbol**: SQL aggregation with root filtering and hard caps removes the multi-GB / 18 s materialisation; exact/prefix symbol lookups use the name index.
+- **Panel and HTTP**: asynchronous `/combined` enrichment with a concurrency limit, short TTLs, 9p-aware lazy hashes and `compact` mode; content queries are cancelled on client disconnect; `/search` `nextOffset` accounting is fixed; the panel searches in two phases (names ~90 ms, content after 300 ms, content skipped below 3 characters, LRU 20), caps rows at 300 with incremental `loadMore`, reuses highlight regexes and polls only `/status` during a build.
+- **Configuration**: 17 new performance/resource knobs (table above); `contentExtractMaxBytes` defaults to 8 MiB; `memoryLimitMB=0` now means auto.
+- **Behaviour changes**: caches are no longer name-searchable by default; `status.builtAt` is Unix ms; `watching` may briefly be false while the async watcher installs (`watchInitializing`); the FTS schema v4 (contentless/split tables) was evaluated and deferred (~100 MB for a 4 GB migration), and per-root snapshot sharding is superseded by the incremental journal.
+- `443 tests`; six engine binaries rebuilt at 0.20.0.
 
 ## 0.19.4 upgrade notes
 

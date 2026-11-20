@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Config, contentLimits, outputBudgetChars, validateHookCommands } from '../src/config.ts'
+import { Config, applyResourcePreset, contentLimits, outputBudgetChars, validateHookCommands } from '../src/config.ts'
 import type { Config as ConfigType } from '../src/config.ts'
 
 type Resolve = (input: Record<string, unknown>) => ConfigType
@@ -28,7 +28,7 @@ describe('0.19.0 additive configuration', () => {
     expect(resolved.ocrCommand).toBe('')
     expect(resolved.urlFreshness).toBe(false)
     expect(resolved.contentExtractDocuments).toBe(true)
-    expect(resolved.contentExtractMaxBytes).toBe(20_000_000)
+    expect(resolved.contentExtractMaxBytes).toBe(8_000_000)
     expect(resolved.contentIndexSymbols).toBe(true)
     expect(resolved.contentSymbolMaxBytes).toBe(524_288)
     expect(resolved.refreshIncremental).toBe(true)
@@ -88,5 +88,51 @@ describe('validateHookCommands', () => {
     const both = validateHookCommands({ rerankCommand: '"a', ocrCommand: "'b" })
     expect(both).toHaveLength(2)
     expect(both[1]).toContain('ocrCommand')
+  })
+})
+describe('0.20.0 performance configuration', () => {
+  it('defaults the new knobs', () => {
+    const resolved = resolveConfig({})
+    expect(resolved.includeCaches).toBe(false)
+    expect(resolved.watchMaxDirs).toBe(120_000)
+    expect(resolved.snapshotCompression).toBe('none')
+    expect(resolved.memoryLimitMB).toBe(0)
+    expect(resolved.contentEvict).toBe(true)
+    expect(resolved.contentSymbolsPerFile).toBe(500)
+    expect(resolved.contentMaxDbBytes).toBe(2_000_000_000)
+    expect(resolved.contentRankAdaptive).toBe(true)
+    expect(resolved.contentQueryCacheSize).toBe(64)
+    expect(resolved.contentQueryCacheTtlMs).toBe(60_000)
+    expect(resolved.contentSessionMaxBytes).toBe(67_108_864)
+    expect(resolved.contentRefreshAdaptive).toBe(true)
+    expect(resolved.prewarm).toBe(true)
+    expect(resolved.combinedBudgetChars).toBe(0)
+    expect(resolved.combinedEnrichConcurrency).toBe(8)
+    expect(resolved.combinedHashMaxHits).toBe(5)
+    expect(resolved.resourcePreset).toBe('balanced')
+  })
+})
+
+describe('applyResourcePreset', () => {
+  it('keeps balanced untouched', () => {
+    const resolved = resolveConfig({})
+    expect(applyResourcePreset(resolved)).toBe(resolved)
+  })
+  it('lowers budgets in eco', () => {
+    const eco = applyResourcePreset(resolveConfig({ resourcePreset: 'eco' }))
+    expect(eco.memoryLimitMB).toBe(256)
+    expect(eco.watchMaxDirs).toBe(60_000)
+    expect(eco.contentMaxTotalBytes).toBe(256 * 1024 * 1024)
+    expect(eco.contentExtractDocuments).toBe(false)
+    expect(eco.contentIndexSymbols).toBe(false)
+    expect(eco.combinedHashMaxHits).toBe(0)
+  })
+  it('raises budgets in performance', () => {
+    const perf = applyResourcePreset(resolveConfig({ resourcePreset: 'performance' }))
+    expect(perf.memoryLimitMB).toBe(1024)
+    expect(perf.watchMaxDirs).toBe(200_000)
+    expect(perf.contentMaxTotalBytes).toBe(2_000_000_000)
+    expect(perf.refreshIntervalMs).toBe(600_000)
+    expect(resolveConfig({}).contentMaxTotalBytes).toBe(1_000_000_000)
   })
 })

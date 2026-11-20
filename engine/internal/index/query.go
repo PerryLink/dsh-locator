@@ -428,21 +428,34 @@ func (ix *Index) Search(q Query) (Result, error) {
 
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	m.prepareExts(ix)
+	if m.extImpossible {
+		// The include filter names only extensions the index has never seen.
+		return Result{Offset: q.Offset, TookNanos: time.Since(start).Nanoseconds(), Hits: make([]Hit, 0)}, nil
+	}
 
-	ids := ix.collectMatches(m)
-	total := len(ids)
 	// Sorting by path compares the parent chains directly (see comparePath), so
 	// no path is materialised for hits outside the returned page. A full-map
 	// prebuild used to cost a path string per match, which for a million-entry
 	// index is hundreds of megabytes and a multi-second stall.
 	less := func(a, b int32) bool { return ix.lessHit(a, b, q) }
-
 	k := q.Offset + limit
+
+	var ids []int32
+	var total int
+	if k > 0 && k <= topKStreamMax && len(ix.recs) > k*4 {
+		// Wide queries only need the first page: keep a bounded heap per worker
+		// instead of materialising every matching record id.
+		ids, total = ix.collectMatchesTopK(m, k, less)
+	} else {
+		ids = ix.collectMatches(m)
+		total = len(ids)
+	}
 	if k > total {
 		k = total
 	}
 	if k > 0 {
-		if total > k*4 {
+		if len(ids) > k {
 			selectTopK(ids, k, less)
 			ids = ids[:k]
 		}
@@ -537,6 +550,93 @@ func (ix *Index) collectMatches(m *matcher) []int32 {
 		ids = append(ids, part...)
 	}
 	return ids
+}
+
+// topKStreamMax bounds the page size (offset+limit) that uses the streaming
+// top-k scanner. Above it the full match list is cheaper than k-heaps per
+// worker.
+const topKStreamMax = 32768
+
+// collectMatchesTopK counts every match but retains only the k smallest ids.
+// Each worker keeps a bounded max-heap of its own candidates; the union of the
+// per-worker heaps contains the global top-k, because no element dropped by a
+// worker can be among its own k smallest.
+func (ix *Index) collectMatchesTopK(m *matcher, k int, less func(a, b int32) bool) ([]int32, int) {
+	n := len(ix.recs)
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 2 || n < 100_000 || k > n/workers {
+		cand, total := ix.collectTopKRange(m, k, less, 0, n)
+		return cand, total
+	}
+	if workers > 16 {
+		workers = 16
+	}
+	parts := make([][]int32, workers)
+	counts := make([]int, workers)
+	chunk := (n + workers - 1) / workers
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		start := w * chunk
+		end := start + chunk
+		if end > n {
+			end = n
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, lo, hi int) {
+			defer wg.Done()
+			parts[slot], counts[slot] = ix.collectTopKRange(m, k, less, lo, hi)
+		}(w, start, end)
+	}
+	wg.Wait()
+	total := 0
+	size := 0
+	for i := range parts {
+		total += counts[i]
+		size += len(parts[i])
+	}
+	cand := make([]int32, 0, size)
+	for _, part := range parts {
+		cand = append(cand, part...)
+	}
+	if len(cand) > k {
+		selectTopK(cand, k, less)
+		cand = cand[:k]
+	}
+	return cand, total
+}
+
+// collectTopKRange scans one record range, counting matches and keeping the k
+// smallest ids in a bounded max-heap.
+func (ix *Index) collectTopKRange(m *matcher, k int, less func(a, b int32) bool, lo, hi int) ([]int32, int) {
+	h := make([]int32, 0, k)
+	total := 0
+	for i := lo; i < hi; i++ {
+		if ix.recs[i].Deleted() {
+			continue
+		}
+		id := int32(i)
+		if !m.matches(ix, id) {
+			continue
+		}
+		total++
+		if len(h) < k {
+			h = append(h, id)
+			if len(h) == k {
+				for j := k/2 - 1; j >= 0; j-- {
+					siftDown(h, j, less)
+				}
+			}
+			continue
+		}
+		if less(id, h[0]) {
+			h[0] = id
+			siftDown(h, 0, less)
+		}
+	}
+	return h, total
 }
 
 func (ix *Index) lessHit(a, b int32, q Query) bool {

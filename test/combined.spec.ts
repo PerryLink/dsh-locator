@@ -1,13 +1,18 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  COMBINED_ENRICH_CACHE_TTL_MS,
   COMBINED_HASH_MAX_BYTES,
   COMBINED_HASH_MAX_HITS,
   dedupeNameHits,
+  isAbortError,
+  isSlowFilesystemPath,
+  mapLimit,
   readCombinedRequest,
   readScopes,
+  resetCombinedEnrichCache,
   runCombinedSearch,
   type CombinedDeps,
 } from '../src/combined.ts'
@@ -50,6 +55,11 @@ function contentResult(
 function state(extra: Partial<ContentState> = {}): ContentState {
   return { building: false, files: 0, sessions: 0, messages: 0, truncated: false, error: '', warnings: [], updatedAt: 0, ...extra }
 }
+
+/** The enrichment TTL cache is process-wide; isolate every test. */
+beforeEach(() => {
+  resetCombinedEnrichCache()
+})
 
 function deps(overrides: Partial<CombinedDeps> = {}): CombinedDeps {
   return {
@@ -430,7 +440,7 @@ describe('combined evidence enrichment', () => {
       }), readCombinedRequest({ query: 'notes' }, 100))
       const hit = response.files?.hits[0]
       expect(hit?.freshness).toMatchObject({ state: 'fresh' })
-      expect(typeof hit?.freshness.observedAt).toBe('number')
+      expect(typeof hit?.freshness?.observedAt).toBe('number')
       expect(hit?.permissions).toEqual({ read: 'allowed', visibility: 'roots', reason: 'name hit from the configured index roots' })
       expect(hit?.ref).toMatch(/^ref:\/\/file\?path=/)
       expect(hit?.hash).toBe(await sha256File(file))
@@ -450,6 +460,8 @@ describe('combined evidence enrichment', () => {
       }), readCombinedRequest({ query: 'notes' }, 100))
       expect(stale.files?.hits[0]?.freshness).toMatchObject({ state: 'stale' })
       rmSync(file)
+      // The fresh-state TTL cache is shared; reset it so the missing stat is real.
+      resetCombinedEnrichCache()
       const missing = await runCombinedSearch(deps({
         search: async args => args.filesOnly ? result([staleHit]) : result([]),
       }), readCombinedRequest({ query: 'notes' }, 100))
@@ -555,3 +567,235 @@ describe('combined evidence enrichment', () => {
   })
 })
 
+
+describe('async enrichment (0.20.0 P0-9)', () => {
+  it('bounds the async mapper and preserves input order', async () => {
+    let active = 0
+    let peak = 0
+    const mapped = await mapLimit([1, 2, 3, 4, 5, 6], 2, async value => {
+      active += 1
+      peak = Math.max(peak, active)
+      await new Promise(resolve => setTimeout(resolve, 5))
+      active -= 1
+      return value * 2
+    })
+    expect(mapped).toEqual([2, 4, 6, 8, 10, 12])
+    expect(peak).toBeLessThanOrEqual(2)
+    expect(await mapLimit([], 4, async () => 1)).toEqual([])
+  })
+
+  it('serves repeated enrichment observations from the short TTL cache', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-ttl-'))
+    const file = join(dir, 'cached.md')
+    writeFileSync(file, 'cached body')
+    try {
+      const hit = liveFileHit(file)
+      const first = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([hit]) : result([]),
+      }), readCombinedRequest({ query: 'cached' }, 100))
+      expect(first.files?.hits[0]?.freshness).toMatchObject({ state: 'fresh' })
+      rmSync(file)
+      // Inside the TTL the cached stat still answers fresh: that is the latency
+      // win, and it bounds staleness to COMBINED_ENRICH_CACHE_TTL_MS.
+      expect(COMBINED_ENRICH_CACHE_TTL_MS).toBeGreaterThan(0)
+      const cached = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([hit]) : result([]),
+      }), readCombinedRequest({ query: 'cached' }, 100))
+      expect(cached.files?.hits[0]?.freshness).toMatchObject({ state: 'fresh' })
+      // With the cache disabled the real (now missing) stat shows through.
+      const real = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([hit]) : result([]),
+      }), readCombinedRequest({ query: 'cached' }, 100), { cacheTtlMs: 0 })
+      expect(real.files?.hits[0]?.freshness).toMatchObject({ state: 'missing' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('skips hashing on paths the caller marks as slow (9p/network)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-slow-'))
+    const file = join(dir, 'slow.md')
+    writeFileSync(file, 'slow filesystem body')
+    try {
+      const response = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result([liveFileHit(file)]) : result([]),
+      }), readCombinedRequest({ query: 'slow' }, 100), { skipHash: path => path === file })
+      expect(response.files?.hits[0]?.hash).toBeUndefined()
+      expect(response.files?.hits[0]?.freshness).toMatchObject({ state: 'fresh' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('classifies UNC shares as slow and local temp paths as fast', () => {
+    if (process.platform === 'win32') {
+      expect(isSlowFilesystemPath('\\\\server\\share\\x.md')).toBe(true)
+    } else if (process.platform === 'linux') {
+      expect(isSlowFilesystemPath(join(tmpdir(), 'locator-definitely-local'))).toBe(false)
+    }
+  })
+
+  it('detects the real 9p mounts of this machine (skipped when there are none)', () => {
+    if (process.platform !== 'linux') return
+    let mountPoints: string[] = []
+    try {
+      mountPoints = readFileSync('/proc/self/mounts', 'utf8')
+        .split('\n')
+        .map(line => line.split(' '))
+        .filter(parts => parts[2] === '9p')
+        .map(parts => (parts[1] ?? '').replace(/\\040/g, ' '))
+        .filter(point => point !== '' && point !== '/')
+    } catch {
+      return
+    }
+    for (const mountPoint of mountPoints) {
+      expect(isSlowFilesystemPath(mountPoint + '/definitely-not-real')).toBe(true)
+    }
+  })
+
+  it('reports the store query time as content.tookMs, not the enrichment time', async () => {
+    const response = await runCombinedSearch(deps({
+      contentSearch: async () => {
+        await new Promise(resolve => setTimeout(resolve, 25))
+        return contentResult([])
+      },
+    }), readCombinedRequest({ query: 'note' }, 100))
+    expect(response.content?.tookMs).toBeGreaterThanOrEqual(20)
+    // The name group keeps the engine-reported (not wall-clock) time.
+    expect(response.files?.tookMs).toBe(1)
+  })
+
+  it('propagates an aborted content query instead of degrading the group', async () => {
+    const controller = new AbortController()
+    const pending = runCombinedSearch(deps({
+      contentSearch: async () => await new Promise((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')))
+      }),
+    }), readCombinedRequest({ query: 'note' }, 100), { signal: controller.signal })
+    controller.abort()
+    let caught: unknown
+    try {
+      await pending
+    } catch (error) {
+      caught = error
+    }
+    expect(isAbortError(caught)).toBe(true)
+    expect(isAbortError(new Error('plain'))).toBe(false)
+  })
+})
+
+describe('compact mode (P1)', () => {
+  it('strips every evidence field and keeps the structural wire fields', async () => {
+    const response = await runCombinedSearch(deps({
+      contentSearch: async () => contentResult([contentHit('file', '/tmp/a.md')]),
+      search: async args => args.filesOnly ? result([fileHit('/tmp/b.md')]) : result([dirHit('/tmp/d')]),
+    }), readCombinedRequest({ query: 'note', compact: true }, 100))
+    expect(response.compact).toBe(true)
+    const content = response.content?.hits[0] as unknown as Record<string, unknown>
+    expect(content.ref).toBeUndefined()
+    expect(content.freshness).toBeUndefined()
+    expect(content.permissions).toBeUndefined()
+    expect(content.hash).toBeUndefined()
+    expect(content.snippet).toBe('snippet')
+    expect(content.path).toBe('/tmp/a.md')
+    const file = response.files?.hits[0] as unknown as Record<string, unknown>
+    expect(file.path).toBe('/tmp/b.md')
+    expect(file.ref).toBeUndefined()
+    expect(file.freshness).toBeUndefined()
+    expect(file.permissions).toBeUndefined()
+    const dir = response.dirs?.hits[0] as unknown as Record<string, unknown>
+    expect(dir.path).toBe('/tmp/d')
+    expect(dir.ref).toBeUndefined()
+    // Counts and paging metadata stay identical to full mode.
+    expect(response.files?.count).toEqual({ value: 1, kind: 'exact' })
+    expect(response.files?.returned).toBe(1)
+    expect(response.content?.returned).toBe(1)
+    expect(response.content?.count).toEqual({ value: 1, kind: 'exact' })
+    expect(typeof response.tookMs).toBe('number')
+  })
+
+  it('accepts the true/1/"1" spellings and defaults to full mode', () => {
+    expect(readCombinedRequest({ query: 'x', compact: true }, 100).compact).toBe(true)
+    expect(readCombinedRequest({ query: 'x', compact: 1 }, 100).compact).toBe(true)
+    expect(readCombinedRequest({ query: 'x', compact: '1' }, 100).compact).toBe(true)
+    expect(readCombinedRequest({ query: 'x', compact: false }, 100).compact).toBe(false)
+    expect(readCombinedRequest({ query: 'x', compact: 'yes' }, 100).compact).toBe(false)
+    expect(readCombinedRequest({ query: 'x' }, 100).compact).toBe(false)
+  })
+
+  it('skips stats/hashes entirely, so even a huge page stays evidence-free', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-compact-'))
+    try {
+      const hits: SearchHit[] = []
+      for (let index = 0; index < 10; index++) {
+        const file = join(dir, 'c' + String(index) + '.md')
+        writeFileSync(file, 'body ' + String(index))
+        hits.push(liveFileHit(file))
+      }
+      const response = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result(hits) : result([]),
+      }), readCombinedRequest({ query: 'c', compact: true, limit: 10 }, 100))
+      expect(response.files?.hits).toHaveLength(10)
+      for (const hit of response.files?.hits ?? []) {
+        expect(hit.hash).toBeUndefined()
+        expect(hit.freshness).toBeUndefined()
+        expect(hit.ref).toBeUndefined()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('combined character budget (P0-15)', () => {
+  function groups(): { content: ContentHit[]; files: SearchHit[]; dirs: SearchHit[] } {
+    return {
+      content: Array.from({ length: 5 }, (_, index) => contentHit('file', '/tmp/content-' + String(index) + '.md')),
+      files: Array.from({ length: 5 }, (_, index) => fileHit('/tmp/file-' + String(index) + '.md')),
+      dirs: Array.from({ length: 5 }, (_, index) => dirHit('/tmp/dir-' + String(index))),
+    }
+  }
+
+  function budgetDeps(): CombinedDeps {
+    const data = groups()
+    return deps({
+      contentSearch: async () => contentResult(data.content),
+      search: async args => args.filesOnly ? result(data.files) : result(data.dirs),
+    })
+  }
+
+  it('is absent by default and trims lowest-priority groups first when enabled', async () => {
+    const unbudgeted = await runCombinedSearch(budgetDeps(), readCombinedRequest({ query: 'note' }, 100))
+    expect(unbudgeted.budget).toBeUndefined()
+
+    // A budget that exactly fits the content group: everything in dirs/files has
+    // to go, while the (heaviest, most valuable) content group stays intact.
+    const hitSize = (hits: readonly unknown[]): number => hits.reduce<number>((total, hit) => total + JSON.stringify(hit).length + 1, 0)
+    const fullSize = JSON.stringify(unbudgeted).length
+    const trimmedSize = hitSize(unbudgeted.dirs?.hits ?? []) + hitSize(unbudgeted.files?.hits ?? [])
+    const limitChars = fullSize - trimmedSize + 200
+    const budgeted = await runCombinedSearch(budgetDeps(), readCombinedRequest({ query: 'note' }, 100), { budgetChars: limitChars })
+    expect(budgeted.budget).toBeDefined()
+    expect(budgeted.budget?.limitChars).toBe(limitChars)
+    expect(budgeted.budget?.dropped).toBeGreaterThan(0)
+    expect(budgeted.budget?.truncated).toBe(true)
+    expect(budgeted.budget?.usedChars).toBeGreaterThan(0)
+    // Directories are the first group to shrink; content survives intact at
+    // this budget because it is the most valuable group.
+    expect(budgeted.dirs?.hits.length).toBeLessThan(5)
+    expect(budgeted.dirs?.returned).toBe(budgeted.dirs?.hits.length)
+    expect(budgeted.dirs?.truncated).toBe(true)
+    expect(budgeted.content?.hits).toHaveLength(5)
+    // The trimmed response is really smaller than the untrimmed one.
+    expect(JSON.stringify(budgeted).length).toBeLessThan(JSON.stringify(unbudgeted).length)
+  })
+
+  it('keeps structural fields (counts, state, warnings) while trimming hits', async () => {
+    const budgeted = await runCombinedSearch(budgetDeps(), readCombinedRequest({ query: 'note' }, 100), { budgetChars: 900 })
+    expect(budgeted.files?.count).toEqual({ value: 5, kind: 'exact' })
+    expect(budgeted.dirs?.count).toEqual({ value: 5, kind: 'exact' })
+    expect(budgeted.content?.count).toEqual({ value: 5, kind: 'exact' })
+    expect(budgeted.content?.warnings).toEqual([])
+    expect(budgeted.contentEnabled).toBe(true)
+  })
+})
