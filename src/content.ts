@@ -2082,6 +2082,9 @@ export class ContentIndex {
         if (row === undefined || row === null) continue
         if (!await this.addDoc(row, fresh)) continue
         this.countIndexed()
+        // A 1 MB body can keep the single FTS writer busy for tens of ms;
+        // yield after every row so CI runners and the host stay responsive.
+        await this.breathe()
       }
       await this.breathe()
     }
@@ -3635,12 +3638,14 @@ export class ContentIndex {
     if (this.db === null) return mtimes
     const unique = [...new Set(paths.filter(path => path !== ''))]
     if (unique.length === 0) return mtimes
-    const callerBySpelling = new Map<string, string>()
+    const callersBySpelling = new Map<string, string[]>()
     const spellings: string[] = []
     for (const path of unique) {
       for (const spelling of this.pathSpellings(path)) {
         if (!spellings.includes(spelling)) spellings.push(spelling)
-        if (!callerBySpelling.has(spelling)) callerBySpelling.set(spelling, path)
+        const callers = callersBySpelling.get(spelling)
+        if (callers === undefined) callersBySpelling.set(spelling, [path])
+        else if (!callers.includes(path)) callers.push(path)
       }
     }
     // ~400 placeholders per statement keeps every SQLite build well below its
@@ -3654,10 +3659,12 @@ export class ContentIndex {
           .all(...batch) as Array<{ path?: string; mtime?: number }>
         for (const row of rows) {
           if (typeof row.path !== 'string' || row.path === '' || typeof row.mtime !== 'number') continue
-          const callerPath = callerBySpelling.get(row.path)
-          if (callerPath === undefined) continue
-          const previous = mtimes.get(callerPath)
-          if (previous === undefined || row.mtime > previous) mtimes.set(callerPath, row.mtime)
+          const callers = callersBySpelling.get(row.path)
+          if (callers === undefined) continue
+          for (const callerPath of callers) {
+            const previous = mtimes.get(callerPath)
+            if (previous === undefined || row.mtime > previous) mtimes.set(callerPath, row.mtime)
+          }
         }
       }
     } catch { /* older/foreign databases simply report unknown freshness */ }
