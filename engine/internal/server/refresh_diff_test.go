@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -279,6 +280,9 @@ func TestReadyDoesNotWaitForWatcher(t *testing.T) {
 // budget must report watchLimited and turn on the periodic refresh instead of
 // failing the watcher.
 func TestWatchLimitStartsRefreshFallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("watchMaxDirs budgets the per-directory inotify watcher; other platforms use a single recursive handle")
+	}
 	root := t.TempDir()
 	for i := 0; i < 6; i++ {
 		dir := filepath.Join(root, "dir"+string(rune('a'+i)))

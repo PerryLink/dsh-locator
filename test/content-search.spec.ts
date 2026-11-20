@@ -9,11 +9,17 @@
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterAll, describe, expect, it } from 'vitest'
 import { RANK_ADAPTIVE_THRESHOLD, searchContent, type ContentSearchResult } from '../src/content-search.ts'
 import { createSearchWorkerHandler, SEARCH_WORKER_PROTOCOL, type SearchWorkerReply } from '../src/content-search-worker.ts'
+
+/** Platform-native test roots: the query layer keeps the OS separator in path filters. */
+const ROOT = process.platform === 'win32' ? 'C:\\root' : '/root'
+const SCOPE = process.platform === 'win32' ? 'C:\\scope' : '/scope'
+const SESSIONS = process.platform === 'win32' ? 'C:\\sessions' : '/sessions'
+const under = (base: string, rest: string): string => base + sep + rest
 
 const cleanups: Array<() => void> = []
 afterAll(() => { for (const cleanup of cleanups.reverse()) cleanup() })
@@ -51,7 +57,7 @@ function createIndex(specs: readonly DocSpec[]): TestIndex {
   db.exec('BEGIN')
   for (const [index, spec] of specs.entries()) {
     const kind = spec.kind ?? 'file'
-    const pathValue = spec.path ?? '/root/doc' + String(index) + '.md'
+    const pathValue = spec.path ?? under(ROOT, 'doc' + String(index) + '.md')
     const title = spec.title ?? 'doc' + String(index) + '.md'
     const sessionId = spec.sessionId ?? null
     const messageId = spec.messageId ?? null
@@ -148,13 +154,13 @@ describe('filter SQL split and bounded counting (P1-3)', () => {
   it('bounds an exact count for a wide filtered set at countLimit', () => {
     const specs = wideCorpus('common')
     for (let index = 0; index < 5; index++) {
-      specs[index] = { body: 'common scoped body ' + String(index), path: '/scope/file' + String(index) + '.md' }
+      specs[index] = { body: 'common scoped body ' + String(index), path: under(SCOPE, 'file' + String(index) + '.md') }
     }
     const index2 = createIndex(specs)
-    const bounded = searchContent(index2.db, 'common', 5, { pathPrefix: '/scope', count: 'exact', countLimit: 3 })
+    const bounded = searchContent(index2.db, 'common', 5, { pathPrefix: SCOPE, count: 'exact', countLimit: 3 })
     expect(bounded.count).toEqual({ value: 3, kind: 'bounded', limit: 3 })
     expect(bounded.warnings).toContain('bounded-count')
-    const exact = searchContent(index2.db, 'common', 5, { pathPrefix: '/scope', count: 'exact', countLimit: 100 })
+    const exact = searchContent(index2.db, 'common', 5, { pathPrefix: SCOPE, count: 'exact', countLimit: 100 })
     expect(exact.count).toEqual({ value: 5, kind: 'exact' })
   })
 
@@ -176,15 +182,15 @@ describe('filter SQL split and bounded counting (P1-3)', () => {
   it('splits a workspace count by kind while keeping session authorization filters', () => {
     const specs = wideCorpus('common')
     for (let index = 0; index < 7; index++) {
-      specs.push({ body: 'common session ' + String(index), kind: 'session', path: '/sessions/current.jsonl.zst', title: 's' + String(index), sessionId: 'session-one' })
+      specs.push({ body: 'common session ' + String(index), kind: 'session', path: under(SESSIONS, 'current.jsonl.zst'), title: 's' + String(index), sessionId: 'session-one' })
     }
     for (let index = 0; index < 3; index++) {
-      specs.push({ body: 'common archived ' + String(index), kind: 'session', path: '/sessions/archived.jsonl.zst', title: 'a' + String(index), sessionId: 'session-archived' })
+      specs.push({ body: 'common archived ' + String(index), kind: 'session', path: under(SESSIONS, 'archived.jsonl.zst'), title: 'a' + String(index), sessionId: 'session-archived' })
     }
     const index2 = createIndex(specs)
     const result = searchContent(index2.db, 'common', 5, {
-      sessionPath: '/sessions/current.jsonl.zst',
-      pathPrefix: '/root',
+      sessionPath: under(SESSIONS, 'current.jsonl.zst'),
+      pathPrefix: ROOT,
       allowedSessionIds: ['session-one', 'session-archived'],
       excludeArchivedSessions: ['session-archived'],
       count: 'exact',
