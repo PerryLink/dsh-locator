@@ -705,7 +705,8 @@ describe('batched content freshness (0.20.2)', () => {
     writeFileSync(first, 'first body')
     writeFileSync(second, 'second body')
     try {
-      const fileMtime = statSync(first).mtimeMs
+      const firstMtime = statSync(first).mtimeMs
+      const secondMtime = statSync(second).mtimeMs
       let batchCalls = 0
       let batchPaths: readonly string[] = []
       let perHitCalls = 0
@@ -718,7 +719,7 @@ describe('batched content freshness (0.20.2)', () => {
         contentIndexedMtimes: paths => {
           batchCalls++
           batchPaths = paths
-          return new Map([[first, fileMtime], [second, fileMtime]])
+          return new Map([[first, firstMtime], [second, secondMtime]])
         },
         contentIndexedMtime: () => {
           perHitCalls++
