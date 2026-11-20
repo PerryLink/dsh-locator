@@ -188,6 +188,7 @@ const PANEL_KEYS = [
   'evidenceFreshness', 'evidencePermissions', 'evidenceHash', 'evidenceNoHash', 'evidenceSession',
   'evidenceMessage', 'evidenceMention', 'evidenceObserved',
   'freshnessFresh', 'freshnessStale', 'freshnessMissing', 'freshnessUnknown',
+  'shortQueryFallback', 'evidenceOmittedHint',
   'permissionAllowed', 'permissionDenied',
   'evidenceStaleHint', 'evidenceMissingHint', 'evidenceDeniedHint', 'evidenceUnknownHint',
   'evidenceOpenFile', 'evidenceOpenSession', 'evidenceReveal',
@@ -630,6 +631,96 @@ describe('client.js search pipeline (0.20.0 perf)', () => {
     const session = helpers.evidenceForHit('content', { kind: 'session', sessionId: 'session-1', title: 'Chat' })
     expect(session.canJump).toBe(true)
     expect(session.cite.startsWith('[Chat](dsh-session:')).toBe(true)
+  })
+
+  it('short-circuits an empty search box without a combined request', () => {
+    const marker = source.indexOf('// An empty search box is not a query')
+    expect(marker).toBeGreaterThanOrEqual(0)
+    const end = source.indexOf('if (!anyScope) {', marker)
+    expect(end).toBeGreaterThan(marker)
+    const block = source.slice(marker, end)
+    // Cancels the previous generation and clears every loaded group/offset.
+    expect(block).toContain('idle.generation += 1')
+    expect(block).toContain('controller.abort()')
+    expect(block).toContain('setGroups({})')
+    expect(block).toContain('setOffsets({ files: 0, dirs: 0, content: 0 })')
+    // Neither the names phase nor the settled full request may run.
+    expect(block).not.toContain('/dsh-locator/combined')
+    expect(block).not.toContain('combinedBody(')
+    // The cleared list still shows the localized empty-query hint.
+    expect(source).toContain("t('emptyQuery')")
+    expect(source).toContain("rows.length === 0 && query.trim() === ''")
+  })
+
+  it('asks for evidence on the settled full phase only and clamps evidenceLimit', () => {
+    const options = {
+      query: 'the',
+      scopes: { content: true, files: true, dirs: true },
+      sort: 'mtime', desc: true, matchMode: 'normal', caseSensitive: false, wholeWord: false,
+      sessionId: '', root: '', includeArchived: false,
+      limit: 50, contentLimit: 30, countLimit: 1000,
+      filesOffset: 0, dirsOffset: 0, contentOffset: 0,
+    }
+    const full = helpers.combinedBody(options, 'full')
+    expect(full.evidenceLimit).toBe(10)
+    // A caller may widen or disable the window (0..50 mirrors the server);
+    // compact keystroke pages never ask for evidence at all.
+    expect(helpers.combinedBody({ ...options, evidenceLimit: 25 }, 'full').evidenceLimit).toBe(25)
+    expect(helpers.combinedBody({ ...options, evidenceLimit: 500 }, 'full').evidenceLimit).toBe(50)
+    expect(helpers.combinedBody({ ...options, evidenceLimit: 0 }, 'full').evidenceLimit).toBe(0)
+    for (const phase of ['names', 'content', 'more'] as const) {
+      expect('evidenceLimit' in helpers.combinedBody(options, phase)).toBe(false)
+    }
+    // The panel sends the constant with every phase's settings object.
+    expect(source).toContain('evidenceLimit: SEARCH_EVIDENCE_LIMIT')
+    expect(sourceConstant('SEARCH_EVIDENCE_LIMIT')).toBe(10)
+  })
+
+  it('marks the bounded 2-character body fallback and localizes the note', () => {
+    // Normal mode lowers the body threshold to 2; extended keeps the trigram floor.
+    const scopes = { content: true, files: true, dirs: true }
+    const short = helpers.searchPhasePlan({ query: 'ai', scopes, contentEnabled: true, matchMode: 'normal', minChars: 2 })
+    expect(short).toMatchObject({ text: 'ai', content: true, names: true, minChars: 2 })
+    expect(helpers.searchPhasePlan({ query: 'ai', scopes, contentEnabled: true, matchMode: 'extended', minChars: 3 }).content).toBe(false)
+    expect(helpers.searchPhasePlan({ query: 'a', scopes, contentEnabled: true, matchMode: 'normal', minChars: 2 }).content).toBe(false)
+    // The placeholder carries the marker the renderer turns into the note.
+    const two = helpers.contentPlaceholderGroup(null, 'normal', 2, 2)
+    expect(two.shortQueryFallback).toBe(true)
+    expect(two.error).toBeUndefined()
+    expect(helpers.contentPlaceholderGroup(null, 'normal', 3, 2).shortQueryFallback).toBe(false)
+    expect(helpers.contentPlaceholderGroup(null, 'extended', 2, 3).shortQueryFallback).toBe(false)
+    expect(helpers.contentPlaceholderGroup(null, 'regex', 2, 2).shortQueryFallback).toBe(false)
+    // The server-reported field and its warning code map to the localized note
+    // instead of leaking a raw code through the generic warning line.
+    expect(source).toContain("t('shortQueryFallback')")
+    expect(source).toContain('group.shortQueryFallback === true')
+    expect(source).toContain("code === 'short-query-fallback'")
+    expect(source).toContain("code.startsWith('content-query-short-fallback')")
+    expect(sourceConstant('SEARCH_SHORT_CONTENT_CHARS')).toBe(2)
+    expect(source).toContain("contentMinChars = matchMode === 'normal' ? SEARCH_SHORT_CONTENT_CHARS : SEARCH_MIN_CONTENT_CHARS")
+  })
+
+  it('renders evidence-omitted hits tolerantly and hints on demand', () => {
+    // Rows past the full-request evidenceLimit lose ref/freshness/permissions.
+    const omitted = helpers.evidenceForHit('files', { path: '/tmp/late.md', name: 'late.md', size: 3, mtime: 4, ext: 'md' })
+    expect(omitted.ref).toBe('')
+    expect(omitted.hashShort).toBe('')
+    expect(omitted.freshnessReported).toBe(false)
+    expect(omitted.permissionsReported).toBe(false)
+    expect(omitted.canOpen).toBe(true)
+    expect(omitted.mention).toBe('@/tmp/late.md')
+    // Malformed evidence blocks fall back to the derived view instead of throwing.
+    const messy = helpers.evidenceForHit('content', {
+      path: '/tmp/x', freshness: 'stale', permissions: { read: 'maybe' }, hash: 12, title: 5, ref: 42,
+    })
+    expect(messy.kind).toBe('file')
+    expect(messy.title).toBe('x')
+    expect(messy.ref).toBe('')
+    expect(messy.freshness).toEqual({ state: 'unknown' })
+    expect(messy.permissions).toEqual({ read: 'allowed', visibility: 'roots', reason: '' })
+    // The inspector reports the window on demand and rows expose the state.
+    expect(source).toContain("t('evidenceOmittedHint', { n: SEARCH_EVIDENCE_LIMIT })")
+    expect(source).toContain("'data-evidence': evidenceLoaded ? 'rich' : settled ? 'omitted' : 'pending'")
   })
 
   it('wires the two-phase pipeline and status-only building polling', () => {

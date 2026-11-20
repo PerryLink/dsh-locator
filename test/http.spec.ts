@@ -661,6 +661,7 @@ function fakeContent(options: {
   hits?: Array<Record<string, unknown>>
   search?: (query: string, limit: number, searchOptions: Record<string, unknown>) => Promise<unknown>
   diagnostics?: Record<string, unknown>
+  mtimesForPaths?: (paths: readonly string[]) => Map<string, number>
 } = {}): ContentIndex {
   const state = { building: false, files: 1, sessions: 0, messages: 0, truncated: false, error: '', warnings: [], updatedAt: 1 }
   return {
@@ -674,6 +675,7 @@ function fakeContent(options: {
       return { hits: hits.slice(0, limit), count: { value: hits.length, kind: 'exact' as const }, warnings: [] }
     },
     ...(options.diagnostics === undefined ? {} : { diagnostics: () => options.diagnostics }),
+    ...(options.mtimesForPaths === undefined ? {} : { mtimesForPaths: options.mtimesForPaths }),
   } as unknown as ContentIndex
 }
 
@@ -803,6 +805,90 @@ describe('combined route 0.20.0 options', () => {
   })
 })
 
+describe('combined route 0.20.2 evidence and short-query limits', () => {
+  it('keeps evidence on the first evidenceLimit rows and strips the rest', async () => {
+    const hits = Array.from({ length: 12 }, (_, index) => httpHit('/tmp/limit-' + String(index) + '.md'))
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], hits))
+    const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'limit' }))).json()
+    const fileHits = (body.files as { hits: Array<Record<string, unknown>>; count: { value: number }; truncated: boolean }).hits
+    expect(fileHits).toHaveLength(12)
+    // The documented default keeps exactly 10 evidence rows.
+    expect(fileHits.slice(0, 10).every(hit => hit.freshness !== undefined && hit.permissions !== undefined)).toBe(true)
+    expect(fileHits.slice(10).every(hit => hit.freshness === undefined && hit.ref === undefined)).toBe(true)
+    expect((body.files as { count: { value: number } }).count.value).toBe(12)
+    expect((body.files as { truncated: boolean }).truncated).toBe(false)
+    // A body limit narrows the evidence rows further, never the counts.
+    const two = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'limit', evidenceLimit: 2 }))).json()
+    const twoHits = (two.files as { hits: Array<Record<string, unknown>> }).hits
+    expect(twoHits.slice(0, 2).every(hit => hit.freshness !== undefined)).toBe(true)
+    expect(twoHits.slice(2).every(hit => hit.freshness === undefined)).toBe(true)
+    expect((two.files as { count: { value: number } }).count.value).toBe(12)
+  })
+
+  it('admits a 2-code-point query when the short-query fallback is enabled', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const content = fakeContent({
+      search: async (_query, _limit, searchOptions) => {
+        calls.push(searchOptions)
+        return {
+          hits: [contentHttpHit('/tmp/ai.md')],
+          count: { value: 1, kind: 'exact' as const },
+          warnings: ['content-query-short-fallback'],
+          shortQueryFallback: true,
+        }
+      },
+    })
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [], { config: { contentShortQueryFallback: true } }), content)
+    const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'ai' }))).json()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.shortQueryFallback).toBe(true)
+    expect((body.content as { shortQueryFallback?: boolean }).shortQueryFallback).toBe(true)
+    expect((body.content as { warnings?: string[] }).warnings).toContain('content-query-short-fallback')
+  })
+
+  it('still rejects a 2-code-point query when the fallback is disabled', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const content = fakeContent({
+      search: async (_query, _limit, searchOptions) => {
+        calls.push(searchOptions)
+        return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+      },
+    })
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [], { config: { contentShortQueryFallback: false } }), content)
+    const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'ai' }))).json()
+    expect(calls).toHaveLength(0)
+    expect((body.content as { error?: string }).error).toBe('content-query-too-short')
+  })
+
+  it('batches content freshness mtimes through one store call', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-http-batch-'))
+    const file = join(dir, 'body.md')
+    writeFileSync(file, 'batch body')
+    try {
+      const batchCalls: Array<readonly string[]> = []
+      const content = fakeContent({
+        hits: [contentHttpHit(file)],
+        mtimesForPaths: paths => {
+          batchCalls.push(paths)
+          return new Map([[file, statSync(file).mtimeMs]])
+        },
+      })
+      const harness = fakeHarness({ connection: new FakeConnection() })
+      registerHttp(harness.ctx, fakeRuntime([], []), content)
+      const body = (await callRoute(harness, '/dsh-locator/combined', fakeRequest({ query: 'body' }))).json()
+      expect(batchCalls).toHaveLength(1)
+      expect(batchCalls[0]).toEqual([file])
+      const contentHits = (body.content as { hits: Array<Record<string, unknown>> }).hits
+      expect(contentHits[0]?.freshness).toMatchObject({ state: 'fresh' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('status route 0.20.0 observability', () => {
   const payload = {
     version: '0.20.0', platform: 'linux/amd64', roots: ['/tmp'], entries: 3, files: 3, dirs: 0,
@@ -811,6 +897,7 @@ describe('status route 0.20.0 observability', () => {
     watchInitializing: true, snapshotBytes: 1_000, saveBytes: 900, saveMs: 12, saveCount: 2,
     queueDepth: 3, generation: 5, builtAt: 1_700_000_000_000, queryCount: 4, lastQueryMs: 1.5,
     recentQueryMs: [1, 2], heapBytes: 1234, numGC: 2, refreshBackoffMs: 0,
+    unwatchedRefreshMs: 300_000, nextRefreshAt: 1_700_000_600_000, refreshRounds: 4, refreshSkippedByPressure: 2,
   }
 
   it('answers from the pushed 1 s status cache and forwards engine gauges', async () => {
@@ -843,13 +930,18 @@ describe('status route 0.20.0 observability', () => {
       generation: 5,
       queryCount: 4,
       recentQueryMs: [1, 2],
+      unwatchedRefreshMs: 300_000,
+      nextRefreshAt: 1_700_000_600_000,
+      refreshRounds: 4,
+      refreshSkippedByPressure: 2,
     })
   })
 
   it('forwards the content diagnostics block read-only', async () => {
     const diagnostics = {
       coverage: { indexedFiles: 10, candidateFiles: 12, ratio: 0.833, bodyBytes: 100, budgetBytes: 200, fileBudget: 0, truncated: false, evictedDocs: 1, sessions: 1, messages: 2 },
-      dbBytes: 300, walBytes: 4, dbBudgetBytes: 400, dbOverBudget: false, ftsOptimizedAt: 0,
+      dbBytes: 300, walBytes: 4, dbBudgetBytes: 400, dbOverBudget: false, ftsOptimizedAt: 1_700_000_000_000,
+      dbLiveBytes: 280, freelistBytes: 20, ftsSegments: 1, optimizeWarnings: 0, liveRefreshMsLast: 42,
       lastRefreshMs: 5, lastRefreshMode: 'fast', engineGeneration: 1, symbolsPerFile: 500, extractWorker: true,
     }
     const harness = fakeHarness({ connection: new FakeConnection() })

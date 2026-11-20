@@ -14,6 +14,16 @@
  * host event loop. Hashes are capped per page (default 5, `combinedHashMaxHits`)
  * and skipped on slow/network filesystems. `compact` mode (P1) skips the
  * enrichment entirely and strips the evidence fields for keystroke requests.
+ *
+ * 0.20.2 adds three bounded paths on top:
+ * - `evidenceLimit` (default 10, max 50): only the first N rows of the merged
+ *   response (content → files → dirs) keep ref/hash/freshness/permissions, so a
+ *   settled page no longer pays one stat per row; counts and truncation are
+ *   unchanged.
+ * - an empty-query fast path: a browse page returns name rows with refs but no
+ *   freshness/hash, skipping ~100 stats for a query that selects everything.
+ * - content freshness uses one batched mtime lookup (`contentIndexedMtimes`)
+ *   instead of one synchronous SQL query per content hit.
  * @module dsh-locator/combined
  */
 
@@ -32,6 +42,22 @@ import { encodeSessionRef, fileRef, freshnessFor, sha256File } from './refs.ts'
 import type { RefFreshness, RefPermissions } from './refs.ts'
 import type { SearchArgs, SearchHit, SearchResult } from './runtime.ts'
 import type { OutputBudget } from './scope.ts'
+
+/** Unicode code-point count (the content store's length unit for query terms). */
+function codePoints(text: string): number {
+  return Array.from(text).length
+}
+
+/**
+ * Additive 0.20.2 flags on a content-store result. `shortQueryFallback` is
+ * declared by content-search; `scopeFallback` is a plugin-side widening marker
+ * (the content layer may also report one), so it is intersected locally to keep
+ * this module compiling against either store declaration.
+ */
+type ContentSearchResultWidened = ContentSearchResult & {
+  /** Set when the store had to widen the requested workspace scope. */
+  scopeFallback?: string
+}
 
 /** Attach the citable ref to one content hit (session URI or path snapshot). */
 function contentHitRef<T extends { kind: string; sessionId?: string; path?: string }>(hit: T): T {
@@ -75,6 +101,12 @@ export const COMBINED_ENRICH_CONCURRENCY = 8
 /** Default freshness-cache lifetime; a longer window trades staleness for latency. */
 export const COMBINED_ENRICH_CACHE_TTL_MS = 1_500
 
+/** Evidence rows kept per response when the caller does not ask (0.20.2). */
+export const COMBINED_EVIDENCE_LIMIT = 10
+
+/** Hard cap for a caller-supplied evidence limit. */
+export const COMBINED_EVIDENCE_LIMIT_MAX = 50
+
 /** Optional per-call knobs; the HTTP layer fills them from config. */
 export interface CombinedOptions {
   /** Parallel stat/hash enrichment limit (default {@link COMBINED_ENRICH_CONCURRENCY}). */
@@ -89,6 +121,11 @@ export interface CombinedOptions {
   skipHash?: (path: string) => boolean
   /** Character budget for the whole response; 0/undefined keeps it unbudgeted. */
   budgetChars?: number
+  /**
+   * Allow 2-code-point queries into the content store when it runs the bounded
+   * LIKE short-query fallback (config: contentShortQueryFallback, default true).
+   */
+  shortQueryFallback?: boolean
   /** Abort enrichment/queries when the HTTP client goes away. */
   signal?: AbortSignal
 }
@@ -276,10 +313,16 @@ function stripEvidence<T extends Record<string, unknown>>(hit: T): T {
   return rest as T
 }
 
+/** Mutable per-response enrichment state shared by the evidence phase. */
+interface EnrichState {
+  /** Hashes still allowed in this response (config.combinedHashMaxHits). */
+  hashBudget: number
+  /** One observation timestamp for every hit of the response. */
+  observedAt: number
+}
+
 /** Enrich one page of name hits with freshness, permissions and an optional hash. */
-async function enrichNameHits(hits: readonly SearchHit[], options: ResolvedCombinedOptions): Promise<CombinedNameHit[]> {
-  const observedAt = Date.now()
-  let hashBudget = options.hashMaxHits
+async function enrichNameHits(hits: readonly SearchHit[], options: ResolvedCombinedOptions, state: EnrichState): Promise<CombinedNameHit[]> {
   return await mapLimit(hits, options.enrichConcurrency, async hit => {
     const permissions: RefPermissions = {
       read: 'allowed',
@@ -292,12 +335,14 @@ async function enrichNameHits(hits: readonly SearchHit[], options: ResolvedCombi
     const freshness = freshnessForHit(
       snapshot,
       missing ? undefined : { mtimeMs: info.mtimeMs, size: info.size },
-      observedAt,
+      state.observedAt,
     )
     if (hit.dir || missing || !info.isFile) return { ...hit, freshness, permissions }
     let hash: string | undefined
-    if (hashBudget > 0 && info.size <= options.hashMaxBytes && !options.skipHash(hit.path)) {
-      hashBudget -= 1
+    // The check and the decrement are synchronous, so concurrent workers can
+    // never overrun the per-response hash budget.
+    if (state.hashBudget > 0 && info.size <= options.hashMaxBytes && !options.skipHash(hit.path)) {
+      state.hashBudget -= 1
       hash = await cachedHash(hit.path, info.mtimeMs, info.size, options.hashMaxBytes, options.cacheTtlMs)
     }
     return { ...hit, freshness, permissions, ...(hash === undefined ? {} : { hash }) }
@@ -308,24 +353,42 @@ async function enrichNameHits(hits: readonly SearchHit[], options: ResolvedCombi
  * Enrich one page of content hits with permissions (always) and freshness when
  * the host supplies a content-index snapshot lookup; a hit that already carries
  * a hash (find/content field) passes it through unchanged.
+ *
+ * 0.20.2 resolves the stored mtime of every file hit with one batched lookup
+ * (`contentIndexedMtimes`); only session hits still need one query per message
+ * because a session log has one row per message. A store without the batch
+ * method (older embedders, tests) keeps the per-hit path.
  */
 async function enrichContentHits(
   hits: readonly (ContentHit & { ref?: string })[],
   deps: CombinedDeps,
   options: ResolvedCombinedOptions,
+  state: EnrichState,
 ): Promise<CombinedContentHit[]> {
-  const observedAt = Date.now()
+  const filePaths: string[] = []
+  for (const hit of hits) {
+    if (hit.kind !== 'session' && typeof hit.path === 'string' && hit.path !== '' && !filePaths.includes(hit.path)) {
+      filePaths.push(hit.path)
+    }
+  }
+  let batch: Map<string, number> | undefined
+  if (filePaths.length > 0 && deps.contentIndexedMtimes !== undefined) {
+    try { batch = deps.contentIndexedMtimes(filePaths) } catch { batch = undefined }
+  }
   return await mapLimit(hits, options.enrichConcurrency, async hit => {
     const permissions: RefPermissions = hit.kind === 'session'
       ? { read: 'allowed', visibility: 'session', reason: 'session messages are scoped to the caller workspace' }
       : { read: 'allowed', visibility: 'roots', reason: 'content hit from the configured index roots' }
     let indexedAt: number | undefined
-    try { indexedAt = deps.contentIndexedMtime?.(hit) } catch { indexedAt = undefined }
-    let freshness: RefFreshness = { state: 'unknown', observedAt }
+    if (hit.kind !== 'session' && batch !== undefined) indexedAt = batch.get(hit.path)
+    else {
+      try { indexedAt = deps.contentIndexedMtime?.(hit) } catch { indexedAt = undefined }
+    }
+    let freshness: RefFreshness = { state: 'unknown', observedAt: state.observedAt }
     if (indexedAt !== undefined) {
       const info = await cachedStat(hit.path, options.cacheTtlMs)
       const missing = info === undefined || info.size < 0
-      freshness = missing ? { state: 'missing', observedAt } : freshnessFor(indexedAt, info.mtimeMs, observedAt)
+      freshness = missing ? { state: 'missing', observedAt: state.observedAt } : freshnessFor(indexedAt, info.mtimeMs, state.observedAt)
     }
     const existing = (hit as { hash?: unknown }).hash
     return {
@@ -335,6 +398,62 @@ async function enrichContentHits(
       ...(isSha256(existing) ? { hash: existing } : {}),
     }
   })
+}
+
+/**
+ * Apply the per-response evidence policy (0.20.2):
+ *
+ * - compact requests keep the keystroke behavior: every evidence field is
+ *   stripped and nothing is stat'ed;
+ * - an empty query is a browse page: no stat/hash enrichment at all, but the
+ *   cheap evidence refs stay attached;
+ * - otherwise only the first `evidenceLimit` rows of the merged response (in
+ *   content → files → dirs order) are enriched; later rows keep their wire shape
+ *   minus ref/hash/freshness/permissions. Counts, paging and truncation are not
+ *   touched.
+ * @param response - response whose groups are enriched in place.
+ * @param deps - stores used for the content-index mtime lookup.
+ * @param options - resolved per-call knobs (compact flag lives on the request).
+ * @param request - the normalized request.
+ */
+async function applyCombinedEvidence(
+  response: CombinedResponse,
+  deps: CombinedDeps,
+  options: ResolvedCombinedOptions,
+  request: CombinedRequest,
+): Promise<void> {
+  const stripAll = request.compact
+  const emptyQuery = request.query.trim() === ''
+  const rowsKept = stripAll || emptyQuery ? 0 : request.evidenceLimit
+  const state: EnrichState = { hashBudget: options.hashMaxHits, observedAt: Date.now() }
+  const plain = (hit: unknown): unknown => stripEvidence(hit as Record<string, unknown>)
+  let remaining = rowsKept
+  if (response.content !== undefined) {
+    const group = response.content
+    const keep = Math.min(remaining, group.hits.length)
+    const enriched = keep > 0
+      ? await enrichContentHits(group.hits.slice(0, keep), deps, options, state)
+      : []
+    remaining -= keep
+    if (stripAll) {
+      group.hits = group.hits.map(hit => plain(hit) as CombinedContentHit)
+    } else if (!emptyQuery) {
+      // An empty-query page never paid for evidence; its refs stay (cheap and
+      // used by the panel's copy/cite actions).
+      group.hits = [...enriched, ...group.hits.slice(keep).map(hit => plain(hit) as CombinedContentHit)]
+    }
+  }
+  for (const group of [response.files, response.dirs]) {
+    if (group === undefined) continue
+    const keep = Math.min(remaining, group.hits.length)
+    const enriched = keep > 0 ? await enrichNameHits(group.hits.slice(0, keep), options, state) : []
+    remaining -= keep
+    if (stripAll) {
+      group.hits = group.hits.map(hit => plain(hit) as CombinedNameHit)
+    } else if (!emptyQuery) {
+      group.hits = [...enriched, ...group.hits.slice(keep).map(hit => plain(hit) as CombinedNameHit)]
+    }
+  }
 }
 
 /** Strip trailing separators from a root so prefix checks are unambiguous. */
@@ -400,6 +519,8 @@ export interface CombinedRequest {
   countLimit: number
   /** Keystroke mode: skip evidence enrichment and strip ref/hash/freshness/permissions. */
   compact: boolean
+  /** Rows whose evidence survives in a full response (default 10, max 50; 0 strips all). */
+  evidenceLimit: number
 }
 
 /** One name-index group: files or directories. */
@@ -435,6 +556,10 @@ export interface ContentGroup {
   truncated: boolean
   /** Live build progress while `building`; the panel shows the counters. */
   progress?: ContentProgress
+  /** True when this page came from the bounded 2-character LIKE fallback (0.20.2). */
+  shortQueryFallback?: boolean
+  /** Set when the store had to widen a workspace scope (e.g. to all roots). */
+  scopeFallback?: string
   /** Wall-clock time of the content lookup; 0 when it was skipped. */
   tookMs: number
   error?: string
@@ -461,6 +586,13 @@ export interface CombinedDeps {
   contentSearch?: (query: string, limit: number, options: ContentSearchOptions) => Promise<ContentSearchResult>
   contentStatus?: () => ContentState
   /**
+   * Optional batched look-up of the content-index snapshot mtime for the file
+   * paths of one page (0.20.2). One chunked `WHERE path IN (...)` replaces the
+   * per-hit synchronous SQL; session hits still resolve through
+   * {@link contentIndexedMtime} because a session log has one row per message.
+   */
+  contentIndexedMtimes?: (paths: readonly string[]) => Map<string, number>
+  /**
    * Optional look-up of the content-index snapshot mtime for one hit. Supplying
    * it turns content-hit freshness from "unknown" into fresh/stale/missing; the
    * panel keeps working without it.
@@ -480,6 +612,7 @@ interface ResolvedCombinedOptions {
   cacheTtlMs: number
   skipHash: (path: string) => boolean
   budgetChars: number
+  shortQueryFallback: boolean
   signal?: AbortSignal
 }
 
@@ -496,6 +629,7 @@ function resolveOptions(options: CombinedOptions): ResolvedCombinedOptions {
     cacheTtlMs: positiveInt(options.cacheTtlMs, COMBINED_ENRICH_CACHE_TTL_MS),
     skipHash: options.skipHash ?? isSlowFilesystemPath,
     budgetChars: positiveInt(options.budgetChars, 0),
+    shortQueryFallback: options.shortQueryFallback !== false,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   }
 }
@@ -556,6 +690,7 @@ export function readCombinedRequest(body: Record<string, unknown>, maxResults: n
     count: countMode(body.count),
     countLimit: clamp(body.countLimit, 1, 5000, 1000),
     compact: compactFlag(body.compact),
+    evidenceLimit: clamp(body.evidenceLimit, 0, COMBINED_EVIDENCE_LIMIT_MAX, COMBINED_EVIDENCE_LIMIT),
   }
 }
 
@@ -591,6 +726,10 @@ export function dedupeNameHits<T extends SearchHit>(
  * panel opens with an empty box, and a lazy content build there would cost
  * minutes and gigabytes for no results. Failures are contained per group so a
  * broken content cache still shows name results.
+ *
+ * Stores run concurrently and return raw hits; the evidence phase then enriches
+ * only the rows the caller asked for (see {@link applyCombinedEvidence}), and
+ * the character budget trims the tail last.
  * @param deps - stores and the lazy-start hook.
  * @param input - normalized request.
  * @param options - per-call enrichment/budget knobs (config-backed).
@@ -609,14 +748,13 @@ export async function runCombinedSearch(
   const { scopes, query } = request
   const contentEnabled = deps.contentSearch !== undefined
   const wantsContent = scopes.content && contentEnabled
-  // Any non-empty query is evaluated against the content store; short or
-  // over-limit queries are rejected by the same validator the store uses, so
-  // the panel can show `content-query-too-short` without starting a build.
+  // Empty queries are a browse page: the name groups still answer, but the
+  // content store is never asked (and never started) for them.
   const askContent = wantsContent && query.trim() !== ''
 
   const contentPromise = wantsContent ? contentGroup(deps, request, askContent, resolved) : Promise.resolve(undefined)
-  const filesPromise = scopes.files ? nameGroup(deps, request, true, resolved) : Promise.resolve(undefined)
-  const dirsPromise = scopes.dirs ? nameGroup(deps, request, false, resolved) : Promise.resolve(undefined)
+  const filesPromise = scopes.files ? nameGroup(deps, request, true) : Promise.resolve(undefined)
+  const dirsPromise = scopes.dirs ? nameGroup(deps, request, false) : Promise.resolve(undefined)
   const [content, files, dirs] = await Promise.all([contentPromise, filesPromise, dirsPromise])
 
   const dedupedFiles = files === undefined
@@ -641,6 +779,8 @@ export async function runCombinedSearch(
     ...(request.compact ? { compact: true } : {}),
     tookMs: Date.now() - started,
   }
+  await applyCombinedEvidence(response, deps, resolved, request)
+  response.tookMs = Date.now() - started
   if (resolved.budgetChars > 0) applyCombinedBudget(response, resolved.budgetChars)
   return response
 }
@@ -696,8 +836,12 @@ export function applyCombinedBudget(response: CombinedResponse, limitChars: numb
   budget.truncated = budget.dropped > 0 || size > limitChars
 }
 
-/** Page through a directory-shaped name query. */
-async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: boolean, options: ResolvedCombinedOptions): Promise<NameGroup> {
+/**
+ * Page through a directory-shaped name query. Hits come back raw (with the
+ * cheap evidence ref attached); freshness/permissions/hash are attached later
+ * by {@link applyCombinedEvidence} for the rows that fit the evidence budget.
+ */
+async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: boolean): Promise<NameGroup> {
   const started = Date.now()
   const empty = (error?: string, warnings?: string[]): NameGroup => ({
     hits: [],
@@ -738,12 +882,7 @@ async function nameGroup(deps: CombinedDeps, request: CombinedRequest, files: bo
     })
     const prefix = request.rootPrefix
     const selected = prefix === null ? result.hits : result.hits.filter(hit => pathUnderPrefix(hit.path, prefix))
-    let hits: CombinedNameHit[]
-    if (request.compact) {
-      hits = (prefix === null ? result.hits : selected).map(hit => stripEvidence(hit as SearchHit & Record<string, unknown>) as CombinedNameHit)
-    } else {
-      hits = await enrichNameHits(selected.map(nameHitRef), options)
-    }
+    const hits: CombinedNameHit[] = selected.map(nameHitRef)
     const narrowed = prefix !== null && hits.length !== result.hits.length
     return {
       hits,
@@ -799,11 +938,25 @@ async function contentGroup(
   // Reject sub-trigram / over-limit / control-character queries here, before
   // deps.ensure() can start a lazy content build the store cannot answer. The
   // store performs the same check; sharing it keeps the error codes identical.
-  const check = checkContentQuery(request.query, request.matchMode)
+  // 0.20.2: a 2-code-point query is only gated by the pre-check itself when the
+  // bounded short-query fallback is off; otherwise the store decides (and
+  // reports `shortQueryFallback` on the result).
+  const check = checkContentQuery(
+    request.query,
+    request.matchMode,
+    options.shortQueryFallback ? { allowShort: true } : undefined,
+  )
   if (!check.ok) {
-    return { ...empty(check.warnings), error: check.error ?? 'content-query-invalid', tookMs: Date.now() - started }
+    // Only a whole 2-code-point query may reach the bounded fallback; a longer
+    // query that merely contains a short term stays a hard error.
+    const shortEligible = options.shortQueryFallback
+      && check.error === 'content-query-too-short'
+      && codePoints(request.query.trim()) === 2
+    if (!shortEligible) {
+      return { ...empty(check.warnings), error: check.error ?? 'content-query-invalid', tookMs: Date.now() - started }
+    }
   }
-  if (check.terms.length === 0) return empty()
+  if (check.ok && check.terms.length === 0 && check.short !== true) return empty()
   const options_: ContentSearchOptions = {
     matchMode: request.matchMode,
     caseSensitive: request.caseSensitive,
@@ -811,6 +964,10 @@ async function contentGroup(
     count: request.count,
     countLimit: request.countLimit,
     offset: request.contentOffset,
+    // Explicit per-query opt-in: the plugin sets contentShortQueryFallback from
+    // config and the store must not re-reject the 2-code-point query the
+    // pre-check above already admitted.
+    ...(options.shortQueryFallback ? { shortQueryFallback: true } : {}),
     ...(request.sessionId === null ? {} : { sessionId: request.sessionId }),
     ...(request.rootPrefix === null ? {} : { pathPrefix: request.rootPrefix }),
     ...(request.includeArchived ? { includeArchived: true } : {}),
@@ -819,15 +976,14 @@ async function contentGroup(
   try {
     deps.ensure?.()
     const queryStarted = Date.now()
-    const result = await deps.contentSearch(request.query, request.contentLimit, options_)
+    const result = await deps.contentSearch(request.query, request.contentLimit, options_) as ContentSearchResultWidened
     // tookMs is the store's own query cost, matching the name group's
     // engine-reported tookMs; enrichment is reported by the group's latency only.
     const queryTookMs = Date.now() - queryStarted
     const state = deps.contentStatus?.()
-    const rawHits = request.compact
-      ? result.hits.map(hit => stripEvidence(hit as ContentHit & Record<string, unknown>) as ContentHit & { ref?: string })
-      : result.hits.map(contentHitRef)
-    const hits = request.compact ? rawHits as CombinedContentHit[] : await enrichContentHits(rawHits, deps, options)
+    // Raw hits carry only the cheap evidence ref; the response-level evidence
+    // phase enriches the first N rows (ref/hash/freshness/permissions).
+    const hits: CombinedContentHit[] = result.hits.map(contentHitRef)
     return {
       hits,
       returned: hits.length,
@@ -841,6 +997,8 @@ async function contentGroup(
       truncated: state?.truncated ?? false,
       ...(state?.progress === undefined ? {} : { progress: state.progress }),
       tookMs: queryTookMs,
+      ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
+      ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
       ...(result.error === undefined ? {} : { error: result.error }),
     }
   } catch (error) {

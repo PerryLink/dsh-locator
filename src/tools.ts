@@ -12,6 +12,7 @@ import {
   BUDGET_SCHEMA,
   CONTENT_HIT_SCHEMA,
   CONTENT_STATE_SCHEMA,
+  contentScopeOptionsOf,
   readContextLines,
   runContentSearchRequest,
   type CallerIdentity,
@@ -91,6 +92,10 @@ const SEARCH_OUTPUT = {
     state: CONTENT_STATE_SCHEMA,
     scope: { type: 'string', enum: ['workspace', 'all'] },
     scopeFallback: { type: 'string' },
+    shortQueryFallback: {
+      type: 'boolean',
+      description: 'True when a 2-character query was answered by the bounded short-query fallback (the page is approximate).',
+    },
     error: { type: 'string' },
   },
 } as const
@@ -142,6 +147,11 @@ const STATUS_OUTPUT = {
     heapBytes: { type: 'integer', description: 'Go heap size in bytes.' },
     numGC: { type: 'integer', description: 'Completed GC cycles.' },
     refreshBackoffMs: { type: 'integer', description: 'Current refresh retry backoff in ms.' },
+    // 0.20.2 unwatched-root freshness observability (absent on older engines).
+    unwatchedRefreshMs: { type: 'integer', description: 'Refresh cadence for roots without a native watcher, in ms.' },
+    nextRefreshAt: { type: 'integer', description: 'Epoch ms of the next scheduled fallback refresh.' },
+    refreshRounds: { type: 'integer', description: 'Completed fallback refresh rounds since engine start.' },
+    refreshSkippedByPressure: { type: 'integer', description: 'Fallback refreshes skipped by the pressure gate since start.' },
     content: {
       type: 'object',
       additionalProperties: false,
@@ -364,6 +374,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           warnings?: string[]
           scope?: string
           scopeFallback?: string
+          shortQueryFallback?: boolean
           error?: string
         }
         if (!v.ok) return [{ type: 'text', text: 'locator_search failed: ' + (v.error ?? 'unknown error') }]
@@ -372,11 +383,12 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           ? '\n(truncated' + (v.nextOffset === undefined ? '' : '; nextOffset ' + String(v.nextOffset)) + (v.budget?.dropped === undefined || v.budget.dropped === 0 ? '' : '; ' + String(v.budget.dropped) + ' hit(s) over the ' + String(v.budget.limitChars ?? 0) + '-char budget') + ')'
           : ''
         const warnings = v.warnings === undefined || v.warnings.length === 0 ? '' : ' (warnings: ' + [...new Set(v.warnings)].join(', ') + ')'
+        const shortNote = v.shortQueryFallback === true ? ' (short-query fallback: approximate page)' : ''
         if (mode === 'content') {
           const hits = v.contentHits ?? []
           const count = v.contentCount === undefined ? '' : v.contentCount.kind === 'bounded' ? ', count ≥ ' + String(v.contentCount.value) : v.contentCount.kind === 'exact' ? ', count ' + String(v.contentCount.value) : ''
           const lines = contentHitLines(hits)
-          return [{ type: 'text', text: 'locator_search (content) ' + JSON.stringify(v.query ?? '') + ': ' + String(hits.length) + ' hit(s)' + count + ' in ' + (v.tookMs ?? 0).toFixed(1) + ' ms' + warnings + budgetNote + '\n' + lines.join('\n') }]
+          return [{ type: 'text', text: 'locator_search (content) ' + JSON.stringify(v.query ?? '') + ': ' + String(hits.length) + ' hit(s)' + count + ' in ' + (v.tookMs ?? 0).toFixed(1) + ' ms' + warnings + shortNote + budgetNote + '\n' + lines.join('\n') }]
         }
         if (mode === 'count') {
           const content = v.contentCount === undefined ? '' : ', content ' + String(v.contentCount.value) + (v.contentCount.kind === 'bounded' ? '+' : '')
@@ -457,7 +469,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           ...(mode === 'count' ? { count: 'exact' as const } : {}),
         }
         try {
-          const result = await runContentSearchRequest(options.content, request, rt.roots, false, caller)
+          const result = await runContentSearchRequest(options.content, request, rt.roots, false, caller, contentScopeOptionsOf(rt))
           if (!result.ok) {
             return { ok: false as const, query: args.query, mode, error: result.error, warnings: result.warnings, hits: [], contentHits: [], state: result.state }
           }
@@ -499,6 +511,8 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
               warnings: [...new Set(countWarnings)],
               state: result.state,
               scope: result.scope,
+              ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
+              ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
               tookMs: Date.now() - contentStarted,
             }
           }
@@ -545,6 +559,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
             scope: result.scope,
             tookMs: Date.now() - contentStarted,
             ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
+            ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
           }
         } catch (error) {
           return { ok: false as const, query: args.query, mode, error: messageOf(error) }
@@ -1030,6 +1045,10 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           heapBytes?: number
           numGC?: number
           refreshBackoffMs?: number
+          unwatchedRefreshMs?: number
+          nextRefreshAt?: number
+          refreshRounds?: number
+          refreshSkippedByPressure?: number
           content?: {
             enabled?: boolean
             files?: number
@@ -1052,9 +1071,16 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
               }
               dbBytes?: number
               walBytes?: number
+              dbLiveBytes?: number
+              freelistBytes?: number
+              ftsSegments?: number
+              ftsOptimizedAt?: number
+              optimizeWarnings?: number
+              warningCounts?: Record<string, number>
               dbOverBudget?: boolean
               lastRefreshMs?: number
               lastRefreshMode?: string
+              liveRefreshMsLast?: number
               engineGeneration?: number | null
             }
           }
@@ -1100,6 +1126,12 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
         if (v.lastQueryMs !== undefined) resources.push('last query ' + v.lastQueryMs.toFixed(1) + ' ms')
         if (v.queueDepth !== undefined) resources.push('queue ' + String(v.queueDepth))
         if (v.heapBytes !== undefined) resources.push('heap ' + formatSize(v.heapBytes))
+        if (v.unwatchedRefreshMs !== undefined) resources.push('unwatched refresh ' + String(v.unwatchedRefreshMs) + ' ms')
+        if (v.nextRefreshAt !== undefined) resources.push('next refresh ' + new Date(v.nextRefreshAt).toISOString())
+        if (v.refreshRounds !== undefined) resources.push('refresh rounds ' + String(v.refreshRounds))
+        if (v.refreshSkippedByPressure !== undefined && v.refreshSkippedByPressure > 0) {
+          resources.push('pressure skips ' + String(v.refreshSkippedByPressure))
+        }
         if (resources.length > 0) lines.push('  resources: ' + resources.join(' · '))
         if (v.refreshFallback === true) lines.push('  fallback: periodic rebuild is active (native watcher incomplete)')
         if (v.refreshMode !== undefined || v.refreshTookMs !== undefined || (v.watchUnwatchedRoots?.length ?? 0) > 0) {
@@ -1134,8 +1166,32 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
             if (coverage !== undefined && typeof coverage.evictedDocs === 'number' && coverage.evictedDocs > 0) {
               parts.push('evicted ' + String(coverage.evictedDocs))
             }
+            if (typeof diagnostics.dbLiveBytes === 'number' && diagnostics.dbLiveBytes > 0) {
+              parts.push('db live ' + formatSize(diagnostics.dbLiveBytes))
+            }
+            if (typeof diagnostics.freelistBytes === 'number' && diagnostics.freelistBytes > 0) {
+              parts.push('freelist ' + formatSize(diagnostics.freelistBytes))
+            }
+            if (typeof diagnostics.ftsSegments === 'number' && diagnostics.ftsSegments > 0) {
+              parts.push('fts segments ' + String(diagnostics.ftsSegments))
+            }
+            if (typeof diagnostics.ftsOptimizedAt === 'number') {
+              parts.push(diagnostics.ftsOptimizedAt > 0 ? 'fts optimized' : 'fts never optimized')
+            }
+            if (typeof diagnostics.optimizeWarnings === 'number' && diagnostics.optimizeWarnings > 0) {
+              parts.push('optimize warnings ' + String(diagnostics.optimizeWarnings))
+            }
+            if (diagnostics.warningCounts !== undefined && typeof diagnostics.warningCounts === 'object') {
+              const codes = Object.entries(diagnostics.warningCounts)
+                .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
+                .map(([code, count]) => code + ' ' + String(count))
+              if (codes.length > 0) parts.push('extract warnings: ' + codes.slice(0, 3).join(', '))
+            }
             if (typeof diagnostics.lastRefreshMs === 'number' && diagnostics.lastRefreshMs > 0) {
               parts.push('refresh ' + String(diagnostics.lastRefreshMs) + ' ms' + (typeof diagnostics.lastRefreshMode === 'string' && diagnostics.lastRefreshMode !== '' ? ' (' + diagnostics.lastRefreshMode + ')' : ''))
+            }
+            if (typeof diagnostics.liveRefreshMsLast === 'number' && diagnostics.liveRefreshMsLast > 0) {
+              parts.push('live refresh ' + String(diagnostics.liveRefreshMsLast) + ' ms')
             }
             if (diagnostics.dbOverBudget === true) parts.push('db over budget')
             if (parts.length > 0) lines.push('  content resources: ' + parts.join(' · '))

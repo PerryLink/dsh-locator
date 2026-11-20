@@ -28,6 +28,14 @@ export interface Config {
    * re-scanning every root on each fallback tick.
    */
   refreshIncremental?: boolean
+  /**
+   * Refresh cadence for roots without a native watcher (9p/DrvFs, NFS, SMB and
+   * similar). The fallback refresh rescans only those roots; default 300000
+   * (5 minutes; with the 2x backoff cap the worst-case staleness is 10
+   * minutes) keeps workspace-visible files fresh without rescanning the
+   * whole tree.
+   */
+  unwatchedRefreshIntervalMs?: number
   /** Directory reader concurrency during scans; 0 uses the CPU count. */
   scanWorkers: number
   /**
@@ -68,7 +76,7 @@ export interface Config {
   contentLazy: boolean
   /** Maximum bytes read from one text file. */
   contentMaxFileBytes: number
-  /** Stop adding content after this many body bytes; 0 means unlimited. */
+  /** Stop adding content after this many body bytes (default 1.6 GB); 0 means unlimited. */
   contentMaxTotalBytes: number
   /** Incremental content refresh cadence; 0 disables it. */
   contentRefreshMs: number
@@ -110,6 +118,12 @@ export interface Config {
   contentSessionMaxBytes?: number
   /** Pause/slow content builds when the machine is busy or on battery (default true). */
   contentRefreshAdaptive?: boolean
+  /** Parallel file read/decode/symbol extraction workers during a full build (default 4; 1 disables). */
+  contentParallelPrefetch?: number
+  /** Sniff extensionless files for text content (default true; raises content coverage). */
+  contentTextSniff?: boolean
+  /** Allow a bounded LIKE fallback for 2-character content queries (default true). */
+  contentShortQueryFallback?: boolean
   /** Index code symbols for locator_outline/locator_symbol/locator_repo_map (default true). */
   contentIndexSymbols?: boolean
   /** Largest code file considered for symbol extraction in bytes (default 512 KiB). */
@@ -120,7 +134,7 @@ export interface Config {
    * a long first build; set this instead of hand-writing two zero values.
    */
   contentFullIndex: boolean
-  /** Most recent session logs indexed; 0 means all. */
+  /** Most recent session logs indexed (default 1000); 0 means all. */
   contentMaxSessions: number
   /**
    * Search archived sessions by default. Archived logs are indexed either way
@@ -253,6 +267,7 @@ export const Config: Schema<Config> = Schema.object({
   watch: Schema.boolean().default(true),
   refreshIntervalMs: Schema.number().default(1_800_000),
   refreshIncremental: Schema.boolean().default(true),
+  unwatchedRefreshIntervalMs: Schema.number().default(300_000),
   scanWorkers: Schema.number().default(0),
   memoryLimitMB: Schema.number().default(0),
   includeCaches: Schema.boolean().default(false),
@@ -261,7 +276,7 @@ export const Config: Schema<Config> = Schema.object({
   contentIndex: Schema.boolean().default(true),
   contentLazy: Schema.boolean().default(true),
   contentMaxFileBytes: Schema.number().default(1_000_000),
-  contentMaxTotalBytes: Schema.number().default(1_000_000_000),
+  contentMaxTotalBytes: Schema.number().default(1_600_000_000),
   contentRefreshMs: Schema.number().default(300_000),
   contentMaxFiles: Schema.number().default(200_000),
   contentIndexReasoning: Schema.boolean().default(false),
@@ -270,16 +285,22 @@ export const Config: Schema<Config> = Schema.object({
   contentExtractMaxBytes: Schema.number().default(8_000_000),
   contentEvict: Schema.boolean().default(true),
   contentSymbolsPerFile: Schema.number().default(500),
-  contentMaxDbBytes: Schema.number().default(5_000_000_000),
+  contentMaxDbBytes: Schema.number().default(8_000_000_000),
   contentRankAdaptive: Schema.boolean().default(true),
   contentQueryCacheSize: Schema.number().default(64),
   contentQueryCacheTtlMs: Schema.number().default(60_000),
   contentSessionMaxBytes: Schema.number().default(67_108_864),
   contentRefreshAdaptive: Schema.boolean().default(true),
+  /** Parallel file read/decode/symbol extraction workers during a full content build (1 disables). */
+  contentParallelPrefetch: Schema.number().default(4),
+  /** Sniff extensionless files for text content (default true; raises coverage). */
+  contentTextSniff: Schema.boolean().default(true),
+  /** Allow a bounded LIKE fallback for 2-character queries (default true). */
+  contentShortQueryFallback: Schema.boolean().default(true),
   contentIndexSymbols: Schema.boolean().default(true),
   contentSymbolMaxBytes: Schema.number().default(524_288),
   contentFullIndex: Schema.boolean().default(false),
-  contentMaxSessions: Schema.number().default(100),
+  contentMaxSessions: Schema.number().default(1000),
   contentIncludeArchived: Schema.boolean().default(false),
   allowCrossWorkspaceSessions: Schema.boolean().default(false),
   contentActiveSessionDelayMs: Schema.number().default(120_000),
@@ -393,6 +414,7 @@ export function applyResourcePreset(config: Config): Config {
       contentIndexSymbols: false,
       contentRefreshMs: Math.max(config.contentRefreshMs, 1_800_000),
       refreshIntervalMs: Math.max(config.refreshIntervalMs, 21_600_000),
+      unwatchedRefreshIntervalMs: Math.max(config.unwatchedRefreshIntervalMs ?? 600_000, 3_600_000),
       combinedHashMaxHits: 0,
       contentQueryCacheSize: Math.min(config.contentQueryCacheSize ?? 64, 32),
     }
@@ -405,6 +427,7 @@ export function applyResourcePreset(config: Config): Config {
     contentMaxFiles: Math.max(config.contentMaxFiles, 500_000),
     contentRefreshMs: Math.min(config.contentRefreshMs, 300_000),
     refreshIntervalMs: Math.min(config.refreshIntervalMs, 600_000),
+    unwatchedRefreshIntervalMs: Math.min(config.unwatchedRefreshIntervalMs ?? 300_000, 120_000),
     contentSymbolsPerFile: Math.max(config.contentSymbolsPerFile ?? 500, 1_000),
     combinedHashMaxHits: Math.max(config.combinedHashMaxHits ?? 5, 20),
     contentQueryCacheSize: Math.max(config.contentQueryCacheSize ?? 64, 256),

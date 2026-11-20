@@ -25,6 +25,14 @@ export interface Config {
      * re-scanning every root on each fallback tick.
      */
     refreshIncremental?: boolean;
+    /**
+     * Refresh cadence for roots without a native watcher (9p/DrvFs, NFS, SMB and
+     * similar). The fallback refresh rescans only those roots; default 300000
+     * (5 minutes; with the 2x backoff cap the worst-case staleness is 10
+     * minutes) keeps workspace-visible files fresh without rescanning the
+     * whole tree.
+     */
+    unwatchedRefreshIntervalMs?: number;
     /** Directory reader concurrency during scans; 0 uses the CPU count. */
     scanWorkers: number;
     /**
@@ -65,7 +73,7 @@ export interface Config {
     contentLazy: boolean;
     /** Maximum bytes read from one text file. */
     contentMaxFileBytes: number;
-    /** Stop adding content after this many body bytes; 0 means unlimited. */
+    /** Stop adding content after this many body bytes (default 1.6 GB); 0 means unlimited. */
     contentMaxTotalBytes: number;
     /** Incremental content refresh cadence; 0 disables it. */
     contentRefreshMs: number;
@@ -107,6 +115,12 @@ export interface Config {
     contentSessionMaxBytes?: number;
     /** Pause/slow content builds when the machine is busy or on battery (default true). */
     contentRefreshAdaptive?: boolean;
+    /** Parallel file read/decode/symbol extraction workers during a full build (default 4; 1 disables). */
+    contentParallelPrefetch?: number;
+    /** Sniff extensionless files for text content (default true; raises content coverage). */
+    contentTextSniff?: boolean;
+    /** Allow a bounded LIKE fallback for 2-character content queries (default true). */
+    contentShortQueryFallback?: boolean;
     /** Index code symbols for locator_outline/locator_symbol/locator_repo_map (default true). */
     contentIndexSymbols?: boolean;
     /** Largest code file considered for symbol extraction in bytes (default 512 KiB). */
@@ -117,7 +131,7 @@ export interface Config {
      * a long first build; set this instead of hand-writing two zero values.
      */
     contentFullIndex: boolean;
-    /** Most recent session logs indexed; 0 means all. */
+    /** Most recent session logs indexed (default 1000); 0 means all. */
     contentMaxSessions: number;
     /**
      * Search archived sessions by default. Archived logs are indexed either way

@@ -11,7 +11,7 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { BUDGET_SCHEMA, runContentSearchRequest, type CallerIdentity, type EnrichedContentHit } from './find.ts'
+import { BUDGET_SCHEMA, contentScopeOptionsOf, runContentSearchRequest, type CallerIdentity, type EnrichedContentHit } from './find.ts'
 import type { ContentIndex } from './content.ts'
 import { fileRef } from './refs.ts'
 import type { LocatorRuntime, SearchHit } from './runtime.ts'
@@ -160,6 +160,8 @@ const EXPLORE_OUTPUT = {
     truncated: { type: 'boolean' },
     budget: BUDGET_SCHEMA,
     tookMs: { type: 'number' },
+    /** Set when the content store had to widen a workspace scope (e.g. 'global'). */
+    scopeFallback: { type: 'string' },
     warnings: { type: 'array', items: { type: 'string' } },
     error: { type: 'string' },
   },
@@ -262,6 +264,7 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
           nextOffset?: number
           warnings?: string[]
           error?: string
+          scopeFallback?: string
           tookMs?: number
         }
         if (!v.ok) return [{ type: 'text', text: 'locator_explore failed: ' + (v.error ?? 'unknown error') }]
@@ -275,6 +278,7 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
         }
         const queries = v.queries
         if (queries !== undefined) lines.push('  queries: names=' + JSON.stringify(queries.names ?? []) + ' content=' + JSON.stringify(queries.content ?? []))
+        if (v.scopeFallback !== undefined) lines.push('  scope fallback: ' + v.scopeFallback)
         if (v.warnings !== undefined && v.warnings.length > 0) lines.push('  warnings: ' + [...new Set(v.warnings)].join(', '))
         if (v.truncated === true) lines.push('  (truncated by the result budget; narrow the question or use locator_find)')
         return [{ type: 'text', text: lines.join('\n') }]
@@ -320,6 +324,7 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
           return { hits: [] as SearchHit[], indexing: false }
         }
       })
+      let contentScopeFallback: string | undefined
       const contentTasks = options.content === undefined
         ? []
         : probes.content.map(async query => {
@@ -330,11 +335,12 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
                 limit: plan.perQuery,
                 offset: 0,
                 scope: scope as 'workspace' | 'all',
-              }, options.roots, options.allowCrossWorkspaceSessions === true, caller)
+              }, options.roots, options.allowCrossWorkspaceSessions === true, caller, contentScopeOptionsOf(rt))
               if (!result.ok) {
                 warnings.push('content-query-failed:' + result.error)
                 return [] as EnrichedContentHit[]
               }
+              if (result.scopeFallback !== undefined) contentScopeFallback = result.scopeFallback
               return result.hits
             } catch (error) {
               warnings.push('content-query-failed:' + messageOf(error).slice(0, 120))
@@ -396,6 +402,7 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
         truncated,
         budget: budgeted.budget,
         tookMs: Date.now() - started,
+        ...(contentScopeFallback === undefined ? {} : { scopeFallback: contentScopeFallback }),
         warnings: [...new Set(warnings)],
       }
     },

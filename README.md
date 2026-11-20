@@ -91,7 +91,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # 指定版本
-dsh plugin --profile web add dsh-locator@0.20.0
+dsh plugin --profile web add dsh-locator@0.20.2
 
 # GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -157,7 +157,7 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 - **重启复用**：有内容库时只做一次增量刷新，不重读全部正文；只有库不存在、结构版本不兼容、上次构建没完成或损坏时才全量重建（先会话、后文件正文）。
 - **增量刷新**：默认每 5 分钟检查一次，只重读 mtime 变化的文件/会话；`contentRefreshMs` 可调，0 关闭。
 - **归档与活动会话**：已归档会话**始终索引**，但普通搜索结果里默认隐藏；面板勾选“包含归档会话”或 `contentIncludeArchived: true` 即可搜索它们（切换无需重建）。正在写入的会话等它安静 `contentActiveSessionDelayMs`（默认 2 分钟）后再索引，不会每轮刷新重解压整份日志；已删除的会话随文件消失自动退出索引。
-- **预算与截断**：默认单文件最多 1MB、文件数最多 20 万、内容总量最多 1GB、最近 100 个会话。撞到总额上限时按扫描顺序保留先到的文件，`locator_find` 的输出会提示 `content budget reached`，HTTP 状态里是 `truncated: true`；调大 `contentMaxTotalBytes` 或收窄 `contentExcludes` 即可。
+- **预算与截断**：默认单文件最多 1MB、文件数最多 20 万、内容总量最多 **1.6GB**、最近 **1000** 个会话；全量重建按 mtime 新→旧规划预算，预算满时保留最新内容（`contentEvict` 时增量刷新淘汰最旧）。撞到上限时 `locator_find` 会提示 `content budget reached`，HTTP 状态里是 `truncated: true`；调大 `contentMaxTotalBytes` 或收窄 `contentExcludes` 即可。
 - **依赖目录不读正文**：`node_modules`、`.cargo`、`.bun`、`.pnpm`、`site-packages`、`toolchain` 等默认被 `contentExcludes` 跳过，否则预算会先被库代码吃满；文件名索引不受影响。
 
 内容索引跑在宿主进程里，但文件读取和 zstd 解压都是异步的，构建循环每约 8ms 让出一次事件循环（28.6MB 语料实测最大事件循环阻塞从 968ms 降到约 20ms），所以不会拖慢会话加载/切换。内容**查询**在 worker 线程里用只读连接执行，常见词约 100ms 量级、生僻词几毫秒，不阻塞宿主。
@@ -265,9 +265,9 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentIndex` | `true` | 是否构建正文/会话内容索引；`false` 时只保留名称搜索，开销接近 0。 |
 | `contentLazy` | `true` | 惰性构建：第一次搜内容时才建库；`false` 表示启动后就在后台建。 |
 | `contentMaxFileBytes` | 1000000 | 单个文本文件最多读多少字节。 |
-| `contentMaxTotalBytes` | 1000000000 | 内容库总量上限；0 表示不限制。 |
+| `contentMaxTotalBytes` | **1600000000** | 内容库正文总量上限；0 表示不限制。 |
 | `contentMaxFiles` | 200000 | 最多索引多少个文件；0 表示不限制。 |
-| `contentMaxSessions` | 100 | 最多索引最近多少个会话；0 表示全部。 |
+| `contentMaxSessions` | **1000** | 最多索引最近多少个会话；0 表示全部。 |
 | `contentRefreshMs` | 300000 | 内容增量刷新周期；0 关闭自动刷新。 |
 | `contentIncludeArchived` | `false` | 是否在普通搜索中包含已归档会话（归档会话始终索引，面板可逐次勾选）。 |
 | `contentIndexToolResults` | `false` | 是否把 `tool/result` 文本作为独立会话文档入索引（切换只重建会话）。 |
@@ -276,17 +276,21 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
 | `contentExcludes` | 依赖/工具链目录 | 内容索引跳过的路径片段/子串；名称索引不受影响。 |
 | `refreshIncremental` | `true` | 周期兜底只重扫 watcher 覆盖不到的 root；`false` 恢复 0.18 全量重建。 |
+| `unwatchedRefreshIntervalMs` | 300000 | 无 watcher 的 root（9p/DrvFs 等）单独刷新周期；backoff 2× 封顶，最坏陈旧 10min。 |
 | `contentIndexReasoning` | `false` | 是否把 assistant 的 reasoning/thinking 并入会话索引（切换只重建会话）。 |
 | `contentExtractDocuments` | `true` | 是否抽取 PDF/Word/Excel/PPT/EPUB 正文（lazy 加载，失败只 warn）。 |
 | `contentExtractMaxBytes` | `8000000` | 交给文档抽取器的单文件上限；抽取在独立 worker 线程内执行（512MB 堆、5s 超时）。 |
 | `contentEvict` | `true` | 正文预算满时按 mtime 淘汰最旧文档，而不是冻结索引（新文件可持续入库）。 |
 | `contentSymbolsPerFile` | 500 | 每个代码文件最多保存的符号数。 |
-| `contentMaxDbBytes` | 5000000000 | content.db 字节预算（正文预算的约 4–5 倍）；超限时在空闲期重建一次（6h 最多一次）。 |
+| `contentMaxDbBytes` | **8000000000** | content.db 预算（按 live 页而非文件大小判断）；超限时在空闲期重建一次（6h 最多一次）。 |
 | `contentRankAdaptive` | `true` | 宽结果集跳过 bm25 全量排序（对常见词快一个数量级）。 |
 | `contentQueryCacheSize` | 64 | 内容查询结果缓存条数；0 关闭。 |
 | `contentQueryCacheTtlMs` | 60000 | 内容查询缓存 TTL。 |
 | `contentSessionMaxBytes` | 67108864 | 单个会话日志最多读取多少字节；超限只索引头部。 |
 | `contentRefreshAdaptive` | `true` | 机器忙/电池供电时自动减少后台索引工作。 |
+| `contentParallelPrefetch` | 4 | 全量重建时读取/解码/符号抽取的并行 worker 数（1 关闭，最多 8）。 |
+| `contentTextSniff` | `true` | 对无后缀文件做 4KB 文本嗅探，扩大覆盖。 |
+| `contentShortQueryFallback` | `true` | 允许 2 字符查询走有界近似兜底（返回 shortQueryFallback 标记）。 |
 | `contentIndexSymbols` | `true` | 是否建立代码符号表（`locator_outline`/`locator_symbol`/`locator_repo_map`）。 |
 | `contentSymbolMaxBytes` | `524288` | 符号抽取的单文件上限。 |
 | `contentFullIndex` | `false` | 一键全量：把正文/文件 cap 覆盖为 0（不限制）。 |
@@ -310,7 +314,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 
 **名称索引**（开发机实测，单个 `/home/yy` root；WSL2 ext4 热页缓存）
 
-| 项目 | 0.19.4 | 0.20.0 |
+| 项目 | 0.19.4 | 0.20.2 |
 |---|---|---|
 | 冷扫描（默认排除缓存） | 240 万条目 / 16.4s / 峰值 754MB | **48 万条目 / 1.4s / 164MB**（条目 −80%，快约 12×） |
 | 快照体积 | 207MB | **35MB** |
@@ -324,15 +328,17 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 
 **内容索引**（真实主目录，1GB 预算上限）
 
-| 项目 | 0.19.4 | 0.20.0 |
+| 项目 | 0.19.4 | 0.20.2 |
 |---|---|---|
 | 常见词查询（`the`，30 条） | 73ms exact / 70ms none | **5.3ms / 1.6ms**（13.8× / 43.7×） |
+| 宽查询（`the`）文件占比 | 0%（全为会话） | **100%**（file-first 分组分页 + 轻量重排） |
+| 2 字查询（`索引`） | 拒绝（too-short） | **可用，约 30ms**（有界兜底 + shortQueryFallback 标记） |
 | `function`（2.7 万命中） | 146ms | **41ms** |
 | 生僻词查询 | 8.8ms | 13ms（绝对差 4ms，无实际影响） |
 | 无变化增量刷新 | 约 12s（dump 150 万条目） | **<0.3s**（engine generation 快路径） |
-| 全量重建 | 约 3.5min（旧版在预算满时提前结束） | **实测约 11min**（26 万候选 / 1GB 预算 / 3.9 万次淘汰，一次性；之后增量 1–4s） |
-| 内容库体积 | 约 4.1GB（正文预算的 4.1×） | **实测 4.12GB**（正文 967MB，约 4.3×；`contentMaxDbBytes` 默认 5GB） |
-| 覆盖 | 约 9.3 万文件，预算打满后新文件冻结 | **实测 91,729 文件 / 91 会话 / 2,064 消息，coverage 69.8%**；预算内按 mtime 淘汰，新文件持续可索引 |
+| 全量重建 | 约 3.5min（旧版在预算满时提前结束） | **实测 5m44s**（0.20.2：两阶段规划 + 并行预取，26 万候选 / 1.6GB 预算 / 0 淘汰；0.20.1 为 11min） |
+| 内容库体积 | 约 4.1GB（正文预算的 4.1×） | **实测 4.89GB live**（正文 1.49GB；idle merge 后 segments=1） |
+| 覆盖 | 约 9.3 万文件，预算打满后新文件冻结 | **实测 142,492 文件 / 842 会话 / 9,154 消息，coverage 99.9%**（142,613 候选） |
 | 宿主延迟 | 内容查询在 worker，不阻塞 | 不变；`/combined` 富化异步，9p 场景不再阻塞事件循环；实测 HTTP `/content` 常见词 **约 3ms** |
 
 **怎么更省**
@@ -425,6 +431,18 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - **全库内容正则 P0 不做**：正则模式会暂停内容组（文件/目录名仍可正则），避免 1GB 级全库扫描和 ReDoS；会话内查找条支持正则。
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
+
+## 0.20.2 更新
+
+- **覆盖优先**：`contentMaxTotalBytes` 1GB→**1.6GB**、`contentMaxDbBytes` 5GB→**8GB**（并按 live 页判断）、`contentMaxSessions` 100→**1000**；实测覆盖 69.8%→**99.9%**（142,492/142,613 文件），842 会话/9,154 消息，DB 4.89GB。
+- **全量重建提速**：两阶段规划（只读预算内文件 + fill pass）+ 并行预取（默认 4 worker）；实测 **5m44s**（0.20.1 为 11min，0.20.0 的 buggy 路径约 55min），0 淘汰。
+- **FTS optimize 修复**：旧 `merge=4,32` 语法非法被静默吞掉，`fts_optimized_at` 永远 0、积累约 800MB 死段；改为正确 `(docs, rank) VALUES(merge, N)` 协议、idle 执行、成功/失败可观测，实测 segments=1。
+- **质量修复**：宽查询（the/function/error…）top20 由全会话改为 **100% 文件命中**（file-first 分组分页 + 轻量重排）；**2 字查询**（索引/缓存/ai/js）可用（有界 LIKE ≤2s，约 30ms，带 shortQueryFallback 标记）；`/mnt/d` cwd 的 workspace content 自动退回全局（scopeFallback: global）。
+- **响应性**：content 构建/刷新每 ~40ms 或 64 文档让出、增量刷新 8s 墙钟预算、淘汰分片；不再出现多分钟增量刷新。
+- **9p 新鲜度**：`unwatchedRefreshIntervalMs` 默认 **300000（5min）**，backoff 2× 封顶（最坏 10min），压力门控 + 刷新后 FreeOSMemory；status 新增 unwatchedRefreshMs/nextRefreshAt/refreshRounds/refreshSkippedByPressure。
+- **面板/HTTP**：combined content freshness 批量查询；full 响应前 10 条保留证据字段（`evidenceLimit`），其余剥离；空查询不发请求、不做 stat/hash；面板识别 shortQueryFallback。
+- **质量与 P2**：无后缀文本嗅探（4KB，`contentTextSniff`）、新增 ~70 种文本扩展名、会话窗口不再因新会话删除已索引日志、warnings 持久化、worker cache 16→64MiB；BATCH_OPS 250→1000；新库 auto_vacuum=INCREMENTAL。schema v4（符号归一化/正文去重，约 −114MB/−98MB）评估后暂缓（空间次要，避免 4GB 库迁移风险）。
+- **迁移**：默认 caps/会话窗口变化，升级后建议空闲时跑一次全量内容重建（后台约 6min）；`contentMaxDbBytes` 已改为 live 页口径，不再因 merge 释放页触发 6h 重建循环。512 tests；六引擎按 0.20.2 重建。
 
 ## 0.20.0 更新
 

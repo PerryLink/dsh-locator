@@ -92,6 +92,15 @@ describe('combined search', () => {
     expect(readCombinedRequest({ sort: 'path', desc: true }, 100)).toMatchObject({ sort: 'path', desc: true })
   })
 
+  it('defaults the evidence limit to 10, clamps it to 0..50 and accepts 0', () => {
+    expect(readCombinedRequest({ query: 'x' }, 100).evidenceLimit).toBe(10)
+    expect(readCombinedRequest({ query: 'x', evidenceLimit: 5 }, 100).evidenceLimit).toBe(5)
+    expect(readCombinedRequest({ query: 'x', evidenceLimit: 999 }, 100).evidenceLimit).toBe(50)
+    expect(readCombinedRequest({ query: 'x', evidenceLimit: -3 }, 100).evidenceLimit).toBe(0)
+    expect(readCombinedRequest({ query: 'x', evidenceLimit: 0 }, 100).evidenceLimit).toBe(0)
+    expect(readCombinedRequest({ query: 'x', evidenceLimit: 'many' }, 100).evidenceLimit).toBe(10)
+  })
+
   it('drops name hits whose path is already in the content group', () => {
     const content = [contentHit('file', '/tmp/notes.md'), contentHit('session', '/tmp/session.log')]
     const names = [fileHit('/tmp/notes.md'), fileHit('/tmp/other.md'), fileHit('/tmp/session.log'), dirHit('/tmp/notes.md')]
@@ -123,24 +132,47 @@ describe('combined search', () => {
   it('surfaces an invalid content query without starting a build', async () => {
     let ensured = 0
     let searched = 0
-    const run = (query: string) => runCombinedSearch(deps({
+    const run = (query: string, options: { shortQueryFallback?: boolean } = {}) => runCombinedSearch(deps({
       ensure: () => { ensured++ },
       contentSearch: async () => { searched++; return contentResult([]) },
-    }), readCombinedRequest({ query }, 100))
-    const two = await run('ab')
-    expect(two.content).toMatchObject({
+    }), readCombinedRequest({ query }, 100), options)
+    // A 2-code-point query is only pre-rejected when the bounded fallback is off.
+    const twoOff = await run('ab', { shortQueryFallback: false })
+    expect(twoOff.content).toMatchObject({
       hits: [],
       returned: 0,
       error: 'content-query-too-short',
       count: { value: 0, kind: 'unknown' },
     })
-    const mixed = await run('sql ab')
-    expect(mixed.content?.error).toBe('content-query-too-short')
-    const nul = await run('alpha\u0000beta')
-    expect(nul.content?.error).toBe('invalid-control-char')
-    // None of these may start the lazy content build or query the store.
     expect(ensured).toBe(0)
     expect(searched).toBe(0)
+    // With the fallback enabled the store decides and the marker is passed through.
+    const twoOn = await runCombinedSearch(deps({
+      ensure: () => { ensured++ },
+      contentSearch: async () => {
+        searched++
+        return { ...contentResult([]), shortQueryFallback: true } as unknown as ContentSearchResult
+      },
+    }), readCombinedRequest({ query: 'ab' }, 100))
+    expect(twoOn.content?.error).toBeUndefined()
+    expect(twoOn.content?.shortQueryFallback).toBe(true)
+    expect(ensured).toBe(1)
+    expect(searched).toBe(1)
+    // A longer query containing a short term follows the same fallback policy:
+    // rejected while the fallback is off, admitted by the store when it is on.
+    const mixedOff = await run('sql ab', { shortQueryFallback: false })
+    expect(mixedOff.content?.error).toBe('content-query-too-short')
+    expect(ensured).toBe(1)
+    expect(searched).toBe(1)
+    const mixedOn = await run('sql ab')
+    expect(mixedOn.content?.error).toBeUndefined()
+    expect(ensured).toBe(2)
+    expect(searched).toBe(2)
+    // A control character is never admitted, fallback or not.
+    const nul = await run('alpha\u0000beta')
+    expect(nul.content?.error).toBe('invalid-control-char')
+    expect(ensured).toBe(2)
+    expect(searched).toBe(2)
   })
 
   it('passes content timeout, scan-capped and bounded-count results through', async () => {
@@ -567,6 +599,167 @@ describe('combined evidence enrichment', () => {
   })
 })
 
+
+describe('evidence limit (0.20.2)', () => {
+  function manyHits(): { content: ContentHit[]; files: SearchHit[]; dirs: SearchHit[] } {
+    return {
+      content: Array.from({ length: 3 }, (_, index) => contentHit('file', '/tmp/content-' + String(index) + '.md')),
+      files: Array.from({ length: 12 }, (_, index) => fileHit('/tmp/file-' + String(index) + '.md')),
+      dirs: Array.from({ length: 2 }, (_, index) => dirHit('/tmp/dir-' + String(index))),
+    }
+  }
+
+  function manyDeps(): CombinedDeps {
+    const data = manyHits()
+    return deps({
+      contentSearch: async () => contentResult(data.content),
+      search: async args => args.filesOnly ? result(data.files) : result(data.dirs),
+    })
+  }
+
+  it('keeps evidence on the first N rows in content → files → dirs order', async () => {
+    const response = await runCombinedSearch(manyDeps(), readCombinedRequest({ query: 'note', evidenceLimit: 5 }, 100))
+    // Three content hits fill 3 of the 5 rows; the next two go to files.
+    expect(response.content?.hits.every(hit => hit.freshness !== undefined && hit.permissions !== undefined)).toBe(true)
+    expect(response.files?.hits.slice(0, 2).every(hit => hit.freshness !== undefined)).toBe(true)
+    const strippedFiles = response.files?.hits.slice(2) ?? []
+    expect(strippedFiles.length).toBe(10)
+    for (const hit of strippedFiles) {
+      expect(hit.freshness).toBeUndefined()
+      expect(hit.permissions).toBeUndefined()
+      expect(hit.ref).toBeUndefined()
+    }
+    for (const hit of response.dirs?.hits ?? []) {
+      expect(hit.freshness).toBeUndefined()
+      expect(hit.ref).toBeUndefined()
+    }
+    // Counts, totals and truncation are untouched by the evidence policy.
+    expect(response.files?.count).toEqual({ value: 12, kind: 'exact' })
+    expect(response.files?.returned).toBe(12)
+    expect(response.files?.truncated).toBe(false)
+    expect(response.dirs?.returned).toBe(2)
+    expect(response.content?.returned).toBe(3)
+  })
+
+  it('keeps the documented default of 10 rows when the body omits the limit', async () => {
+    const response = await runCombinedSearch(manyDeps(), readCombinedRequest({ query: 'note' }, 100))
+    expect(response.content?.hits.every(hit => hit.freshness !== undefined)).toBe(true)
+    expect(response.files?.hits.slice(0, 7).every(hit => hit.freshness !== undefined)).toBe(true)
+    expect(response.files?.hits.slice(7).every(hit => hit.freshness === undefined)).toBe(true)
+    expect(response.dirs?.hits.every(hit => hit.freshness === undefined)).toBe(true)
+  })
+
+  it('strips every evidence field when the limit is 0, without setting compact', async () => {
+    const response = await runCombinedSearch(manyDeps(), readCombinedRequest({ query: 'note', evidenceLimit: 0 }, 100))
+    expect(response.compact).toBeUndefined()
+    for (const hit of [...(response.content?.hits ?? []), ...(response.files?.hits ?? []), ...(response.dirs?.hits ?? [])]) {
+      expect(hit.freshness).toBeUndefined()
+      expect(hit.permissions).toBeUndefined()
+      expect(hit.hash).toBeUndefined()
+      expect(hit.ref).toBeUndefined()
+    }
+    // The wire shape of a hit (path/title/snippet) stays.
+    expect(response.content?.hits[0]?.snippet).toBe('snippet')
+    expect(response.files?.hits[0]?.path).toBe('/tmp/file-0.md')
+  })
+
+  it('skips evidence enrichment for an empty-query browse page', async () => {
+    const response = await runCombinedSearch(deps({
+      search: async args => args.filesOnly ? result([fileHit('/tmp/browse.md')]) : result([dirHit('/tmp/browse-dir')]),
+    }), readCombinedRequest({ query: '' }, 100))
+    const file = response.files?.hits[0]
+    // Refs are cheap and stay; stat-derived evidence is never computed.
+    expect(file?.ref).toMatch(/^ref:\/\/file\?path=/)
+    expect(file?.freshness).toBeUndefined()
+    expect(file?.permissions).toBeUndefined()
+    expect(response.dirs?.hits[0]?.freshness).toBeUndefined()
+  })
+
+  it('enriches only the top rows, so a large page pays a bounded number of stats', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-limit-'))
+    try {
+      const hits: SearchHit[] = []
+      for (let index = 0; index < 20; index++) {
+        const file = join(dir, 'limit-' + String(index) + '.md')
+        writeFileSync(file, 'body ' + String(index))
+        hits.push(liveFileHit(file))
+      }
+      const response = await runCombinedSearch(deps({
+        search: async args => args.filesOnly ? result(hits) : result([]),
+      }), readCombinedRequest({ query: 'limit', evidenceLimit: 3 }, 100))
+      // The request-level limit bounds the stats: only the first three rows are live.
+      expect(response.files?.hits.slice(0, 3).every(hit => hit.freshness?.state === 'fresh')).toBe(true)
+      expect(response.files?.hits.slice(3).every(hit => hit.freshness === undefined)).toBe(true)
+      expect(response.files?.hits.filter(hit => hit.hash !== undefined)).toHaveLength(3)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('batched content freshness (0.20.2)', () => {
+  it('resolves every file hit with one mtime lookup and sessions per hit', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-batch-'))
+    const first = join(dir, 'first.md')
+    const second = join(dir, 'second.md')
+    writeFileSync(first, 'first body')
+    writeFileSync(second, 'second body')
+    try {
+      const fileMtime = statSync(first).mtimeMs
+      let batchCalls = 0
+      let batchPaths: readonly string[] = []
+      let perHitCalls = 0
+      const response = await runCombinedSearch(deps({
+        contentSearch: async () => contentResult([
+          contentHit('file', first),
+          contentHit('file', second),
+          contentHit('session', '/tmp/sessions/s1/session.v4.jsonl.zstd'),
+        ]),
+        contentIndexedMtimes: paths => {
+          batchCalls++
+          batchPaths = paths
+          return new Map([[first, fileMtime], [second, fileMtime]])
+        },
+        contentIndexedMtime: () => {
+          perHitCalls++
+          return undefined
+        },
+        search: async () => result([]),
+      }), readCombinedRequest({ query: 'body' }, 100))
+      expect(batchCalls).toBe(1)
+      expect([...batchPaths].sort()).toEqual([first, second].sort())
+      // Only the session hit falls back to the per-hit lookup.
+      expect(perHitCalls).toBe(1)
+      expect(response.content?.hits[0]?.freshness).toMatchObject({ state: 'fresh' })
+      expect(response.content?.hits[1]?.freshness).toMatchObject({ state: 'fresh' })
+      // The sessions path has no stored row: the fallback keeps it "unknown".
+      expect(response.content?.hits[2]?.freshness).toMatchObject({ state: 'unknown' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to the per-hit lookup when the store has no batch method', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-combined-batch-fallback-'))
+    const file = join(dir, 'one.md')
+    writeFileSync(file, 'one body')
+    try {
+      let perHitCalls = 0
+      const response = await runCombinedSearch(deps({
+        contentSearch: async () => contentResult([contentHit('file', file)]),
+        contentIndexedMtime: () => {
+          perHitCalls++
+          return statSync(file).mtimeMs
+        },
+        search: async () => result([]),
+      }), readCombinedRequest({ query: 'body' }, 100))
+      expect(perHitCalls).toBe(1)
+      expect(response.content?.hits[0]?.freshness).toMatchObject({ state: 'fresh' })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('async enrichment (0.20.0 P0-9)', () => {
   it('bounds the async mapper and preserves input order', async () => {

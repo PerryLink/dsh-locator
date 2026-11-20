@@ -16,6 +16,17 @@ export type DocumentFormat = 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'epub';
  * @returns the format, or null for anything that is not a supported document.
  */
 export declare function documentFormat(pathOrName: string): DocumentFormat | null;
+/**
+ * Cheap content sniff for an extensionless file (0.20.2 P1-7): decides whether
+ * the first few KiB look like UTF-8 text rather than a binary payload. The
+ * caller already has the bytes, so this never reads the file a second time.
+ * Rules: a NUL byte or too many non-printable control characters means binary;
+ * U+FFFD replacement characters (invalid UTF-8) above a small tolerance also
+ * mean binary. A sample cut mid-codepoint therefore still classifies as text.
+ * @param sample - the first bytes of the file (typically 4 KiB).
+ * @returns true when the sample is plausibly text.
+ */
+export declare function looksLikeText(sample: Uint8Array): boolean;
 /** Options for {@link extractDocument} and {@link extractDocumentFromBuffer}. */
 export interface ExtractOptions {
     /** Files larger than this many bytes are refused without being parsed; 0 means unlimited. */

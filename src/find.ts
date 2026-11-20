@@ -246,6 +246,62 @@ export interface ContentRequest {
   filesOnly?: boolean
 }
 
+/**
+ * Plugin-supplied content-scope context for {@link runContentSearchRequest}.
+ * These values come from the validated plugin configuration, never from the
+ * caller, so they are kept out of {@link ContentRequest} (and out of tool args).
+ */
+export interface ContentSearchRequestOptions {
+  /** config.contentExcludes: path rules that keep a directory out of the content index. */
+  contentExcludes?: readonly string[]
+  /** config.contentShortQueryFallback: admit 2-code-point queries to the bounded fallback. */
+  shortQueryFallback?: boolean
+}
+
+/**
+ * Whether a directory is outside the content index because of `contentExcludes`.
+ * Mirrors the content layer's own skip rule (a rule containing `/` matches as a
+ * path substring, a bare rule matches a path segment) so the workspace-scope
+ * fallback agrees with what the index actually scanned. The plugin's `.dsh`
+ * tree is always excluded.
+ * @param path - absolute directory (usually the caller cwd).
+ * @param excludes - configured content excludes.
+ * @returns true when the directory itself cannot have indexed bodies.
+ */
+export function contentPathExcluded(path: string, excludes: readonly string[]): boolean {
+  const normalized = path.replace(/\\/g, '/')
+  if (normalized === '/.dsh' || normalized.includes('/.dsh/')) return true
+  if (excludes.length === 0) return false
+  const lower = normalized.toLowerCase()
+  const segments = lower.split('/')
+  for (const raw of excludes) {
+    const needle = raw.trim().toLowerCase()
+    if (needle === '') continue
+    if (needle.includes('/')) {
+      if (lower.includes(needle)) return true
+      continue
+    }
+    if (segments.includes(needle)) return true
+  }
+  return false
+}
+
+/**
+ * Read the content-scope knobs off the runtime configuration. The 0.20.2
+ * fields are read defensively: an embedder runtime or an older profile keeps
+ * the 0.20.1 behavior (no cwd fallback, no short-query fallback) instead of
+ * throwing.
+ * @param rt - the locator runtime, when the caller has one.
+ * @returns options ready for {@link runContentSearchRequest}.
+ */
+export function contentScopeOptionsOf(rt: LocatorRuntime | undefined): ContentSearchRequestOptions {
+  if (rt === undefined) return {}
+  return {
+    contentExcludes: Array.isArray(rt.config.contentExcludes) ? rt.config.contentExcludes : [],
+    shortQueryFallback: rt.config.contentShortQueryFallback !== false,
+  }
+}
+
 /** Result of one authorized content query. */
 export type ContentRequestResult =
   | {
@@ -256,6 +312,8 @@ export type ContentRequestResult =
       state: ContentState
       scope: 'workspace' | 'all'
       scopeFallback?: string
+      /** True when a 2-code-point query was answered by the bounded fallback. */
+      shortQueryFallback?: boolean
     }
   | {
       ok: false
@@ -277,6 +335,7 @@ export async function runContentSearchRequest(
   roots: readonly string[],
   allowCrossWorkspaceSessions: boolean,
   caller: CallerIdentity = {},
+  requestOptions: ContentSearchRequestOptions = {},
 ): Promise<ContentRequestResult> {
   const state = content.status()
   const query = request.query.trim()
@@ -306,11 +365,16 @@ export async function runContentSearchRequest(
   // A cwd outside every configured root has no indexed workspace subset.
   const cwdIsIndexed = callerCwd !== undefined && roots.some(root => withinRoots(callerCwd, [root]))
   const fileHitsAllRoots = callerSessionId !== undefined && !cwdIsIndexed
+  // 0.20.2: a cwd can live inside a name-index root but outside the content
+  // index (a contentExcludes rule such as /mnt/d/). The workspace body subset
+  // then does not exist at all, so an empty page must fall back to the global
+  // content roots instead of looking like 'no matches'.
+  const cwdOutsideContent = callerCwd !== undefined && cwdIsIndexed && contentPathExcluded(callerCwd, requestOptions.contentExcludes ?? [])
   const sessionFilter = requestedSessionId ?? (scope === 'workspace' ? callerSessionId : undefined)
   // scope "all" keeps every file searchable but sessions stay limited to the
   // caller's authorized set unless the operator opts into cross-workspace reads.
   const restrictSessions = scope === 'all' && !allowCrossWorkspaceSessions && callerSessionId !== undefined
-  const options: ContentSearchOptions = {
+  const baseOptions: ContentSearchOptions = {
     ...(fileHitsAllRoots ? { fileHitsAllRoots: true } : {}),
     // Before the active session settles the session id is not indexed yet;
     // workspace scope must still search file bodies in that window.
@@ -318,21 +382,52 @@ export async function runContentSearchRequest(
     ...(request.matchMode === undefined ? {} : { matchMode: request.matchMode }),
     ...(request.caseSensitive === undefined ? {} : { caseSensitive: request.caseSensitive }),
     ...(request.wholeWord === undefined ? {} : { wholeWord: request.wholeWord }),
+    ...(requestOptions.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
     ...(sessionFilter === undefined ? {} : { sessionId: sessionFilter }),
     ...(restrictSessions ? { allowedSessionIds: [...allowedSessions] } : {}),
     ...(request.count === undefined ? {} : { count: request.count }),
     ...(request.countLimit === undefined ? {} : { countLimit: request.countLimit }),
     ...(request.filesOnly === true ? { excludeSessions: true } : {}),
     ...(offset === 0 ? {} : { offset }),
-    ...(request.pathPrefix !== undefined && request.pathPrefix !== ''
-      ? { pathPrefix: request.pathPrefix }
-      : !cwdIsIndexed || scope === 'all' ? {} : { pathPrefix: callerCwd }),
   }
-  const result = await content.search(query, request.limit, options)
+  const workspacePathPrefix = request.pathPrefix !== undefined && request.pathPrefix !== ''
+    ? request.pathPrefix
+    : !cwdIsIndexed || scope === 'all' ? undefined : callerCwd
+  const options: ContentSearchOptions = workspacePathPrefix === undefined
+    ? baseOptions
+    : { ...baseOptions, pathPrefix: workspacePathPrefix }
+  let result = await content.search(query, request.limit, options)
+  let scopeFallback: string | undefined
+  // Only a page that would otherwise be empty pays for the second query, and
+  // only when the narrowing came from the cwd (an explicit pathPrefix is the
+  // caller's own choice and is never widened).
+  const cwdNarrowed = request.pathPrefix === undefined || request.pathPrefix === ''
+  if (
+    cwdOutsideContent
+    && cwdNarrowed
+    && scope === 'workspace'
+    && offset === 0
+    && result.error === undefined
+    && result.hits.length === 0
+    && (result.count.kind !== 'exact' || result.count.value === 0)
+  ) {
+    // File documents from every content root, session documents still limited
+    // to the caller's session; fileHitsAllRoots is the content layer's existing
+    // 'no workspace file subset' mode.
+    const fallback = await content.search(query, request.limit, { ...baseOptions, fileHitsAllRoots: true })
+    if (fallback.error === undefined) {
+      result = fallback
+      scopeFallback = 'global'
+    }
+  }
   if (result.error !== undefined) {
     return { ok: false, error: result.error, warnings: result.warnings, hits: [], state, scope }
   }
   const hits = await enrichContentHits(result.hits, content, callerCwd)
+  const fallbackNote = scopeFallback
+    ?? (scope === 'workspace' && callerSessionId !== undefined && !cwdIsIndexed
+      ? 'cwd-not-indexed; files searched across configured roots'
+      : undefined)
   return {
     ok: true,
     hits,
@@ -340,7 +435,8 @@ export async function runContentSearchRequest(
     warnings: result.warnings,
     state,
     scope,
-    ...(scope === 'workspace' && callerSessionId !== undefined && !cwdIsIndexed ? { scopeFallback: 'cwd-not-indexed; files searched across configured roots' } : {}),
+    ...(fallbackNote === undefined ? {} : { scopeFallback: fallbackNote }),
+    ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
   }
 }
 
@@ -411,7 +507,7 @@ export function makeFindTool(
       '',
       'Modes: content (default) searches bodies; names searches the file-name index with the Everything-style query language; count only counts body matches. contextLines adds surrounding source lines to file hits. Every result reports totalCount, truncated, nextOffset and a budget block so a caller can page or narrow instead of guessing.',
       '',
-      'Content is substring search over an FTS5 trigram index: every term must be at least 3 characters (shorter queries are rejected with content-query-too-short instead of scanning the whole corpus). Text files are capped by contentMaxFileBytes; session logs are decompressed from $DSH_HOME/sessions.',
+      'Content is substring search over an FTS5 trigram index: every term must be at least 3 characters. A 2-character query (ai, js, 索引) falls back to a bounded substring scan when the plugin enables contentShortQueryFallback (default on) and returns a shortQueryFallback marker; otherwise it is rejected with content-query-too-short instead of scanning the whole corpus. Text files are capped by contentMaxFileBytes; session logs are decompressed from $DSH_HOME/sessions.',
       '',
       'By default it searches the caller workspace: the current session for session hits and files under the caller cwd when that cwd is inside an indexed root. If the cwd is outside every indexed root, file hits cover the indexed roots (there is no workspace subset to restrict to); pass scope "all" to search every indexed file (session hits still stay limited to the caller workspace unless the operator enables cross-workspace session reads). Every hit carries a citable ref plus provenance, hash, freshness metadata and a short refStatus.',
     ].join('\n'),
@@ -460,6 +556,10 @@ export function makeFindTool(
           state: CONTENT_STATE_SCHEMA,
           scope: { type: 'string', enum: ['workspace', 'all'] },
           scopeFallback: { type: 'string' },
+          shortQueryFallback: {
+            type: 'boolean',
+            description: 'True when a 2-character query was answered by the bounded short-query fallback (the page is approximate).',
+          },
           error: { type: 'string' },
         },
       },
@@ -475,6 +575,7 @@ export function makeFindTool(
           budget?: { dropped?: number; limitChars?: number; usedChars?: number }
           scope?: string
           scopeFallback?: string
+          shortQueryFallback?: boolean
           count?: { value: number; kind: 'exact' | 'bounded' | 'unknown' }
           warnings?: string[]
           error?: string
@@ -508,6 +609,7 @@ export function makeFindTool(
         const notes = [
           v.state?.building ? ' (index still building)' : '',
           v.state?.truncated === true ? ' (content budget reached: raise contentMaxTotalBytes or trim contentExcludes; later files are not searchable)' : '',
+          v.shortQueryFallback === true ? ' (short-query fallback: this page is approximate)' : '',
           warnings.length > 0 ? ' (warnings: ' + warnings.join(', ') + ')' : '',
         ].join('')
         const scopeNote = v.scope === undefined ? '' : ' (scope: ' + v.scope + (v.scopeFallback === undefined ? '' : '; ' + v.scopeFallback) + ')'
@@ -549,7 +651,7 @@ export function makeFindTool(
         ...(args.countLimit === undefined ? {} : { countLimit: args.countLimit }),
         ...(args.pathPrefix === undefined || args.pathPrefix === '' ? {} : { pathPrefix: args.pathPrefix }),
       }
-      const result = await runContentSearchRequest(content, mode === 'count' ? { ...request, count: request.count ?? 'exact', limit: 1, offset: 0 } : request, roots, allowCrossWorkspaceSessions, caller)
+      const result = await runContentSearchRequest(content, mode === 'count' ? { ...request, count: request.count ?? 'exact', limit: 1, offset: 0 } : request, roots, allowCrossWorkspaceSessions, caller, contentScopeOptionsOf(options.rt))
       if (!result.ok) {
         return { ok: false as const, query, offset, mode, error: result.error, warnings: result.warnings, hits: [], state: result.state }
       }
@@ -568,6 +670,7 @@ export function makeFindTool(
           state: result.state,
           scope,
           ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
+          ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
         }
       }
       const warnings = [...result.warnings]
@@ -615,6 +718,7 @@ export function makeFindTool(
         state: result.state,
         scope,
         ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
+        ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
       }
     },
   })

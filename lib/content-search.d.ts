@@ -14,6 +14,18 @@
  * and the whole-word post-filter stops after a fixed number of rows, body bytes
  * or milliseconds and reports a bounded count.
  *
+ * 0.20.2 adds two quality fixes on top of that:
+ * - wide-page kind grouping (P0-1): the adaptive-rank wide path used to page in
+ *   rowid order, and a full build indexes sessions first, so common words
+ *   (the/function/error) returned a page that was 100% session documents. A wide
+ *   unranked page is now fetched per kind (file first, then at most
+ *   WIDE_SESSION_MAX_SHARE of the requested page from sessions) and re-sorted
+ *   in-page with a cheap term-frequency/title/depth/line heuristic.
+ * - short-query fallback (P0-2): a 2-codepoint query (ai / js / 索引) cannot be
+ *   served by the trigram index. When the caller opts in with
+ *   shortQueryFallback, a bounded scan returns name matches first and then body
+ *   hits within a fixed wall clock, instead of rejecting the query.
+ *
  * 0.20.0 adds three policies on top of that:
  * - adaptive rank (P0-6): one bounded count of the raw match set decides whether
  *   ORDER BY rank is affordable; wide sets page in rowid order and a cheap JS
@@ -87,6 +99,17 @@ export interface ContentSearchOptions {
      * "always rank" behavior for narrow queries.
      */
     rankAdaptive?: boolean;
+    /**
+     * Bounded LIKE fallback for 2-codepoint queries (0.20.2, P0-2). The trigram
+     * index cannot serve a 2-character term (ai / js / 索引), so such a query is
+     * normally rejected with 'content-query-too-short'. When this is true the
+     * query is answered by a bounded scan instead: file-name (stored path) hits
+     * first, then body hits under a fixed wall-clock budget, with a
+     * 'content-query-short-fallback' warning and shortQueryFallback: true on the
+     * result. One-codepoint queries stay rejected. Default off for direct
+     * embedders; the plugin turns it on from contentShortQueryFallback.
+     */
+    shortQueryFallback?: boolean;
     /** Drop session documents entirely (the unknown-session fallback). */
     excludeSessions?: boolean;
     /** Include archived sessions in this query (panel checkbox or config). */
@@ -134,6 +157,12 @@ export interface ContentSearchResult {
     count: ContentCount;
     warnings: string[];
     error?: string;
+    /**
+     * True when a 2-codepoint query was answered by the bounded short-query
+     * fallback, so the page is approximate (name hits plus a bounded body scan)
+     * rather than trigram-exact. Absent for every normal query.
+     */
+    shortQueryFallback?: boolean;
 }
 /**
  * Raw match count above which bm25 ordering stops paying for itself. The probe
@@ -143,6 +172,37 @@ export interface ContentSearchResult {
 export declare const RANK_ADAPTIVE_THRESHOLD = 2000;
 /** Counting cap applied while the worker is in its degraded profile. */
 export declare const DEGRADED_COUNT_LIMIT = 500;
+/**
+ * Shortest term the bounded short-query fallback accepts (0.20.2, P0-2). One
+ * codepoint is still rejected: a single character matches so much of a corpus
+ * that even a bounded scan is not worth answering.
+ */
+export declare const SHORT_TERM_MIN = 2;
+/**
+ * Wall-clock budget for one short-query fallback, in ms. The scan never starts
+ * another rowid chunk after the deadline, so the overshoot is bounded by one
+ * chunk; this is also the number the UI can use to label the result
+ * approximate.
+ */
+export declare const SHORT_QUERY_FALLBACK_MAX_MS = 2000;
+/**
+ * Maximum session share of one requested wide page (0.20.2, P0-1). The file
+ * page fills the requested page first, so a file-rich common-word query returns
+ * file hits only (the research prototype hit 100% files versus 100% sessions
+ * before the fix); sessions only fill slots the file page leaves empty and are
+ * capped here so they can never dominate a page.
+ */
+export declare const WIDE_SESSION_MAX_SHARE = 0.3;
+/**
+ * Page cache for one search connection, KiB (0.20.2, P1). Raised from 16 MiB to
+ * 64 MiB after measuring the live 4.1 GB snapshot: hot wide-query p50 fell from
+ * 72.9 ms to 57.3 ms (-21%) and hot narrow p50 from 23.2 ms to 19.4 ms (-16%),
+ * while fresh-connection cold latency stayed at ~21 ms (narrow) / ~68 ms (wide)
+ * and the process RSS did not move (the 256 MiB mmap window dominates). The
+ * bound is deliberate and must stay explicit: the host can run two search
+ * workers at once, so 2 x 64 MiB is the worst case.
+ */
+export declare const SEARCH_CACHE_KIB: number;
 /** Text escaped for an FTS5 quoted phrase (`"` doubled). */
 export declare function quoteFts(text: string): string;
 /** Escape a literal for SQLite GLOB (`*`, `?`, `[`, `]`). */
@@ -176,20 +236,40 @@ export interface ContentQueryCheck {
     phrase: boolean;
     warnings: string[];
     error?: string;
+    /**
+     * True when every term is too short for the trigram index but long enough for
+     * the bounded short-query fallback (2 codepoints). Callers that did not opt
+     * into the fallback get an error instead, so this is only set with
+     * `allowShort`.
+     */
+    short: boolean;
+}
+/** Knobs for {@link checkContentQuery}. */
+export interface ContentQueryCheckOptions {
+    /**
+     * Accept 2-codepoint terms for the bounded LIKE fallback (0.20.2, P0-2).
+     * Default false keeps the 0.20.0 contract: the panel can show
+     * 'content-query-too-short' without touching the store.
+     */
+    allowShort?: boolean;
 }
 /**
  * Validate a content query before it reaches SQL.
  *
  * Content search only supports substrings the FTS5 trigram tokenizer can
  * serve. A 1–2 character term used to fall back to a whole-corpus `LIKE` scan,
- * which is both slow and unbounded; it is now a hard, visible error instead.
- * The same limits apply after extended-mode escapes are decoded, and lengths
- * are measured in Unicode code points so emoji are not mistaken for long text.
+ * which is both slow and unbounded; it became a hard error in 0.20.0. 0.20.2
+ * reintroduces it as an explicit, bounded fallback: callers that pass
+ * `allowShort` accept 2-codepoint terms and searchContent answers them with a
+ * deadline-bounded scan. The same limits apply after extended-mode escapes are
+ * decoded, and lengths are measured in Unicode code points so emoji are not
+ * mistaken for long text.
  * @param query - raw query text.
  * @param matchMode - `normal` (whitespace-separated terms) or `extended`.
+ * @param options - `allowShort` opts into the bounded fallback.
  * @returns normalized terms, or the first entry error.
  */
-export declare function checkContentQuery(query: string, matchMode: ContentMatchMode): ContentQueryCheck;
+export declare function checkContentQuery(query: string, matchMode: ContentMatchMode, options?: ContentQueryCheckOptions): ContentQueryCheck;
 /** Whether `index` starts a whole-word occurrence of `length` bytes. */
 export declare function isWholeWord(hay: string, index: number, length: number): boolean;
 /** One located match: byte offset and length. */
@@ -202,12 +282,14 @@ export declare function locateMatch(body: string, terms: readonly string[], case
 /** 1-based line number of a byte offset. */
 export declare function lineOf(body: string, index: number): number;
 /**
- * Put a read-only content connection into the search profile (P2).
+ * Put a read-only content connection into the search profile (P2, raised in
+ * 0.20.2 P1).
  *
- * Search workers each get a 16 MiB page cache and a 256 MiB mmap window so
- * repeated queries keep their FTS pages warm without touching the build
- * connection. Failures are ignored: an older SQLite or a filesystem that
- * rejects mmap must never stop search from working.
+ * Search workers each get a bounded page cache (SEARCH_CACHE_KIB, currently
+ * 64 MiB), a 256 MiB mmap window and an in-memory temp store so repeated
+ * queries keep their FTS pages warm without touching the build connection.
+ * Failures are ignored: an older SQLite or a filesystem that rejects mmap must
+ * never stop search.
  */
 export declare function configureSearchConnection(db: DatabaseSync): void;
 /**
@@ -222,6 +304,18 @@ export declare function configureSearchConnection(db: DatabaseSync): void;
  * rowid-order page with a cheap JS sort (wide), because rank cost grows with
  * the number of matching documents and dominates a common-word query. Whole-word
  * queries never rank: their post-filter rewrites the result set anyway.
+ *
+ * Ordering (0.20.2, P0-1): the wide unranked page is now fetched per document
+ * kind — the file page fills the requested page first and sessions only fill
+ * leftover slots, capped at WIDE_SESSION_MAX_SHARE — then each group is
+ * re-sorted in page by term frequency/title/depth/line. Narrow sets keep the
+ * exact bm25 order unchanged.
+ *
+ * Short queries (0.20.2, P0-2): with options.shortQueryFallback a 2-codepoint
+ * query is answered by the bounded name+body fallback (see
+ * shortQueryFallbackSearch) instead of being rejected; the result carries
+ * shortQueryFallback: true and a 'content-query-short-fallback' warning.
+ * One-codepoint queries stay rejected.
  *
  * Counting (0.20.0, P1-3): the page uses rowid-subquery filters while the count
  * uses docs-column filters, and wide filtered sets report a bounded count

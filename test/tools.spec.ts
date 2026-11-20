@@ -1118,6 +1118,8 @@ describe('locator_status 0.20.0 observability', () => {
       saveMs: 210, saveCount: 3, queueDepth: 2, generation: 42, builtAt: 1_700_000_000_000,
       queryCount: 9, lastQueryMs: 1.5, recentQueryMs: [1, 2, 2.5], heapBytes: 90_000_000,
       numGC: 7, refreshBackoffMs: 4_000,
+      unwatchedRefreshMs: 300_000, nextRefreshAt: 1_700_000_600_000, refreshRounds: 4,
+      refreshSkippedByPressure: 2,
     }
   }
 
@@ -1162,6 +1164,10 @@ describe('locator_status 0.20.0 observability', () => {
       heapBytes: 90_000_000,
       numGC: 7,
       refreshBackoffMs: 4_000,
+      unwatchedRefreshMs: 300_000,
+      nextRefreshAt: 1_700_000_600_000,
+      refreshRounds: 4,
+      refreshSkippedByPressure: 2,
     })
     const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
     expect(validateJsonSchemaValue(schema, value)).toEqual([])
@@ -1171,12 +1177,17 @@ describe('locator_status 0.20.0 observability', () => {
     expect(text).toContain('watch 55000/120000')
     expect(text).toContain('watch-limited')
     expect(text).toContain('snapshot ')
+    expect(text).toContain('unwatched refresh 300000 ms')
+    expect(text).toContain('refresh rounds 4')
+    expect(text).toContain('pressure skips 2')
   })
 
   it('passes the content diagnostics block through with a valid schema', async () => {
     const diagnostics = {
       coverage: { indexedFiles: 10, candidateFiles: 12, ratio: 0.833, bodyBytes: 100, budgetBytes: 200, fileBudget: 0, truncated: false, evictedDocs: 2, sessions: 1, messages: 2 },
-      dbBytes: 300, walBytes: 4, dbBudgetBytes: 400, dbOverBudget: false, ftsOptimizedAt: 0,
+      dbBytes: 300, walBytes: 4, dbBudgetBytes: 400, dbOverBudget: false, ftsOptimizedAt: 1_700_000_000_000,
+      dbLiveBytes: 280, freelistBytes: 20, ftsSegments: 1, optimizeWarnings: 2, liveRefreshMsLast: 42,
+      warningCounts: { 'content-session-log-unreadable': 1 },
       lastRefreshMs: 5, lastRefreshMode: 'fast', engineGeneration: 1, symbolsPerFile: 500, extractWorker: true,
     }
     const runtime = {
@@ -1198,6 +1209,13 @@ describe('locator_status 0.20.0 observability', () => {
     expect(text).toContain('coverage 10 / 12')
     expect(text).toContain('evicted 2')
     expect(text).toContain('refresh 5 ms (fast)')
+    expect(text).toContain('db live ')
+    expect(text).toContain('freelist ')
+    expect(text).toContain('fts segments 1')
+    expect(text).toContain('fts optimized')
+    expect(text).toContain('live refresh 42 ms')
+    expect(text).toContain('optimize warnings 2')
+    expect(text).toContain('extract warnings: content-session-log-unreadable 1')
   })
 
   it('keeps the status output valid when the content store has no diagnostics', async () => {
@@ -1235,5 +1253,88 @@ describe('locator_search content tookMs (0.20.0 P0-15)', () => {
     const value = await tool.execute({ query: 'needle', mode: 'content' }, {} as never) as { tookMs?: number }
     expect(typeof value.tookMs).toBe('number')
     expect(value.tookMs).toBeGreaterThanOrEqual(20)
+  })
+})
+
+describe('locator_search content scope fallback (0.20.2)', () => {
+  function execWithCwd(cwd: string) {
+    return { agent: { session: { id: 'caller-session', header: { cwd } } } } as never
+  }
+
+  function scopedRuntime(config: Record<string, unknown>): LocatorRuntime {
+    const rt = fakeSearchRuntime(['/mnt/d'], [])
+    Object.assign((rt as unknown as { config: Record<string, unknown> }).config, config)
+    return rt
+  }
+
+  it('falls back to the global content roots and forwards scopeFallback', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const content = {
+      status: () => contentState(),
+      authorizedSessionIds: () => new Set(['caller-session']),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search(_query: string, _limit: number, options: Record<string, unknown>) {
+        calls.push(options)
+        if (calls.length === 1) return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+        return {
+          hits: [{ kind: 'file' as const, path: '/home/yy/global.md', title: 'global.md', snippet: 'global body', score: 1 }],
+          count: { value: 1, kind: 'exact' as const },
+          warnings: [],
+        }
+      },
+    } as unknown as ContentIndex
+    const rt = scopedRuntime({ contentExcludes: ['/mnt/d/'], contentShortQueryFallback: true })
+    const tool = makeSearchTool(rt, { content })
+    const value = await tool.execute({ query: 'note', mode: 'content' }, execWithCwd('/mnt/d/proj')) as {
+      ok: boolean
+      contentHits?: Array<{ path?: string }>
+      scopeFallback?: string
+      contentCount?: { value: number }
+    }
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toMatchObject({ pathPrefix: '/mnt/d/proj', shortQueryFallback: true })
+    expect(calls[1]?.pathPrefix).toBeUndefined()
+    expect(calls[1]?.fileHitsAllRoots).toBe(true)
+    expect(value.ok).toBe(true)
+    expect(value.scopeFallback).toBe('global')
+    expect(value.contentHits?.map(hit => hit.path)).toEqual(['/home/yy/global.md'])
+    expect(value.contentCount?.value).toBe(1)
+  })
+
+  it('passes the short-query marker through content mode', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const content = {
+      status: () => contentState(),
+      authorizedSessionIds: () => new Set<string>(),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search(_query: string, _limit: number, options: Record<string, unknown>) {
+        calls.push(options)
+        return {
+          hits: [{ kind: 'file' as const, path: '/home/yy/ai.md', title: 'ai.md', snippet: 'ai body', score: 1 }],
+          count: { value: 1, kind: 'exact' as const },
+          warnings: ['content-query-short-fallback'],
+          shortQueryFallback: true,
+        }
+      },
+    } as unknown as ContentIndex
+    const rt = scopedRuntime({ contentShortQueryFallback: true })
+    const tool = makeSearchTool(rt, { content })
+    const value = await tool.execute({ query: 'ai', mode: 'content' }, execWithCwd('/home/yy')) as {
+      ok: boolean
+      contentHits?: unknown[]
+      warnings?: string[]
+      shortQueryFallback?: boolean
+    }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.shortQueryFallback).toBe(true)
+    expect(value.contentHits).toHaveLength(1)
+    expect(value.warnings).toContain('content-query-short-fallback')
+    expect(value.shortQueryFallback).toBe(true)
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    const text = tool.output.render({ query: 'ai', mode: 'content' }, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(text).toContain('short-query fallback')
   })
 })

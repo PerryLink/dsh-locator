@@ -92,7 +92,7 @@ En resumen: la **idea** de Everything (índice persistente + consultas estructur
 dsh plugin --profile web add dsh-locator
 
 # fijar una versión
-dsh plugin --profile web add dsh-locator@0.20.0
+dsh plugin --profile web add dsh-locator@0.20.2
 
 # rama principal de GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -404,6 +404,12 @@ DeepSeek Harness
 ## Memoria
 
 El motor es un único proceso Go; respeta `GOMEMLIMIT`/`GOGC` y `memoryLimitMB`, donde `0` (por defecto) calcula un límite automático (25% de la RAM, 384–1024 MiB). Un motor 0.20 carga un snapshot de 1,5 M de entradas en ~186 MB de heap y se estabiliza en ~335 MB de RSS con el watcher instalado (límite de 512 MiB); la versión anterior necesitaba ~700 MB en el mismo punto. Ninguno cambia el formato del snapshot. Con la caché de páginas de la base de contenido, el proceso anfitrión de DSH rondaba los 700 MB de RSS en la instalación en vivo, con latencia en reposo de p50 2 ms.
+
+## Notas de actualización 0.20.2
+
+- **Cobertura**: `contentMaxTotalBytes` 1.6 GB, `contentMaxDbBytes` 8 GB, `contentMaxSessions` 1000; cobertura medida 69.8% -> **99.9%** (142,492/142,613 archivos), 842 sesiones, base de contenido 4.89 GB.
+- **Reconstrucción más rápida**: planificación en dos fases + precarga paralela; medida **5m44s** (11 min en 0.20.1), 0 expulsiones. FTS merge corregido (segmentos=1).
+- **Calidad**: consultas amplias con 100% de archivos en el top 20; consultas de 2 caracteres disponibles (~30 ms, marcador shortQueryFallback); scopeFallback global para cwd en /mnt/d; escrituras por lotes 250->1000; auto_vacuum incremental en bases nuevas. Ejecuta una reconstrucción completa tras actualizar.
 
 ## Notas de actualización 0.20.0
 

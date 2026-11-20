@@ -23,6 +23,13 @@
  * the request whose id is stored in slot 0 (the worker clears the slot with a
  * compare-exchange).
  *
+ * Connection tuning (0.20.2, P1): each worker opens its database through
+ * configureSearchConnection, so it gets the shared search profile — a 64 MiB
+ * page cache, a 256 MiB mmap window and an in-memory temp store. On a cold
+ * multi-GB content.db those pragmas are what keep the first queries from being
+ * page-cache bound; the info reply reports them so a host can verify the
+ * profile a worker actually got.
+ *
  * The worker never throws into the channel: every failure becomes a reply, and
  * a malformed reply is a hard host error rather than an in-process re-run.
  * @module dsh-locator/content-search-worker

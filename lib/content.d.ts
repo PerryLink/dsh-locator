@@ -120,17 +120,29 @@ export interface ContentDiagnostics {
     coverage: ContentCoverage;
     dbBytes: number;
     walBytes: number;
-    /** Configured content.db budget; 0 means unlimited. */
+    /** Live database bytes: (page_count - freelist_count) * page_size (P0-5). */
+    dbLiveBytes: number;
+    /** Reclaimable free-list bytes: freelist_count * page_size. */
+    freelistBytes: number;
+    /** Configured content.db budget; 0 means unlimited. Compared against live bytes. */
     dbBudgetBytes: number;
     dbOverBudget: boolean;
+    /** Approximate number of FTS5 segments left in the trigram index. */
+    ftsSegments: number;
     /** Epoch ms of the last successful FTS optimize, 0 when never run. */
     ftsOptimizedAt: number;
+    /** FTS optimize failures recorded since this database was created. */
+    optimizeWarnings: number;
     lastRefreshMs: number;
+    /** Wall-clock ms of the last incremental (live) refresh; 0 before one ran. */
+    liveRefreshMsLast: number;
     lastRefreshMode: 'full' | 'incremental' | 'fast' | 'deferred' | '';
     engineGeneration: number | null;
     symbolsPerFile: number;
     /** Document extraction runs in a worker thread (false: in-process fallback). */
     extractWorker: boolean;
+    /** Persisted non-fatal warning counters (0.20.2 P1-8); absent when empty. */
+    warningCounts?: Record<string, number>;
 }
 export interface ContentOptions {
     stateDir: string;
@@ -224,6 +236,28 @@ export interface ContentOptions {
     extractTimeoutMs?: number;
     /** Override the periodic full file-index sweep interval (tests). */
     fullSweepIntervalMs?: number;
+    /**
+     * Parallel file read/decode/symbol-extraction workers during a full build
+     * (default 4, clamped to 1..8). Body writes always stay on the main thread:
+     * the pool only prefetches rows, which keeps SQLite single-writer safe.
+     */
+    parallelPrefetch?: number;
+    /**
+     * Read the first 4 KiB of extensionless files and index them when they look
+     * like text (default false for embedders; the plugin turns it on). Binary
+     * samples and generated .map/.tsbuildinfo/.out files are always skipped.
+     */
+    textSniff?: boolean;
+    /**
+     * Allow the query layer to answer 2-code-point queries with a bounded LIKE
+     * fallback; forwarded to content-search.ts (default false = reject as before).
+     */
+    shortQueryFallback?: boolean;
+    /**
+     * Run the post-build FTS optimize as an idle task after the build reports
+     * done instead of extending the build (default false = inline, chunked).
+     */
+    optimizeInIdle?: boolean;
 }
 /** One symbol search hit from the additive `symbols` table. */
 export interface SymbolMatch {
@@ -249,6 +283,8 @@ export declare class ContentIndex {
     private generation;
     private totalBytes;
     private sliceDeadline;
+    /** Next event-loop yield deadline for the refresh path (30-50 ms slices). */
+    private refreshSliceDeadline;
     /** Search workers; each owns its own read-only database connection. */
     private readonly workerPool;
     private lockHeld;
@@ -285,9 +321,30 @@ export declare class ContentIndex {
     private evictedDocs;
     private dbBytes;
     private walBytes;
+    /** Live database bytes and free-list bytes, cached by measureDatabase(). */
+    private dbLiveBytes;
+    private freelistBytes;
+    /** Approximate FTS5 segment count, cached after each build/optimize. */
+    private ftsSegments;
     private ftsOptimizedAt;
+    /** Persisted FTS optimize failure count (0.20.2 P1-8). */
+    private optimizeWarnings;
     private lastRefreshMs;
+    /** Wall-clock ms of the last incremental refresh (P0-3 observability). */
+    private liveRefreshMsLast;
     private lastRefreshMode;
+    /** Persisted non-fatal warning counters, keyed by warning code (P1-8). */
+    private readonly warningCounts;
+    /** Extensionless paths a sniff rejected at this mtime; avoids re-reading them. */
+    private readonly sniffRejects;
+    /** Start of the current incremental refresh, for its wall-clock budget. */
+    private refreshStartedAt;
+    /** The current incremental refresh hit its budget and deferred the rest. */
+    private refreshBudgetHit;
+    /** An idle FTS optimize is scheduled/running (never two at once). */
+    private idleOptimizeRunning;
+    /** The FTS index still needs its idle merge; retried after the next pass. */
+    private idleOptimizeNeeded;
     /** File-index generation observed while walking the last dump. */
     private engineGeneration;
     /** Wall clock at the start of the current build. */
@@ -313,8 +370,25 @@ export declare class ContentIndex {
     diagnostics(): ContentDiagnostics;
     /** Current on-disk content.db size (an open handle keeps counting its file). */
     private dbSizeBytes;
-    /** Refresh the cached database and WAL byte counts. */
+    /**
+     * Live page bytes of the open database (P0-5): page_count - freelist_count
+     * times page size. Freed pages from FTS merges stay in the file until a
+     * VACUUM/incremental-vacuum, so the file size is not the storage cost.
+     */
+    private pageUsage;
+    /** Refresh the cached database, WAL, live-page and segment measurements. */
     private measureDatabase;
+    /**
+     * Approximate FTS5 segment count: each segment b-tree page is one row in the
+     * docs_data shadow table whose rowid encodes the segment id in its high
+     * bits (page number in the low 32). Counting distinct high words is version
+     * stable across the SQLite builds Node ships and needs no structure-record
+     * parsing. The exact count is a full scan of a table that can be over 2 GB,
+     * so it is only measured for a small corpus; a large one reports the known
+     * result of a converged merge (1) or 0 = "not measured yet". Diagnostics
+     * only, never a correctness input.
+     */
+    private measureFtsSegments;
     /**
      * Report a lazy build as in progress before the asynchronous start reaches
      * `boot()`, so the panel/agent sees "building" on the very first query
@@ -379,7 +453,11 @@ export declare class ContentIndex {
      * created so content search recovers.
      */
     private quarantineDatabase;
-    /** Record one non-fatal build warning (deduplicated, bounded). */
+    /**
+     * Record one non-fatal build warning (deduplicated in the live state, but
+     * every occurrence is counted and persisted so diagnostics survive a restart
+     * even though the log itself is in memory only; 0.20.2 P1-8).
+     */
     private addWarning;
     /** Terminate every search worker and fail the requests waiting on them. */
     private stopWorker;
@@ -456,18 +534,41 @@ export declare class ContentIndex {
     private countIndexed;
     /** Total engine entries, used as the files-phase progress denominator. */
     private engineEntries;
-    /** FTS optimize: above this body size the merge runs in bounded chunks. */
-    private static readonly FTS_CHUNKED_OPTIMIZE_BYTES;
-    /** Bounded merge rounds for a large corpus (each round yields to the host). */
-    private static readonly FTS_MERGE_ROUNDS;
     /**
-     * Merge the FTS5 segments after a full rebuild ("FTS optimize"): rank and
-     * scan paths are materially faster once the segment count is low. A single
-     * optimize on a multi-GB corpus can block the host for tens of seconds, so
-     * large databases get bounded merge rounds with an event-loop yield between
-     * them; small databases take the one-shot optimize.
+     * FTS5 incremental merge ("FTS optimize", 0.20.2 P0-2). 0.20.1 used the
+     * invalid syntax INSERT INTO docs(docs) VALUES('merge=4,32'), swallowed the
+     * error and therefore never wrote fts_optimized_at. The supported form is
+     * INSERT INTO docs(docs, rank) VALUES('merge', N), where |N| bounds the pages
+     * merged per statement. The first call must pass a negative N so the merge
+     * sees one level; later calls pass a positive N so FTS5 runs that merge to
+     * completion. A total_changes() delta below 2 means the call did no work
+     * (documented FTS5 convergence test).
+     * @param generation - build generation to abort an idle merge after a rebuild.
+     * @param idle - the merge runs outside a build and must yield to it.
+     * @returns whether the index converged; failures leave a warning, never throw.
      */
     private optimizeFts;
+    /** Yield between bounded merge rounds (idle task, host stays responsive). */
+    private yieldForMerge;
+    /** Schedule the post-build FTS merge as an idle task (P0-2 optimizeInIdle). */
+    private scheduleIdleOptimize;
+    private runIdleOptimize;
+    /** Wall-clock budget check for one incremental refresh (P0-3). */
+    private refreshBudgetExceeded;
+    /**
+     * Yield every ~40 ms (or every 64 documents) while refreshing, instead of
+     * every ~8 ms as during a build: a live refresh is allowed to take a little
+     * longer per slice as long as the host is never blocked for a whole batch.
+     */
+    private refreshBreathe;
+    /** Effective prefetch parallelism: default 4, clamped to 1..8 (P1-9). */
+    private parallelPrefetchCount;
+    /**
+     * Release build-only buffers and, when the process was started with
+     * --expose-gc, hint the collector. Node has no FreeOSMemory(); the Go engine
+     * implements that for its own heap, this is the host-side equivalent.
+     */
+    private releaseBuildMemory;
     /** Stop the extractor worker and fail its pending requests. */
     private stopExtractWorker;
     /** Drop cached query results after the database changed. */
@@ -479,10 +580,18 @@ export declare class ContentIndex {
      * searches work against an existing database before the first refresh ends.
      */
     private refreshSessionPaths;
+    /**
+     * Insert one document body. A fresh full build already planned the retention
+     * set, so the per-row storedBytes/deleteDoc existence lookups and the
+     * eviction path are skipped entirely (0.20.2 P0-1).
+     */
     private addDoc;
     /**
      * Evict the oldest documents until a new body fits the budget, leaving a
      * small headroom so the next document does not immediately evict again.
+     * Victims are removed in shards with a scheduler yield so one saturated
+     * refresh cannot monopolise the event loop (0.20.2 P0-3); their symbol rows
+     * are deleted in one batched DELETE per hundred paths (P0-4).
      * Returns false when eviction is disabled or even an empty table cannot fit
      * the incoming body; the caller then reports truncation.
      */
@@ -505,8 +614,38 @@ export declare class ContentIndex {
     private generationSupported;
     /** Stored mtime for one file document key, undefined when not indexed. */
     private storedMtime;
-    /** Index every file document from scratch (a full content rebuild). */
+    /**
+     * Index every file document from scratch (a full content rebuild).
+     *
+     * Two phases over the same dump (0.20.2 P0-1): the first collection pass
+     * stores metadata only, then the retention set is planned newest-first
+     * within the body budget and only those files are read. The old single pass
+     * read every candidate and evicted ~38 k of them afterwards, which cost the
+     * read/decoded time plus (before the mtime index) the victim queries. A final
+     * fill pass spends any budget the conservative size estimate left unused.
+     */
     private indexFiles;
+    /**
+     * Drop extensionless candidates whose first 4 KiB are not text. The full
+     * build reads those bytes anyway once the file is selected; doing it up front
+     * keeps the coverage denominator and the byte plan accurate without reading
+     * any other candidate early (0.20.2 P1-7).
+     */
+    private sniffExtensionlessCandidates;
+    /** Plan the newest-first retention set for a fresh file build (P0-1). */
+    private planFullBuild;
+    /**
+     * Upper bound on the body length one candidate can add. Text bodies are at
+     * most min(byte size, maxFileBytes) UTF-16 code units; extracted document
+     * text is capped at maxFileBytes and may exceed the compressed file size.
+     */
+    private estimateCandidateBytes;
+    /**
+     * Read a batch of candidates through a bounded prefetch pool and insert the
+     * decoded rows on the main thread (SQLite stays single-writer). Bodies are
+     * decoded in parallel, but every DB write happens here in candidate order.
+     */
+    private readAndStoreCandidates;
     /**
      * Refresh the file index. A stored engine generation lets an unchanged
      * refresh end without dumping the whole index (P0-7); otherwise a periodic
@@ -523,6 +662,11 @@ export declare class ContentIndex {
      * Compare the whole engine index against docs_meta: re-read changed files and
      * remove documents whose files disappeared. Records the generation and sweep
      * timestamps the fast path later relies on.
+     *
+     * 0.20.2: changed files are prefetched in parallel and written in order, the
+     * pass honours the incremental wall-clock budget (a partial walk never deletes
+     * rows or advances the generation markers), and deletions remove their symbol
+     * rows with one batched path IN delete instead of one scan per file.
      */
     private fullFileSweep;
     /** Would storing a file of this size overflow the configured body budget? */
@@ -554,6 +698,9 @@ export declare class ContentIndex {
     /**
      * Whether one dump entry belongs in this build. Document extraction has its
      * own byte cap: a normal PDF or deck is larger than the text-file limit.
+     * Extensionless files pass when their name is a known text name (LICENSE,
+     * Dockerfile, dotfiles) or, with the textSniff option, when the first bytes
+     * still have to prove it (readFileDoc does the sniff; 0.20.2 P1-7).
      */
     private entryIsIndexable;
     private indexSessions;
@@ -652,6 +799,13 @@ export declare class ContentIndex {
     private writeSymbols;
     /** Remove every stored symbol of one deleted file. */
     private deleteSymbols;
+    /**
+     * Remove the symbol rows of many deleted files with a bounded path IN list
+     * (0.20.2 P0-4). One DELETE per ~131 files instead of one full-scan DELETE
+     * per file: the old per-file loop dominated the eviction path of a
+     * saturated build.
+     */
+    private deleteSymbolsBulk;
     /** Drop every stored symbol after symbol indexing is turned off. */
     private clearSymbols;
     /**
@@ -721,6 +875,16 @@ export declare class ContentIndex {
      * aggregate per root spelling instead of loading every symbol row.
      */
     private symbolPathCounts;
+    /**
+     * Stored mtimes for a batch of file paths (0.20.2 P1-1). Combined search used
+     * one SQL statement per hit to label content freshness; this answers the
+     * whole page with chunked read-only path IN lookups. Path spelling follows
+     * indexedMtime/pathMatch, so a canonical caller path matches a row stored
+     * with the configured-root spelling.
+     * @param paths - candidate file paths.
+     * @returns caller path -> stored mtime (ms); absent paths mean "not indexed".
+     */
+    mtimesForPaths(paths: readonly string[]): Map<string, number>;
     /**
      * Stored document formats for the given file paths (only extracted
      * documents have one). Unlike hit enrichment this is safe to call before a

@@ -152,6 +152,19 @@ describe('engine serve arguments', () => {
     const zstd = engineServeArgs({ ...base, snapshotCompression: 'zstd' }, ['/root'], '/state')
     expect(zstd[zstd.indexOf('--snapshot-compression') + 1]).toBe('zstd')
   })
+
+  it('passes the unwatched-root refresh cadence only when it is positive', () => {
+    const base = config()
+    // Hand-built configs without the optional field keep the engine default.
+    expect(engineServeArgs(base, ['/root'], '/state')).not.toContain('--unwatched-refresh')
+    const tuned = engineServeArgs({ ...base, unwatchedRefreshIntervalMs: 600_000 }, ['/root'], '/state')
+    expect(tuned[tuned.indexOf('--unwatched-refresh') + 1]).toBe('600000ms')
+    // A fractional value is truncated to whole milliseconds.
+    const fractional = engineServeArgs({ ...base, unwatchedRefreshIntervalMs: 599_999.9 }, ['/root'], '/state')
+    expect(fractional[fractional.indexOf('--unwatched-refresh') + 1]).toBe('599999ms')
+    expect(engineServeArgs({ ...base, unwatchedRefreshIntervalMs: 0 }, ['/root'], '/state')).not.toContain('--unwatched-refresh')
+    expect(engineServeArgs({ ...base, unwatchedRefreshIntervalMs: -5 }, ['/root'], '/state')).not.toContain('--unwatched-refresh')
+  })
 })
 
 describe('dump narrowing options', () => {
@@ -217,6 +230,10 @@ describe('engine status cache', () => {
             heapBytes: 90_000_000,
             numGC: 7,
             refreshBackoffMs: 4_000,
+            unwatchedRefreshMs: 600_000,
+            nextRefreshAt: 1_700_000_600_000,
+            refreshRounds: 12,
+            refreshSkippedByPressure: 3,
           })
         : {},
     })
@@ -231,9 +248,21 @@ describe('engine status cache', () => {
       generation: 42,
       builtAt: 1_700_000_000_000,
       recentQueryMs: [1, 2, 2.5],
+      unwatchedRefreshMs: 600_000,
+      nextRefreshAt: 1_700_000_600_000,
+      refreshRounds: 12,
+      refreshSkippedByPressure: 3,
     })
     const fields = engineResourceFields(engine)
-    expect(fields).toMatchObject({ rssBytes: 123_456_789, saveCount: 3, recentQueryMs: [1, 2, 2.5] })
+    expect(fields).toMatchObject({
+      rssBytes: 123_456_789,
+      saveCount: 3,
+      recentQueryMs: [1, 2, 2.5],
+      unwatchedRefreshMs: 600_000,
+      nextRefreshAt: 1_700_000_600_000,
+      refreshRounds: 12,
+      refreshSkippedByPressure: 3,
+    })
     expect(fields).not.toHaveProperty('version')
     expect(engineResourceFields(undefined)).toEqual({})
   })

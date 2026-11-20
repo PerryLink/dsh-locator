@@ -74,7 +74,7 @@ usage:
   indexd status  --state DIR [--json]
   indexd serve   --state DIR [--root PATH...] [--exclude GLOB...] [--no-watch]
                  [--include-caches] [--watch-max-dirs N]
-                 [--refresh DUR] [--no-incremental-refresh]
+                 [--refresh DUR] [--unwatched-refresh DUR] [--no-incremental-refresh]
                  [--save-debounce DUR] [--save-max-interval DUR]
                  [--snapshot-compression none|zstd]
                  [--memory-limit-mb N]
@@ -270,75 +270,119 @@ func applyMemoryLimit(mb int) {
 	}
 }
 
-func cmdServe(args []string) error {
+// serveFlags is the parsed `indexd serve` command line. Keeping the flag
+// contract separate from cmdServe makes it testable without spawning a daemon
+// (notably the --refresh / --unwatched-refresh pair).
+type serveFlags struct {
+	state               string
+	roots               stringList
+	excludes            stringList
+	noWatch             bool
+	refresh             time.Duration
+	unwatchedRefresh    time.Duration
+	noIncremental       bool
+	saveDebounce        time.Duration
+	saveMax             time.Duration
+	workers             int
+	useUSN              bool
+	includeCaches       bool
+	watchMaxDirs        int
+	snapshotCompression string
+	memoryLimitMB       int
+}
+
+// parseServeFlags parses the `indexd serve` arguments and applies the defaults
+// that need the state directory (roots and excludes fall back to a snapshot).
+func parseServeFlags(args []string) (serveFlags, error) {
+	var f serveFlags
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	state := fs.String("state", store.DefaultDir(), "state directory")
-	var roots, excludes stringList
-	fs.Var(&roots, "root", "directory to index (repeatable)")
-	fs.Var(&excludes, "exclude", "base-name glob to skip (repeatable)")
-	noWatch := fs.Bool("no-watch", false, "disable filesystem watching")
-	refresh := fs.Duration("refresh", 0, "rebuild interval when no native watcher exists (0 disables; the plugin passes its configured value)")
-	noIncremental := fs.Bool("no-incremental-refresh", false, "rebuild the whole index on every periodic refresh instead of rescanning only unwatched roots")
-	saveDebounce := fs.Duration("save-debounce", 0, "write the snapshot after the index is quiet this long (0 = 60s)")
-	saveMax := fs.Duration("save-max-interval", 0, "force a snapshot write at most this long after changes (0 = 5m)")
-	workers := fs.Int("workers", 0, "directory reader concurrency during scans (0 = CPU count)")
-	useUSN := fs.Bool("usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
-	includeCaches := fs.Bool("include-caches", false, "index and watch toolchain/package caches (disabled by default)")
-	watchMaxDirs := fs.Int("watch-max-dirs", 0, "cap watched directories across all roots (0 = 120000; the rest rely on the periodic refresh)")
-	snapshotCompression := fs.String("snapshot-compression", "none", "snapshot payload compression: none|zstd")
-	memoryLimitMB := fs.Int("memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
+	fs.StringVar(&f.state, "state", store.DefaultDir(), "state directory")
+	fs.Var(&f.roots, "root", "directory to index (repeatable)")
+	fs.Var(&f.excludes, "exclude", "base-name glob to skip (repeatable)")
+	fs.BoolVar(&f.noWatch, "no-watch", false, "disable filesystem watching")
+	fs.DurationVar(&f.refresh, "refresh", 0, "rebuild interval when no native watcher exists (0 disables; the plugin passes its configured value)")
+	fs.DurationVar(&f.unwatchedRefresh, "unwatched-refresh", 10*time.Minute, "refresh cadence for roots without a native watcher (0 follows --refresh; the effective value is the smaller of the two)")
+	fs.BoolVar(&f.noIncremental, "no-incremental-refresh", false, "rebuild the whole index on every periodic refresh instead of rescanning only unwatched roots")
+	fs.DurationVar(&f.saveDebounce, "save-debounce", 0, "write the snapshot after the index is quiet this long (0 = 60s)")
+	fs.DurationVar(&f.saveMax, "save-max-interval", 0, "force a snapshot write at most this long after changes (0 = 5m)")
+	fs.IntVar(&f.workers, "workers", 0, "directory reader concurrency during scans (0 = CPU count)")
+	fs.BoolVar(&f.useUSN, "usn", false, "try the NTFS USN/MFT enumeration first (Windows, administrator)")
+	fs.BoolVar(&f.includeCaches, "include-caches", false, "index and watch toolchain/package caches (disabled by default)")
+	fs.IntVar(&f.watchMaxDirs, "watch-max-dirs", 0, "cap watched directories across all roots (0 = 120000; the rest rely on the periodic refresh)")
+	fs.StringVar(&f.snapshotCompression, "snapshot-compression", "none", "snapshot payload compression: none|zstd")
+	fs.IntVar(&f.memoryLimitMB, "memory-limit-mb", 0, "soft Go heap limit in MiB (0 = unset)")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return serveFlags{}, err
 	}
-	compression, err := index.ParseCompression(*snapshotCompression)
-	if err != nil {
-		return err
-	}
-	applyMemoryLimit(*memoryLimitMB)
 	if fs.NArg() > 0 {
-		roots = append(roots, fs.Args()...)
+		f.roots = append(f.roots, fs.Args()...)
 	}
-	if len(roots) == 0 {
-		if ix, meta, err := store.Load(*state); err == nil {
-			roots = append(roots, meta.Roots...)
-			if len(excludes) == 0 {
-				excludes = append(excludes, meta.Excludes...)
+	if len(f.roots) == 0 {
+		if _, meta, err := store.Load(f.state); err == nil {
+			f.roots = append(f.roots, meta.Roots...)
+			if len(f.excludes) == 0 {
+				f.excludes = append(f.excludes, meta.Excludes...)
 			}
-			_ = ix
 		}
 	}
-	if *watchMaxDirs < 0 {
-		return errors.New("--watch-max-dirs must not be negative")
+	return f, nil
+}
+
+// options validates the parsed flags and builds the engine configuration.
+func (f serveFlags) options() (server.Options, error) {
+	if f.watchMaxDirs < 0 {
+		return server.Options{}, errors.New("--watch-max-dirs must not be negative")
 	}
-	if len(roots) == 0 {
-		return errors.New("serve needs --root or an existing snapshot")
+	if f.unwatchedRefresh < 0 {
+		return server.Options{}, errors.New("--unwatched-refresh must not be negative")
 	}
+	compression, err := index.ParseCompression(f.snapshotCompression)
+	if err != nil {
+		return server.Options{}, err
+	}
+	if len(f.roots) == 0 {
+		return server.Options{}, errors.New("serve needs --root or an existing snapshot")
+	}
+	roots := append([]string(nil), f.roots...)
 	for i, r := range roots {
 		if abs, err := filepath.Abs(r); err == nil {
 			roots[i] = abs
 		}
 	}
-	ctx, stop := signalContext()
-	defer stop()
-	srv := server.New(server.Options{
-		StateDir:        *state,
-		Roots:           roots,
-		Excludes:        excludes,
-		IncludeCaches:   *includeCaches,
-		WatchMaxDirs:    *watchMaxDirs,
-		Watch:           !*noWatch,
-		RefreshInterval: *refresh,
+	return server.Options{
+		StateDir:                 f.state,
+		Roots:                    roots,
+		Excludes:                 f.excludes,
+		IncludeCaches:            f.includeCaches,
+		WatchMaxDirs:             f.watchMaxDirs,
+		Watch:                    !f.noWatch,
+		RefreshInterval:          f.refresh,
+		UnwatchedRefreshInterval: f.unwatchedRefresh,
 		// Incremental refreshes are on by default; --no-incremental-refresh
 		// restores the pre-0.19.0 full rebuild behaviour.
-		DisableIncrementalRefresh: *noIncremental,
-		SaveDebounce:              *saveDebounce,
-		SaveMaxInterval:           *saveMax,
+		DisableIncrementalRefresh: f.noIncremental,
+		SaveDebounce:              f.saveDebounce,
+		SaveMaxInterval:           f.saveMax,
 		SnapshotCompression:       compression,
-		ScanWorkers:               *workers,
-		USN:                       *useUSN,
+		ScanWorkers:               f.workers,
+		USN:                       f.useUSN,
 		Version:                   version,
-	})
-	return srv.Run(ctx, os.Stdin, os.Stdout)
+	}, nil
+}
+
+func cmdServe(args []string) error {
+	f, err := parseServeFlags(args)
+	if err != nil {
+		return err
+	}
+	opt, err := f.options()
+	if err != nil {
+		return err
+	}
+	applyMemoryLimit(f.memoryLimitMB)
+	ctx, stop := signalContext()
+	defer stop()
+	return server.New(opt).Run(ctx, os.Stdin, os.Stdout)
 }
 
 func cmdUsnProbe(args []string) error {

@@ -14,6 +14,16 @@
  * host event loop. Hashes are capped per page (default 5, `combinedHashMaxHits`)
  * and skipped on slow/network filesystems. `compact` mode (P1) skips the
  * enrichment entirely and strips the evidence fields for keystroke requests.
+ *
+ * 0.20.2 adds three bounded paths on top:
+ * - `evidenceLimit` (default 10, max 50): only the first N rows of the merged
+ *   response (content → files → dirs) keep ref/hash/freshness/permissions, so a
+ *   settled page no longer pays one stat per row; counts and truncation are
+ *   unchanged.
+ * - an empty-query fast path: a browse page returns name rows with refs but no
+ *   freshness/hash, skipping ~100 stats for a query that selects everything.
+ * - content freshness uses one batched mtime lookup (`contentIndexedMtimes`)
+ *   instead of one synchronous SQL query per content hit.
  * @module dsh-locator/combined
  */
 import type { ContentHit, ContentProgress, ContentState } from './content.ts';
@@ -44,6 +54,10 @@ export declare const COMBINED_HASH_MAX_HITS = 5;
 export declare const COMBINED_ENRICH_CONCURRENCY = 8;
 /** Default freshness-cache lifetime; a longer window trades staleness for latency. */
 export declare const COMBINED_ENRICH_CACHE_TTL_MS = 1500;
+/** Evidence rows kept per response when the caller does not ask (0.20.2). */
+export declare const COMBINED_EVIDENCE_LIMIT = 10;
+/** Hard cap for a caller-supplied evidence limit. */
+export declare const COMBINED_EVIDENCE_LIMIT_MAX = 50;
 /** Optional per-call knobs; the HTTP layer fills them from config. */
 export interface CombinedOptions {
     /** Parallel stat/hash enrichment limit (default {@link COMBINED_ENRICH_CONCURRENCY}). */
@@ -58,6 +72,11 @@ export interface CombinedOptions {
     skipHash?: (path: string) => boolean;
     /** Character budget for the whole response; 0/undefined keeps it unbudgeted. */
     budgetChars?: number;
+    /**
+     * Allow 2-code-point queries into the content store when it runs the bounded
+     * LIKE short-query fallback (config: contentShortQueryFallback, default true).
+     */
+    shortQueryFallback?: boolean;
     /** Abort enrichment/queries when the HTTP client goes away. */
     signal?: AbortSignal;
 }
@@ -131,6 +150,8 @@ export interface CombinedRequest {
     countLimit: number;
     /** Keystroke mode: skip evidence enrichment and strip ref/hash/freshness/permissions. */
     compact: boolean;
+    /** Rows whose evidence survives in a full response (default 10, max 50; 0 strips all). */
+    evidenceLimit: number;
 }
 /** One name-index group: files or directories. */
 export interface NameGroup {
@@ -164,6 +185,10 @@ export interface ContentGroup {
     truncated: boolean;
     /** Live build progress while `building`; the panel shows the counters. */
     progress?: ContentProgress;
+    /** True when this page came from the bounded 2-character LIKE fallback (0.20.2). */
+    shortQueryFallback?: boolean;
+    /** Set when the store had to widen a workspace scope (e.g. to all roots). */
+    scopeFallback?: string;
     /** Wall-clock time of the content lookup; 0 when it was skipped. */
     tookMs: number;
     error?: string;
@@ -187,6 +212,13 @@ export interface CombinedDeps {
     search(args: SearchArgs): Promise<SearchResult>;
     contentSearch?: (query: string, limit: number, options: ContentSearchOptions) => Promise<ContentSearchResult>;
     contentStatus?: () => ContentState;
+    /**
+     * Optional batched look-up of the content-index snapshot mtime for the file
+     * paths of one page (0.20.2). One chunked `WHERE path IN (...)` replaces the
+     * per-hit synchronous SQL; session hits still resolve through
+     * {@link contentIndexedMtime} because a session log has one row per message.
+     */
+    contentIndexedMtimes?: (paths: readonly string[]) => Map<string, number>;
     /**
      * Optional look-up of the content-index snapshot mtime for one hit. Supplying
      * it turns content-hit freshness from "unknown" into fresh/stale/missing; the
@@ -233,6 +265,10 @@ export declare function dedupeNameHits<T extends SearchHit>(contentHits: readonl
  * panel opens with an empty box, and a lazy content build there would cost
  * minutes and gigabytes for no results. Failures are contained per group so a
  * broken content cache still shows name results.
+ *
+ * Stores run concurrently and return raw hits; the evidence phase then enriches
+ * only the rows the caller asked for (see {@link applyCombinedEvidence}), and
+ * the character budget trims the tail last.
  * @param deps - stores and the lazy-start hook.
  * @param input - normalized request.
  * @param options - per-call enrichment/budget knobs (config-backed).

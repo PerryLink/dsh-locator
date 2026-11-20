@@ -53,8 +53,8 @@ func TestPeriodicRefreshNoChangePersistsNothing(t *testing.T) {
 	degraded := t.TempDir()
 	s, ix := refreshServer(t, healthy, degraded)
 	genBefore := ix.Generation()
-	changed := s.periodicRefresh(context.Background())
-	if changed {
+	outcome := s.periodicRefresh(context.Background())
+	if outcome.Changed {
 		t.Fatal("no-change refresh reported a change")
 	}
 	if ix.Generation() != genBefore {
@@ -81,8 +81,8 @@ func TestPeriodicRefreshNoChangePersistsNothing(t *testing.T) {
 	if err := os.Remove(filepath.Join(degraded, "old.txt")); err != nil {
 		t.Fatal(err)
 	}
-	changed = s.periodicRefresh(context.Background())
-	if !changed {
+	outcome = s.periodicRefresh(context.Background())
+	if !outcome.Changed {
 		t.Fatal("changed refresh reported no change")
 	}
 	if countFor(t, ix, "added") != 1 || countFor(t, ix, "old") != 0 {
@@ -116,7 +116,7 @@ func TestDiffRefreshDoesNotAccumulateTombstones(t *testing.T) {
 	recordsBefore := ix.Stats().Records
 	deletedBefore := ix.Stats().Deleted
 	for i := 0; i < 5; i++ {
-		if changed := s.periodicRefresh(context.Background()); changed {
+		if outcome := s.periodicRefresh(context.Background()); outcome.Changed {
 			t.Fatalf("refresh %d reported a change for an untouched tree", i)
 		}
 	}

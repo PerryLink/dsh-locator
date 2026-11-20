@@ -92,7 +92,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.20.0
+dsh plugin --profile web add dsh-locator@0.20.2
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -158,7 +158,7 @@ How the content index behaves:
 - **Restart reuses the database.** An existing database is refreshed incrementally; a full build (session logs first, then file bodies) runs only when the database is missing, has a stale schema, was left unfinished by an interrupted build, or cannot be opened.
 - **Incremental refresh** every `contentRefreshMs` (5 minutes by default) re-reads only files and sessions whose mtime changed; `0` disables it.
 - **Archived and active sessions.** Archived sessions are **always indexed** but hidden from ordinary results; tick “Archived sessions” in the panel or set `contentIncludeArchived: true` to search them (no rebuild needed). A session log that is still being written is indexed after it has been quiet for `contentActiveSessionDelayMs` (2 minutes), so the current log is not decompressed on every refresh. Deleted sessions leave the index when their files disappear.
-- **Budget and truncation.** Defaults: 1 MB per text file, 200,000 files, 1 GB of body bytes, the 100 most recent sessions. Once the byte budget is reached, files later in scan order are skipped; `locator_find` reports `content budget reached` and the HTTP state carries `truncated: true`. Raise `contentMaxTotalBytes` or narrow `contentExcludes`.
+- **Budget and truncation.** Defaults: 1 MB per text file, 200,000 files, 1.6 GB of body bytes, the 1,000 most recent sessions. A full rebuild plans the budget newest-first; once the budget is reached, older content is left out (`contentEvict` evicts the oldest on incremental refresh). `locator_find` reports `content budget reached` and the HTTP state carries `truncated: true`. Raise `contentMaxTotalBytes` or narrow `contentExcludes`.
 - **Dependency trees are not read.** `node_modules`, `.cargo`, `.bun`, `.pnpm`, `site-packages`, `toolchain`, … are skipped by `contentExcludes` by default — otherwise library code would exhaust the budget before your own documents; the name index still covers them.
 
 The build runs inside the DSH host process, but file reads and zstd decoding are asynchronous and both build loops yield about every 8 ms: on a 28.6 MB corpus the longest event-loop stall dropped from 968 ms to about 20 ms, so session loading and switching stay responsive. Content **queries** run in a worker thread with a read-only connection — common words take roughly 100 ms, rare terms a few milliseconds, and the host is never blocked.
@@ -270,9 +270,9 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentIndex` | `true` | Build the file-body and session-message index at all; `false` leaves name search with near-zero content overhead. |
 | `contentLazy` | `true` | Build the content index on the first content search instead of at plugin start. |
 | `contentMaxFileBytes` | `1000000` | Bytes read from one text file. |
-| `contentMaxTotalBytes` | `1000000000` | Total body bytes kept in the content database; `0` means unlimited. |
+| `contentMaxTotalBytes` | **`1600000000`** | Total body bytes kept in the content database; `0` means unlimited. |
 | `contentMaxFiles` | `200000` | Text files indexed per build; `0` means unlimited. |
-| `contentMaxSessions` | `100` | Most recent session logs indexed; `0` means all. |
+| `contentMaxSessions` | **`1000`** | Most recent session logs indexed; `0` means all. |
 | `contentRefreshMs` | `300000` | Incremental content refresh cadence; `0` disables it. |
 | `contentIncludeArchived` | `false` | Include archived sessions in ordinary searches (archived logs are indexed either way; the panel can include them per query). |
 | `contentIndexToolResults` | `false` | Index `tool/result` text as its own session documents (toggling rebuilds session documents only). |
@@ -281,17 +281,21 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentSessionDirs` | `[]` | Extra session directories; empty means `$DSH_HOME/sessions`. |
 | `contentExcludes` | dependency/toolchain names | Path segments or substrings the content index skips; the name index still covers them. |
 | `refreshIncremental` | `true` | Fallback refreshes rescan only roots the watcher cannot cover; `false` restores the 0.18 full rebuild. |
+| `unwatchedRefreshIntervalMs` | `300000` | Split refresh cadence for roots without a watcher (9p/DrvFs); 2x backoff cap, worst-case staleness 10 min. |
 | `contentIndexReasoning` | `false` | Index assistant reasoning/thinking blocks (toggling rebuilds session documents only). |
 | `contentExtractDocuments` | `true` | Extract PDF/Word/Excel/PowerPoint/EPUB bodies (lazy, failures only warn). |
 | `contentExtractMaxBytes` | `8000000` | Largest document handed to the extractor (runs in a worker thread with a 512 MB heap and a 5 s deadline). |
 | `contentEvict` | `true` | Evict the oldest documents when the body budget is full instead of freezing the index. |
 | `contentSymbolsPerFile` | `500` | Symbols kept per code file. |
-| `contentMaxDbBytes` | `5000000000` | `content.db` byte budget (about 4–5× the body budget); oversize triggers one idle rebuild per six hours. |
+| `contentMaxDbBytes` | **`8000000000`** | `content.db` budget, measured in live pages (not file size); oversize triggers one idle rebuild per six hours. |
 | `contentRankAdaptive` | `true` | Skip bm25 ordering for wide result sets (order-of-magnitude faster on common words). |
 | `contentQueryCacheSize` | `64` | Content search cache entries; `0` disables the cache. |
 | `contentQueryCacheTtlMs` | `60000` | Content search cache TTL. |
 | `contentSessionMaxBytes` | `67108864` | Largest session log read whole; bigger logs index only their head. |
 | `contentRefreshAdaptive` | `true` | Reduce background indexing work when the machine is busy or on battery. |
+| `contentParallelPrefetch` | `4` | Parallel read/decode/symbol workers during a full rebuild (1 disables, max 8). |
+| `contentTextSniff` | `true` | Sniff extensionless files for text (4 KiB), raising coverage. |
+| `contentShortQueryFallback` | `true` | Allow 2-character queries to use a bounded approximate fallback (shortQueryFallback marker). |
 | `contentIndexSymbols` | `true` | Build the code-symbol store behind `locator_outline`/`locator_symbol`/`locator_repo_map`. |
 | `contentSymbolMaxBytes` | `524288` | Largest code file considered for symbol extraction. |
 | `contentFullIndex` | `false` | One-switch full mode: overrides body/file caps to unlimited. |
@@ -315,7 +319,7 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 
 **Name index** (development machine, one `/home/yy` root, WSL2 ext4 warm page cache)
 
-| Metric | 0.19.4 | 0.20.0 |
+| Metric | 0.19.4 | 0.20.2 |
 |---|---|---|
 | Cold scan (default cache exclusion) | 2.40 M entries / 16.4 s / 754 MB peak | **0.48 M entries / 1.4 s / 164 MB** (−80% entries, ~12× faster) |
 | Snapshot size | 207 MB | **35 MB** |
@@ -329,15 +333,17 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 
 **Content index** (real home, 1 GB budget)
 
-| Metric | 0.19.4 | 0.20.0 |
+| Metric | 0.19.4 | 0.20.2 |
 |---|---|---|
 | Common-word query (`the`, 30 hits) | 73 ms exact / 70 ms none | **5.3 ms / 1.6 ms** (13.8× / 43.7×) |
+| Wide query (`the`) file share | 0% (sessions only) | **100%** (file-first grouped paging + light rerank) |
+| Two-character query (`索引`) | rejected (too-short) | **works, ~30 ms** (bounded fallback + shortQueryFallback marker) |
 | `function` (26.7 k hits) | 146 ms | **41 ms** |
 | Rare-term query | 8.8 ms | 13 ms (4 ms absolute difference, no practical impact) |
 | Incremental refresh (no change) | ~12 s (dump of 1.5 M entries) | **<0.3 s** (engine generation fast path) |
-| Full rebuild | ~3.5 min (the old build stopped early once the budget filled) | **measured ~11 min** (260 k candidates / 1 GB budget / 39 k evictions, one-off; 1–4 s incrementals afterwards) |
-| Database size | ~4.1 GB (4.1× the body budget) | **measured 4.12 GB** (967 MB of bodies, ~4.3×; `contentMaxDbBytes` defaults to 5 GB) |
-| Coverage | ~93.4 k files; new files freeze once the budget is full | **measured 91,729 files / 91 sessions / 2,064 messages, 69.8% coverage**; oldest documents evict within the budget and new files stay indexable |
+| Full rebuild | ~3.5 min (the old build stopped early once the budget filled) | **measured 5m44s** (0.20.2 two-phase planning + parallel prefetch, 260 k candidates / 1.6 GB budget / 0 evictions; 11 min in 0.20.1) |
+| Database size | ~4.1 GB (4.1× the body budget) | **measured 4.89 GB live** (1.49 GB of bodies; segments=1 after the idle merge) |
+| Coverage | ~93.4 k files; new files freeze once the budget is full | **measured 142,492 files / 842 sessions / 9,154 messages, 99.9% coverage** (142,613 candidates) |
 | Host latency | Content queries run in a worker, host unaffected | Unchanged; `/combined` enrichment is asynchronous, so 9p roots no longer block the event loop; measured HTTP `/content` common-word query **~3 ms** |
 
 **Cheaper configurations**
@@ -463,6 +469,18 @@ DeepSeek Harness
 ## Memory
 
 The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memoryLimitMB` knob, where `0` (the default) derives an automatic limit from the machine (25% of RAM clamped to 384–1024 MiB). A 0.20 engine loads a 1.5 M-entry snapshot into ~186 MB of heap and settles around 335 MB RSS with the watcher installed (512 MiB limit); the previous release needed ~700 MB in the same spot. Neither changes the snapshot format. With the content database page cache, the DSH host process sat around 700 MB RSS in the live setup, with idle latency around p50 2 ms.
+
+## 0.20.2 upgrade notes
+
+- **Coverage first**: `contentMaxTotalBytes` 1 GB -> **1.6 GB**, `contentMaxDbBytes` 5 GB -> **8 GB** (live-page accounting), `contentMaxSessions` 100 -> **1000**. Measured coverage 69.8% -> **99.9%** (142,492 / 142,613 files), 842 sessions / 9,154 messages, content.db 4.89 GB.
+- **Faster full rebuilds**: two-phase planning (read only the planned files + fill pass) and parallel prefetch workers (default 4); measured **5m44s** (11 min in 0.20.1, ~55 min in the buggy 0.20.0 path), 0 evictions.
+- **FTS optimize fixed**: the old `merge=4,32` was invalid and silently swallowed, so `fts_optimized_at` stayed 0 and ~800 MB of dead segments accumulated. The correct `(docs, rank) VALUES(merge, N)` protocol now runs in an idle task with success/failure observability; live segments=1.
+- **Quality fixes**: wide queries (the/function/error...) now return **100% file hits** in the top 20 (file-first grouped paging + light rerank, sessions capped at 30% of a page); **two-character queries** (索引/缓存/ai/js) work (~30 ms bounded LIKE fallback, shortQueryFallback marker); a `/mnt/d` cwd workspace content query now falls back to the global index (`scopeFallback: global`).
+- **Responsiveness**: content build/refresh yields every ~40 ms or 64 documents, incrementals have an 8 s wall-clock budget, evictions are sliced; multi-minute incremental refreshes are gone.
+- **9p freshness**: `unwatchedRefreshIntervalMs` defaults to **300000 (5 min)**, 2x backoff cap (worst-case 10 min), pressure gating and FreeOSMemory after a refresh; status exposes unwatchedRefreshMs/nextRefreshAt/refreshRounds/refreshSkippedByPressure.
+- **Panel/HTTP**: combined content freshness is one batched query; full responses keep evidence fields only for the first 10 hits (`evidenceLimit`), the rest are stripped; empty queries make no requests and no stat/hash work; the panel understands the short-query marker.
+- **Quality & P2**: extensionless text sniffing (4 KiB, `contentTextSniff`), ~70 new text extensions, session windows no longer drop already-indexed logs, warnings persisted, worker cache 16 -> 64 MiB; BATCH_OPS 250 -> 1000; new databases auto_vacuum=INCREMENTAL. Schema v4 (symbols normalization / body dedupe, ~-114 MB/-98 MB) was evaluated and deferred (space is secondary; avoids a multi-GB migration risk).
+- **Migration**: default caps and the session window changed; after upgrading run one full content rebuild when idle (background, ~6 min). `contentMaxDbBytes` now measures live pages, so a merge that releases pages no longer triggers the 6-hour rebuild loop. 512 tests; six engines rebuilt at 0.20.2.
 
 ## 0.20.0 upgrade notes
 

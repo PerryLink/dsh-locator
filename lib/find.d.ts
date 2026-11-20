@@ -302,6 +302,37 @@ export interface ContentRequest {
     /** File documents only: used by the public HTTP API, which has no caller session identity. */
     filesOnly?: boolean;
 }
+/**
+ * Plugin-supplied content-scope context for {@link runContentSearchRequest}.
+ * These values come from the validated plugin configuration, never from the
+ * caller, so they are kept out of {@link ContentRequest} (and out of tool args).
+ */
+export interface ContentSearchRequestOptions {
+    /** config.contentExcludes: path rules that keep a directory out of the content index. */
+    contentExcludes?: readonly string[];
+    /** config.contentShortQueryFallback: admit 2-code-point queries to the bounded fallback. */
+    shortQueryFallback?: boolean;
+}
+/**
+ * Whether a directory is outside the content index because of `contentExcludes`.
+ * Mirrors the content layer's own skip rule (a rule containing `/` matches as a
+ * path substring, a bare rule matches a path segment) so the workspace-scope
+ * fallback agrees with what the index actually scanned. The plugin's `.dsh`
+ * tree is always excluded.
+ * @param path - absolute directory (usually the caller cwd).
+ * @param excludes - configured content excludes.
+ * @returns true when the directory itself cannot have indexed bodies.
+ */
+export declare function contentPathExcluded(path: string, excludes: readonly string[]): boolean;
+/**
+ * Read the content-scope knobs off the runtime configuration. The 0.20.2
+ * fields are read defensively: an embedder runtime or an older profile keeps
+ * the 0.20.1 behavior (no cwd fallback, no short-query fallback) instead of
+ * throwing.
+ * @param rt - the locator runtime, when the caller has one.
+ * @returns options ready for {@link runContentSearchRequest}.
+ */
+export declare function contentScopeOptionsOf(rt: LocatorRuntime | undefined): ContentSearchRequestOptions;
 /** Result of one authorized content query. */
 export type ContentRequestResult = {
     ok: true;
@@ -311,6 +342,8 @@ export type ContentRequestResult = {
     state: ContentState;
     scope: 'workspace' | 'all';
     scopeFallback?: string;
+    /** True when a 2-code-point query was answered by the bounded fallback. */
+    shortQueryFallback?: boolean;
 } | {
     ok: false;
     error: string;
@@ -324,7 +357,7 @@ export type ContentRequestResult = {
  * locator_find always applied. Extracted so locator_search mode "content" can
  * reuse the exact rules instead of duplicating them.
  */
-export declare function runContentSearchRequest(content: ContentIndex, request: ContentRequest, roots: readonly string[], allowCrossWorkspaceSessions: boolean, caller?: CallerIdentity): Promise<ContentRequestResult>;
+export declare function runContentSearchRequest(content: ContentIndex, request: ContentRequest, roots: readonly string[], allowCrossWorkspaceSessions: boolean, caller?: CallerIdentity, requestOptions?: ContentSearchRequestOptions): Promise<ContentRequestResult>;
 /**
  * Read a bounded window of lines around one hit line. Files that are missing,
  * non-text-sized or unreadable simply get no context; context is an additive

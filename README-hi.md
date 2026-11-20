@@ -92,7 +92,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # संस्करण तय करें
-dsh plugin --profile web add dsh-locator@0.20.0
+dsh plugin --profile web add dsh-locator@0.20.2
 
 # GitHub मुख्य ब्रांच
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -405,6 +405,12 @@ DeepSeek Harness
 ## मेमोरी
 
 इंजन एक Go प्रोसेस है; `GOMEMLIMIT`/`GOGC` और `memoryLimitMB` मानता है, जहाँ `0` (डिफ़ॉल्ट) auto सीमा निकालता है (RAM का 25%, 384–1024 MiB)। 0.20 इंजन 1.5 M एंट्री का snapshot ~186 MB heap में लोड करता है और watcher के साथ ~335 MB RSS पर रहता है (512 MiB सीमा); पिछला संस्करण वहीं ~700 MB लेता था। स्नैपशॉट फ़ॉर्मेट नहीं बदलता। कंटेंट DB पेज कैश सहित DSH होस्ट प्रोसेस लाइव सेटअप में ~700 MB RSS और idle देरी p50 2 ms रही।
+
+## 0.20.2 अपग्रेड नोट्स
+
+- **कवरेज**: `contentMaxTotalBytes` 1.6 GB, `contentMaxDbBytes` 8 GB, `contentMaxSessions` 1000; मापी गई कवरेज 69.8% -> **99.9%** (142,492/142,613 फ़ाइलें), 842 sessions, content DB 4.89 GB।
+- **तेज़ पूर्ण rebuild**: दो-चरण योजना + समानांतर prefetch; मापा **5m44s** (0.20.1 में 11 min), 0 evictions। FTS merge ठीक (segments=1)।
+- **गुणवत्ता**: व्यापक क्वेरी top20 में 100% फ़ाइलें; 2-अक्षर क्वेरी उपलब्ध (~30 ms, shortQueryFallback marker); /mnt/d cwd के लिए scopeFallback global; batch 250->1000; नए DB में auto_vacuum incremental। अपग्रेड के बाद एक पूर्ण content rebuild चलाएँ।
 
 ## 0.20.0 अपग्रेड नोट्स
 

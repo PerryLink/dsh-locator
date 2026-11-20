@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { strToU8, zipSync } from 'fflate'
 import { afterAll, describe, expect, it } from 'vitest'
-import { DOCUMENT_EXTRACT_TIMEOUT, DOCUMENT_TEXT_EMPTY, DOCUMENT_TOO_LARGE, documentExtractFailed, documentFormat, extractDocument, extractDocumentFromBuffer } from '../src/extract.ts'
+import { DOCUMENT_EXTRACT_TIMEOUT, DOCUMENT_TEXT_EMPTY, DOCUMENT_TOO_LARGE, documentExtractFailed, documentFormat, extractDocument, extractDocumentFromBuffer, looksLikeText } from '../src/extract.ts'
 
 const cleanups: Array<() => void> = []
 afterAll(() => { for (const cleanup of cleanups.reverse()) cleanup() })
@@ -275,5 +275,27 @@ describe('extractDocumentFromBuffer (P1 extraction worker seam)', () => {
     })
     expect(result).toBeNull()
     expect(sink.codes).toContain(DOCUMENT_EXTRACT_TIMEOUT)
+  })
+})
+
+describe('looksLikeText (0.20.2 P1-7 extensionless sniff)', () => {
+  it('accepts UTF-8 program text, JSON and CJK bodies', () => {
+    expect(looksLikeText(Buffer.from('#!/bin/sh' + String.fromCharCode(10) + 'echo hi' + String.fromCharCode(10)))).toBe(true)
+    expect(looksLikeText(Buffer.from('{"version":3,"sources":[]}'))).toBe(true)
+    expect(looksLikeText(Buffer.from('索引正文与 HTML 混合文本'))).toBe(true)
+    expect(looksLikeText(Buffer.from('tab' + String.fromCharCode(9) + 'separated' + String.fromCharCode(13) + String.fromCharCode(10) + 'lines'))).toBe(true)
+  })
+
+  it('rejects binary payloads, empty samples and control-heavy bytes', () => {
+    expect(looksLikeText(Buffer.alloc(0))).toBe(false)
+    expect(looksLikeText(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]))).toBe(false)
+    expect(looksLikeText(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(false)
+    expect(looksLikeText(Buffer.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))).toBe(false)
+  })
+
+  it('still accepts a 4 KiB sample cut inside a multi-byte codepoint', () => {
+    const body = '索引文本'.repeat(800)
+    const sample = Buffer.from(body).subarray(0, 4096)
+    expect(looksLikeText(sample)).toBe(true)
   })
 })

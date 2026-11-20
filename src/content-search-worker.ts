@@ -23,6 +23,13 @@
  * the request whose id is stored in slot 0 (the worker clears the slot with a
  * compare-exchange).
  *
+ * Connection tuning (0.20.2, P1): each worker opens its database through
+ * configureSearchConnection, so it gets the shared search profile — a 64 MiB
+ * page cache, a 256 MiB mmap window and an in-memory temp store. On a cold
+ * multi-GB content.db those pragmas are what keep the first queries from being
+ * page-cache bound; the info reply reports them so a host can verify the
+ * profile a worker actually got.
+ *
  * The worker never throws into the channel: every failure becomes a reply, and
  * a malformed reply is a hard host error rather than an in-process re-run.
  * @module dsh-locator/content-search-worker
@@ -231,8 +238,10 @@ export function createSearchWorkerHandler(options: SearchWorkerHandlerOptions): 
       result = searchContent(db, query, typeof limit === 'number' ? limit : 30, { ...effective, isCancelled: () => cancelRequested(id) })
       lastQueryMs = performance.now() - started
       // A query that blew its deadline switches the worker to the degraded
-      // profile for a cooldown: bounded counts, no bm25 sort.
-      if (lastQueryMs >= degradeThresholdMs) degradedUntil = Date.now() + degradeCooldownMs
+      // profile for a cooldown: bounded counts, no bm25 sort. The short-query
+      // fallback is deliberately slow (its own ~2 s budget), so it must not
+      // poison the next few normal queries with the degraded profile.
+      if (lastQueryMs >= degradeThresholdMs && result.shortQueryFallback !== true) degradedUntil = Date.now() + degradeCooldownMs
     } catch {
       post({ id, ok: false, error: 'content-search-worker-error', result: failure('content-search-worker-error') })
       return

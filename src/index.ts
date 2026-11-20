@@ -107,6 +107,11 @@ export function apply(ctx: Context, config: Config): void {
         maxDbBytes: config.contentMaxDbBytes ?? 0,
         symbolsPerFile: config.contentSymbolsPerFile ?? 500,
         rankAdaptive: config.contentRankAdaptive ?? false,
+        // 0.20.2: coverage/quality knobs (defaults keep the 0.20.1 behaviour).
+        parallelPrefetch: config.contentParallelPrefetch ?? 4,
+        textSniff: config.contentTextSniff !== false,
+        shortQueryFallback: config.contentShortQueryFallback !== false,
+        optimizeInIdle: true,
         queryCacheSize: config.contentQueryCacheSize ?? 0,
         queryCacheTtlMs: config.contentQueryCacheTtlMs ?? 0,
         sessionMaxBytes: config.contentSessionMaxBytes ?? 0,

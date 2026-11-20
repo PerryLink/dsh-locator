@@ -39,7 +39,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
 import type { ContentHit, ContentIndex } from './content.ts'
 import type { ContentSearchOptions } from './content-search.ts'
-import { readContextLines, runContentSearchRequest, type CallerIdentity, type ContentRequest, type ContentRequestResult } from './find.ts'
+import { contentScopeOptionsOf, readContextLines, runContentSearchRequest, type CallerIdentity, type ContentRequest, type ContentRequestResult } from './find.ts'
 import { applyOutputBudget, DEFAULT_OUTPUT_BUDGET_CHARS, type Scope } from './scope.ts'
 import { isAbortError, readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
 import { engineResourceFields, type EngineStatus } from './runtime.ts'
@@ -671,7 +671,7 @@ async function search(
     const started = Date.now()
     let result: ContentRequestResult
     try {
-      result = await runContentSearchRequest(withAbortSignal(content, controller.signal), request, rt.roots, false, caller)
+      result = await runContentSearchRequest(withAbortSignal(content, controller.signal), request, rt.roots, false, caller, contentScopeOptionsOf(rt))
     } finally {
       controller.dispose()
     }
@@ -785,6 +785,12 @@ async function combined(
   rt.start()
   const controller = abortOnDisconnect(res)
   try {
+    // 0.20.2: one chunked mtime query covers every file hit of a page; a content
+    // store without the batch method keeps the per-hit SQL (older embedders and
+    // hand-built test stores).
+    const batchMtimes = content !== undefined && typeof content.mtimesForPaths === 'function'
+      ? content.mtimesForPaths.bind(content)
+      : undefined
     const deps: CombinedDeps = {
       search: async args => await rt.search(args),
       maxResults: rt.config.maxResults,
@@ -794,6 +800,9 @@ async function combined(
           await content.search(query, limit, searchOptions),
         contentStatus: () => content.status(),
         contentIndexedMtime: (hit: ContentHit) => content.indexedMtime(hit.kind, hit.path, hit.messageId),
+        ...(batchMtimes === undefined
+          ? {}
+          : { contentIndexedMtimes: (paths: readonly string[]) => batchMtimes(paths) }),
         ...(ensure === undefined ? {} : { ensure }),
       }),
     }
@@ -807,6 +816,9 @@ async function combined(
       ...(options.combinedEnrichConcurrency === undefined ? {} : { enrichConcurrency: options.combinedEnrichConcurrency }),
       ...(options.combinedHashMaxHits === undefined ? {} : { hashMaxHits: options.combinedHashMaxHits }),
       ...(options.combinedCacheTtlMs === undefined ? {} : { cacheTtlMs: options.combinedCacheTtlMs }),
+      // The plugin turns the bounded 2-character fallback on from config; the
+      // panel's short-query phase then gets real hits instead of a guard error.
+      shortQueryFallback: rt.config.contentShortQueryFallback !== false,
       signal: controller.signal,
     })
     return {

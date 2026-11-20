@@ -115,6 +115,14 @@ export interface EngineStatus {
   refreshTookMs?: number
   /** Epoch milliseconds of the last fallback refresh. */
   refreshAt?: number
+  /** Configured refresh cadence for roots without a native watcher, in ms (0 = engine default). */
+  unwatchedRefreshMs?: number
+  /** Epoch milliseconds of the next scheduled fallback refresh. */
+  nextRefreshAt?: number
+  /** Completed fallback-refresh rounds since engine start. */
+  refreshRounds?: number
+  /** Fallback refreshes skipped by the pressure gate since engine start. */
+  refreshSkippedByPressure?: number
   scanning: boolean
   usn: boolean
   uptimeSec: number
@@ -229,6 +237,7 @@ export function engineServeArgs(
     | 'includeCaches'
     | 'watchMaxDirs'
     | 'snapshotCompression'
+    | 'unwatchedRefreshIntervalMs'
   >,
   roots: readonly string[],
   stateDir: string,
@@ -241,6 +250,12 @@ export function engineServeArgs(
   // restores the 0.18 full-rescan behavior.
   if (config.refreshIncremental === false) args.push('--no-incremental-refresh')
   if (config.refreshIntervalMs > 0) args.push('--refresh', String(config.refreshIntervalMs) + 'ms')
+  // Roots without a native watcher (9p/DrvFs, NFS, SMB) get their own, usually
+  // faster cadence. Absent/0 keeps the engine default (min(unwatched, base)).
+  const unwatchedRefreshMs = config.unwatchedRefreshIntervalMs
+  if (typeof unwatchedRefreshMs === 'number' && Number.isFinite(unwatchedRefreshMs) && unwatchedRefreshMs > 0) {
+    args.push('--unwatched-refresh', String(Math.trunc(unwatchedRefreshMs)) + 'ms')
+  }
   if (config.scanWorkers > 0) args.push('--workers', String(config.scanWorkers))
   // 0 means "auto": derive the machine-sized limit and always pass it, so an
   // unset memoryLimitMB no longer leaves the engine unbounded.
@@ -429,6 +444,10 @@ export class LocatorRuntime {
       ...(typeof params.refreshEntries === 'number' ? { refreshEntries: params.refreshEntries } : {}),
       ...(typeof params.refreshTookMs === 'number' ? { refreshTookMs: params.refreshTookMs } : {}),
       ...(typeof params.refreshAt === 'number' ? { refreshAt: params.refreshAt } : {}),
+      ...(typeof params.unwatchedRefreshMs === 'number' ? { unwatchedRefreshMs: params.unwatchedRefreshMs } : {}),
+      ...(typeof params.nextRefreshAt === 'number' ? { nextRefreshAt: params.nextRefreshAt } : {}),
+      ...(typeof params.refreshRounds === 'number' ? { refreshRounds: params.refreshRounds } : {}),
+      ...(typeof params.refreshSkippedByPressure === 'number' ? { refreshSkippedByPressure: params.refreshSkippedByPressure } : {}),
       ...(typeof params.generation === 'number' ? { generation: params.generation } : {}),
       ...(typeof params.builtAt === 'number' ? { builtAt: params.builtAt } : {}),
       ...(typeof params.rssBytes === 'number' ? { rssBytes: params.rssBytes } : {}),
@@ -638,6 +657,10 @@ const ENGINE_NUMBER_FIELDS = [
   'heapBytes',
   'numGC',
   'refreshBackoffMs',
+  'unwatchedRefreshMs',
+  'nextRefreshAt',
+  'refreshRounds',
+  'refreshSkippedByPressure',
 ] as const
 
 /**

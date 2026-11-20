@@ -53,6 +53,12 @@ type Options struct {
 	// available, or while the watcher only covers part of the roots. Zero
 	// disables the fallback.
 	RefreshInterval time.Duration
+	// UnwatchedRefreshInterval is the cadence the fallback uses for roots
+	// without a native watcher (9p/DrvFs, NFS, SMB and similar). Zero follows
+	// RefreshInterval; the effective value is the smaller of the two, so it can
+	// only make watcher-less roots fresher, never slower. Ignored when
+	// RefreshInterval is zero (the fallback is disabled) or Watch is false.
+	UnwatchedRefreshInterval time.Duration
 	// DisableIncrementalRefresh makes every periodic refresh rescan all roots
 	// instead of reusing the entries of roots that have a healthy live watcher.
 	// The default (false) rescans only degraded or unwatched roots and falls
@@ -103,6 +109,16 @@ type Server struct {
 	refreshIdle   int
 	refreshDelay  time.Duration
 	refreshNextAt time.Time
+	// refreshRounds counts fallback refresh rounds that ran (each produced one
+	// refresh report); a round the pressure gate declined is counted by
+	// refreshSkippedByPressure instead. Guarded by mu.
+	refreshRounds            int64
+	refreshSkippedByPressure int64
+	// pressureProbe samples the host load signals the fallback gate consults.
+	// nil uses samplePressure. It is installed before the fallback loop starts
+	// (tests replace it to force a verdict) and never mutated afterwards, so it
+	// needs no lock.
+	pressureProbe func() pressureInput
 
 	// queryCount and recentQueryMs back the status observability fields.
 	queryCount    atomic.Int64
@@ -583,6 +599,13 @@ func (s *Server) current() *index.Index {
 	return s.ix
 }
 
+// watcherHealth returns the latest watcher coverage report.
+func (s *Server) watcherHealth() watch.Health {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.watch
+}
+
 func (s *Server) dispatch(ctx context.Context, req request) (any, error) {
 	switch req.Method {
 	case "ping":
@@ -791,8 +814,11 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 	s.refreshSeq++
 	seq := s.refreshSeq
 	s.mu.Unlock()
+	unwatched := s.unwatchedRefreshInterval()
 	if s.opt.DisableIncrementalRefresh {
 		s.logf("no complete native watcher; rebuilding the whole index every %s (incremental refresh disabled)", s.opt.RefreshInterval)
+	} else if unwatched > 0 && unwatched < s.opt.RefreshInterval {
+		s.logf("no complete native watcher; refreshing unwatched roots every %s (base %s; only unwatched/degraded roots are rescanned)", unwatched, s.opt.RefreshInterval)
 	} else {
 		s.logf("no complete native watcher; refreshing every %s (only unwatched/degraded roots are rescanned)", s.opt.RefreshInterval)
 	}
@@ -807,8 +833,12 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 		// Timer instead of ticker: a refresh that found nothing doubles the
 		// wait (with jitter) so a slow 9p root is not rescanned every base
 		// interval just to learn that nothing changed. A changed refresh
-		// resets the delay.
-		delay := s.opt.RefreshInterval
+		// resets the delay. Rounds that refresh watcher-less roots use the
+		// faster unwatched cadence with a 2x idle cap instead.
+		delay := s.fallbackCadence(s.watcherHealth())
+		if delay <= 0 {
+			delay = s.opt.RefreshInterval
+		}
 		s.setRefreshSchedule(delay)
 		t := time.NewTimer(delay)
 		defer t.Stop()
@@ -820,6 +850,18 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 			}
 			if rctx.Err() != nil {
 				return
+			}
+			// Pressure gate: do not pile a slow 9p rescan on top of an already
+			// saturated host. A declined round is recorded and retried soon so
+			// freshness recovers as soon as the load does.
+			if reasons := s.pressureVerdict(); len(reasons) > 0 {
+				s.recordPressureSkip(reasons)
+				retry := pressureRetryInterval(s.fallbackCadence(s.watcherHealth()))
+				if !s.setRefreshSchedule(retry) {
+					return
+				}
+				t.Reset(retry)
+				continue
 			}
 			if !s.rebuildMu.TryLock() {
 				// A rebuild is already running; retry sooner than the base
@@ -835,13 +877,23 @@ func (s *Server) startRefreshFallback(ctx context.Context) {
 				continue
 			}
 			refreshStart := time.Now()
-			changed := s.periodicRefresh(rctx)
+			outcome := s.periodicRefresh(rctx)
 			took := time.Since(refreshStart)
 			s.rebuildMu.Unlock()
 			if rctx.Err() != nil {
 				return
 			}
-			next := s.nextRefreshDelay(changed, took)
+			if outcome.Scanned {
+				// A full or partial rescan spikes the high-water mark by well over
+				// a hundred MB on a 9p root even though the steady state is tens of
+				// MB; hand the pages back instead of keeping them resident.
+				freeOSMemory()
+			}
+			cadence := cadenceBase
+			if outcome.Unwatched {
+				cadence = cadenceUnwatched
+			}
+			next := s.nextRefreshDelayFor(cadence, outcome.Changed, took)
 			if !s.setRefreshSchedule(next) {
 				return
 			}
@@ -878,6 +930,8 @@ func (s *Server) statusPayload() map[string]any {
 	refreshIdle := s.refreshIdle
 	refreshDelay := s.refreshDelay
 	refreshNextAt := s.refreshNextAt
+	refreshRounds := s.refreshRounds
+	pressureSkips := s.refreshSkippedByPressure
 	s.mu.RUnlock()
 	metrics := s.statusMetrics()
 	queryCount, lastQueryMs, recentQueryMs := s.queryStats()
@@ -954,6 +1008,13 @@ func (s *Server) statusPayload() map[string]any {
 		"refreshIdle":      refreshIdle,
 		"refreshBackoffMs": refreshDelay.Milliseconds(),
 		"refreshNextInMs":  refreshNextIn(now, refreshNextAt),
+		// Fallback-refresh observability (0.20.2): the cadence used for roots
+		// without a native watcher, when the next round is due, and how many
+		// rounds ran or were declined because the host was under pressure.
+		"unwatchedRefreshMs":       s.unwatchedRefreshInterval().Milliseconds(),
+		"nextRefreshAt":            unixMilliOrZero(refreshNextAt),
+		"refreshRounds":            refreshRounds,
+		"refreshSkippedByPressure": pressureSkips,
 		// Persistence observability (P1/P2): what the snapshot mechanism did.
 		// Additive fields; consumers that predate them simply ignore them.
 		"snapshotFormat": snapStats.format,

@@ -103,6 +103,14 @@ export interface EngineStatus {
     refreshTookMs?: number;
     /** Epoch milliseconds of the last fallback refresh. */
     refreshAt?: number;
+    /** Configured refresh cadence for roots without a native watcher, in ms (0 = engine default). */
+    unwatchedRefreshMs?: number;
+    /** Epoch milliseconds of the next scheduled fallback refresh. */
+    nextRefreshAt?: number;
+    /** Completed fallback-refresh rounds since engine start. */
+    refreshRounds?: number;
+    /** Fallback refreshes skipped by the pressure gate since engine start. */
+    refreshSkippedByPressure?: number;
     scanning: boolean;
     usn: boolean;
     uptimeSec: number;
@@ -189,7 +197,7 @@ export declare function autoMemoryLimitMB(totalBytes?: number): number;
  * @param stateDir - snapshot directory.
  * @returns the engine argv.
  */
-export declare function engineServeArgs(config: Pick<Config, 'excludes' | 'watch' | 'refreshIntervalMs' | 'refreshIncremental' | 'scanWorkers' | 'memoryLimitMB' | 'windowsUsn' | 'includeCaches' | 'watchMaxDirs' | 'snapshotCompression'>, roots: readonly string[], stateDir: string): string[];
+export declare function engineServeArgs(config: Pick<Config, 'excludes' | 'watch' | 'refreshIntervalMs' | 'refreshIncremental' | 'scanWorkers' | 'memoryLimitMB' | 'windowsUsn' | 'includeCaches' | 'watchMaxDirs' | 'snapshotCompression' | 'unwatchedRefreshIntervalMs'>, roots: readonly string[], stateDir: string): string[];
 /**
  * Owns the engine process. Tools await {@link LocatorRuntime.waitReady} before
  * issuing requests; a missing binary or a crashed engine surfaces as a tool

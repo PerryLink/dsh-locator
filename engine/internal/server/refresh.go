@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -117,6 +119,35 @@ func planRefresh(roots []string, health watch.Health, indexedRoots []string, inc
 	}
 }
 
+// coverageServesUnwatched reports whether the fallback refreshes roots without
+// a native watcher. A watcher that cannot attribute per-root coverage leaves
+// the whole fallback to the unwatched schedule because any root may be stale.
+func coverageServesUnwatched(health watch.Health) bool {
+	if len(health.Coverage) == 0 {
+		return true
+	}
+	for _, c := range health.Coverage {
+		if !c.Watched {
+			return true
+		}
+	}
+	return false
+}
+
+// planServesUnwatched reports whether the roots a plan rescans are refreshed
+// because they have no native watcher. Such rounds use the faster unwatched
+// cadence; a skipped round refreshes nothing and keeps the base cadence.
+func planServesUnwatched(plan refreshPlan, health watch.Health) bool {
+	switch plan.Mode {
+	case refreshIncremental:
+		return len(plan.Rescan) > 0
+	case refreshFull:
+		return coverageServesUnwatched(health)
+	default:
+		return false
+	}
+}
+
 // sameRootSet reports whether two root lists name the same directories.
 func sameRootSet(a, b []string) bool {
 	if len(a) != len(b) {
@@ -137,14 +168,27 @@ func sameRootSet(a, b []string) bool {
 	return true
 }
 
+// refreshOutcome is the result of one periodic refresh round.
+type refreshOutcome struct {
+	// Changed reports whether the round modified the index. A no-change round
+	// leaves the generation alone and persists nothing.
+	Changed bool
+	// Scanned reports whether the round actually rescanned roots; a round that
+	// only decided there was nothing to do touched neither index nor disk.
+	Scanned bool
+	// Unwatched reports whether the round refreshed roots without a native
+	// watcher, which selects the faster unwatched cadence and its 2x backoff cap.
+	Unwatched bool
+}
+
 // periodicRefresh runs one tick of the fallback loop. It rescans only roots the
 // watcher cannot cover and reuses the live index for healthy watched roots; any
 // structural change or scan failure falls back to a full rebuild.
 //
-// The return value reports whether the refresh actually changed the index. A
-// no-change tick leaves the generation alone, persists nothing, and lets the
-// fallback loop back off instead of hammering a slow 9p root.
-func (s *Server) periodicRefresh(ctx context.Context) bool {
+// The outcome reports whether the refresh changed anything (a no-change tick
+// persists nothing and lets the fallback loop back off instead of hammering a
+// slow 9p root) and whether it served roots without a native watcher.
+func (s *Server) periodicRefresh(ctx context.Context) refreshOutcome {
 	start := time.Now()
 	s.mu.RLock()
 	roots := append([]string(nil), s.opt.Roots...)
@@ -154,19 +198,23 @@ func (s *Server) periodicRefresh(ctx context.Context) bool {
 	ix := s.ix
 	s.mu.RUnlock()
 	if ix == nil || ctx.Err() != nil {
-		return false
+		return refreshOutcome{}
 	}
+	s.mu.Lock()
+	s.refreshRounds++
+	s.mu.Unlock()
 	plan := planRefresh(roots, health, ix.Roots(), !disable)
+	unwatched := planServesUnwatched(plan, health)
 	switch plan.Mode {
 	case refreshSkip:
 		s.logf("periodic refresh: %s", plan.Reason)
 		s.recordRefresh("skipped", plan, 0, time.Since(start))
-		return false
+		return refreshOutcome{Unwatched: unwatched}
 	case refreshFull:
 		s.logf("periodic refresh: full rebuild (%s)", plan.Reason)
 		st := s.rebuildWith(ctx, roots, excludes)
 		s.recordRefresh("full", plan, st.Entries, st.Took, refreshChanges{Changed: true})
-		return true
+		return refreshOutcome{Changed: true, Scanned: true, Unwatched: unwatched}
 	}
 	s.logf("periodic refresh: rescanning %d of %d root(s); reusing healthy watched root(s): %s",
 		len(plan.Rescan), len(roots), strings.Join(plan.Skipped, ", "))
@@ -183,7 +231,7 @@ func (s *Server) periodicRefresh(ctx context.Context) bool {
 	s.mu.Unlock()
 	if err != nil {
 		if ctx.Err() != nil {
-			return false
+			return refreshOutcome{}
 		}
 		s.logf("incremental refresh failed: %v; falling back to a full rebuild", err)
 		full := plan
@@ -191,7 +239,7 @@ func (s *Server) periodicRefresh(ctx context.Context) bool {
 		full.Reason = "incremental scan failed: " + err.Error()
 		st = s.rebuildWith(ctx, roots, excludes)
 		s.recordRefresh("full", full, st.Entries, st.Took, refreshChanges{Changed: true})
-		return true
+		return refreshOutcome{Changed: true, Scanned: true, Unwatched: planServesUnwatched(full, health)}
 	}
 	changed := ix.Generation() != genBefore
 	if changed {
@@ -205,7 +253,7 @@ func (s *Server) periodicRefresh(ctx context.Context) bool {
 	s.recordRefresh("incremental", plan, st.Entries, time.Since(start),
 		refreshChanges{Added: int64(diff.Added), Removed: int64(diff.Removed), Changed: changed})
 	s.emitStats()
-	return changed
+	return refreshOutcome{Changed: changed, Scanned: true, Unwatched: unwatched}
 }
 
 // rescanRoots reconciles every named root with a fresh scan of just that root.
@@ -319,17 +367,83 @@ func unwatchedRoots(health watch.Health) []string {
 	return out
 }
 
+// unwatchedRefreshInterval resolves the cadence for roots without a native
+// watcher. An unset (zero) configured value follows RefreshInterval, and the
+// effective value never exceeds it, so the flag can only make watcher-less
+// roots fresher. A disabled fallback (--refresh 0 or --no-watch) has none (0).
+func (s *Server) unwatchedRefreshInterval() time.Duration {
+	base := s.opt.RefreshInterval
+	if base <= 0 || !s.opt.Watch {
+		return 0
+	}
+	unwatched := s.opt.UnwatchedRefreshInterval
+	if unwatched <= 0 || unwatched > base {
+		return base
+	}
+	return unwatched
+}
+
+// fallbackCadence is the delay the fallback loop installs for the next round
+// given the current watcher coverage: the unwatched cadence when the fallback
+// exists to cover watcher-less roots, the base interval otherwise.
+func (s *Server) fallbackCadence(health watch.Health) time.Duration {
+	if coverageServesUnwatched(health) {
+		if d := s.unwatchedRefreshInterval(); d > 0 {
+			return d
+		}
+	}
+	return s.opt.RefreshInterval
+}
+
+// refreshCadence selects the interval and idle backoff cap of the next round.
+type refreshCadence int
+
+const (
+	// cadenceBase keeps the --refresh semantics for rounds that rebuild the
+	// whole index or found nothing to do: the base interval with the long 8x
+	// idle backoff.
+	cadenceBase refreshCadence = iota
+	// cadenceUnwatched applies to rounds that refresh roots without a native
+	// watcher: their faster cadence capped at 2x, so a 9p root cannot go stale
+	// for hours just because nothing changed recently.
+	cadenceUnwatched
+)
+
 // Refresh backoff: an unchanged tick doubles the wait up to 8x the configured
 // interval, and every delay gets jitter so profiles started together do not
 // rescan in lock-step. A changed tick resets the delay to the configured value.
 const refreshBackoffCap = 3
 
-// nextRefreshDelay advances the backoff state and returns the next delay. An
-// unchanged tick doubles the wait; a refresh that itself took a long time (a
-// slow 9p rescan) also spaces the next one so heavy scans cannot run back to
-// back.
+// refreshBackoffCapUnwatched caps the watcher-less cadence at 2x. The 8x cap
+// that keeps a full rebuild rare is wrong for a 9p root whose only freshness
+// mechanism is this rescan: 10 minutes growing to 4 hours is how a workspace
+// file stayed invisible for 15-21 minutes in the 0.20.1 study.
+const refreshBackoffCapUnwatched = 1
+
+// nextRefreshDelay advances the backoff state for a base-cadence round. Kept
+// for callers (and tests) that only use the --refresh interval.
 func (s *Server) nextRefreshDelay(changed bool, took time.Duration) time.Duration {
+	return s.nextRefreshDelayFor(cadenceBase, changed, took)
+}
+
+// nextRefreshDelayFor advances the backoff state and returns the next delay for
+// a round of the given cadence. An unchanged tick doubles the wait up to the
+// cadence's cap; a refresh that itself took a long time (a slow 9p rescan) also
+// spaces the next one so heavy scans cannot run back to back.
+func (s *Server) nextRefreshDelayFor(cadence refreshCadence, changed bool, took time.Duration) time.Duration {
 	base := s.opt.RefreshInterval
+	maxIdle := refreshBackoffCap
+	if cadence == cadenceUnwatched {
+		if d := s.unwatchedRefreshInterval(); d > 0 {
+			base = d
+		}
+		maxIdle = refreshBackoffCapUnwatched
+	}
+	if base <= 0 {
+		// Only reachable when the fallback was reconfigured while running; keep
+		// the loop asleep instead of spinning on a zero timer.
+		base = time.Minute
+	}
 	s.mu.Lock()
 	if changed {
 		s.refreshIdle = 0
@@ -338,6 +452,9 @@ func (s *Server) nextRefreshDelay(changed bool, took time.Duration) time.Duratio
 	}
 	idle := s.refreshIdle
 	s.mu.Unlock()
+	if idle > maxIdle {
+		idle = maxIdle
+	}
 	delay := base << uint(idle)
 	if took > base/2 && 2*took > delay {
 		delay = 2 * took
@@ -346,6 +463,128 @@ func (s *Server) nextRefreshDelay(changed bool, took time.Duration) time.Duratio
 	jitter := 0.88 + 0.24*rand.Float64()
 	return time.Duration(float64(delay) * jitter)
 }
+
+// Pressure gate for the periodic fallback. A rescan of a slow 9p root is
+// expensive, and running it while the host is already saturated only makes the
+// foreground worse. The thresholds mirror the content index's adaptive throttle
+// (src/content.ts) so both background workers back off on the same evidence:
+// 1-minute load above 0.8 x the CPU count, or high PSI io/cpu stall time.
+const (
+	pressureLoadPerCPU = 0.8
+	pressureIOBusy     = 30.0
+	pressureCPUBusy    = 60.0
+)
+
+// pressureInput is one sample of the host load signals. The *OK flags say
+// whether a signal was available; an absent signal never reports pressure, so
+// platforms without procfs keep the pre-0.20.2 refresh behaviour.
+type pressureInput struct {
+	load     float64
+	loadOK   bool
+	cpuCores int
+	ioPSI    string
+	cpuPSI   string
+}
+
+// pressureReasons returns the findings that make the fallback skip a round; an
+// empty result means "run the refresh". Pure so the policy is testable without
+// the host.
+func pressureReasons(in pressureInput) []string {
+	var reasons []string
+	if in.loadOK && in.cpuCores > 0 && in.load > pressureLoadPerCPU*float64(in.cpuCores) {
+		reasons = append(reasons, fmt.Sprintf("load %.2f over %.2f (0.8 x %d cpus)",
+			in.load, pressureLoadPerCPU*float64(in.cpuCores), in.cpuCores))
+	}
+	if v, ok := pressureAvg60(in.ioPSI); ok && v >= pressureIOBusy {
+		reasons = append(reasons, fmt.Sprintf("io pressure avg60 %.1f%% >= %.0f%%", v, pressureIOBusy))
+	}
+	if v, ok := pressureAvg60(in.cpuPSI); ok && v >= pressureCPUBusy {
+		reasons = append(reasons, fmt.Sprintf("cpu pressure avg60 %.1f%% >= %.0f%%", v, pressureCPUBusy))
+	}
+	return reasons
+}
+
+// pressureAvg60 extracts the "some" line's avg60 percentage from a PSI file.
+// PSI has no syscall API, so the /proc text is parsed.
+func pressureAvg60(text string) (float64, bool) {
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "some" {
+			continue
+		}
+		for _, field := range fields[1:] {
+			raw, ok := strings.CutPrefix(field, "avg60=")
+			if !ok {
+				continue
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return 0, false
+			}
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// samplePressure reads the host load signals the guard consults. Platforms
+// without /proc simply report no pressure.
+func samplePressure() pressureInput {
+	in := pressureInput{cpuCores: runtime.NumCPU()}
+	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
+		if fields := strings.Fields(string(b)); len(fields) > 0 {
+			if load, err := strconv.ParseFloat(fields[0], 64); err == nil {
+				in.load, in.loadOK = load, true
+			}
+		}
+	}
+	if b, err := os.ReadFile("/proc/pressure/io"); err == nil {
+		in.ioPSI = string(b)
+	}
+	if b, err := os.ReadFile("/proc/pressure/cpu"); err == nil {
+		in.cpuPSI = string(b)
+	}
+	return in
+}
+
+// pressureVerdict samples the host and returns why a round must be skipped.
+func (s *Server) pressureVerdict() []string {
+	probe := s.pressureProbe
+	if probe == nil {
+		probe = samplePressure
+	}
+	return pressureReasons(probe())
+}
+
+// pressureRetryInterval is how soon a pressure-skipped round is retried: a
+// quarter of the cadence, clamped to 1s..1m, so a short load spike costs little
+// freshness and a sustained one does not poll the host hard.
+func pressureRetryInterval(cadence time.Duration) time.Duration {
+	retry := cadence / 4
+	if retry < time.Second {
+		retry = time.Second
+	}
+	if retry > time.Minute {
+		retry = time.Minute
+	}
+	return retry
+}
+
+// recordPressureSkip records a fallback round the pressure gate declined to run
+// so status explains a stale index instead of showing a silent gap.
+func (s *Server) recordPressureSkip(reasons []string) {
+	reason := "system pressure: " + strings.Join(reasons, ", ")
+	s.logf("periodic refresh skipped: %s", reason)
+	r := &refreshReport{Mode: "pressure", Reason: reason, At: time.Now()}
+	s.mu.Lock()
+	s.refreshSkippedByPressure++
+	s.lastRefresh = r
+	s.mu.Unlock()
+}
+
+// freeOSMemory hands freed heap pages back to the OS after a fallback rescan. It
+// is a variable so tests can observe the release; production uses the real one.
+var freeOSMemory = debug.FreeOSMemory
 
 // setRefreshSchedule records the delay the fallback loop will wait next and
 // reports whether the loop is still active.

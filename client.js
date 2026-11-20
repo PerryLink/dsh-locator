@@ -270,6 +270,7 @@ body[data-ds-dark-theme] .dsh-locator-overlay{background:var(--dsw-alias-bg-mask
         panelSessionHint: 'This scope searches indexed session messages only; press Ctrl+F for live in-conversation find',
         panelRegexPaused: 'Content scope paused in regex mode', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget reached; some files are not indexed', contentTooShort: 'Content needs at least 3 characters (use Ctrl+F for shorter searches)', contentTimeout: 'Content search timed out; narrow the query or scope', contentBadChars: 'Content search does not support NUL/control characters',
+        shortQueryFallback: 'Approximate results: a 2-character query uses the bounded substring fallback (may be slower or capped)',
         panelCaseShort: 'Aa', panelWholeShort: 'Word', panelModeLabel: 'Mode',
         watchDegraded: 'watcher degraded; periodic refresh active',
         copyAll: 'Copy paths', copiedAll: 'Copied {n} paths',
@@ -293,6 +294,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         evidenceMissingHint: 'The indexed target no longer exists; open and locate will fail.',
         evidenceDeniedHint: 'The current workspace is not authorized to read this evidence; actions are disabled.',
         evidenceUnknownHint: 'The host reported no freshness for this hit; it reflects the index snapshot only.',
+        evidenceOmittedHint: 'Evidence was not loaded for this row (only the first {n} results carry it); narrow the query to load it on demand.',
         evidenceOpenFile: 'Open file', evidenceOpenSession: 'Open session', evidenceReveal: 'Locate',
         quickSwitchTitle: 'Quick switch',
         quickSwitchHint: 'Paste an evidence ref (ref://…) or an @path / @session mention: Enter opens or jumps to it.',
@@ -356,6 +358,7 @@ contentWarning: 'Index warning: {list}', contentBudget: 'Content index budget re
         panelSessionHint: '此范围只查已索引的会话消息；实时查找请按 Ctrl+F',
         panelRegexPaused: '正则模式下内容范围暂停', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预算上限，部分文件未被收录', contentTooShort: '内容搜索至少需要 3 个字符（更短的词请用 Ctrl+F 在会话内查找）', contentTimeout: '内容搜索超时，请缩小关键词或范围', contentBadChars: '内容搜索不支持 NUL/控制字符',
+        shortQueryFallback: '近似结果：2 字符查询使用有界子串兜底（可能较慢或截断）',
         panelCaseShort: 'Aa', panelWholeShort: '全词', panelModeLabel: '模式',
         watchDegraded: '文件监听降级，正在周期刷新',
         copyAll: '复制路径', copiedAll: '已复制 {n} 条路径',
@@ -379,6 +382,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         evidenceMissingHint: '索引目标已不存在，打开与定位将会失败。',
         evidenceDeniedHint: '当前工作区无权读取该证据，相关操作已禁用。',
         evidenceUnknownHint: '宿主未报告该命中的新鲜度，仅代表索引快照。',
+        evidenceOmittedHint: '该行未加载证据（仅前 {n} 条结果携带）；缩小查询即可按需加载。',
         evidenceOpenFile: '打开文件', evidenceOpenSession: '打开会话', evidenceReveal: '定位',
         quickSwitchTitle: '快速切换',
         quickSwitchHint: '粘贴证据引用（ref://…）或 @路径 / @会话 提及；回车即可打开或跳转。',
@@ -442,6 +446,7 @@ contentWarning: '索引警告：{list}', contentBudget: '内容索引已达预�
         panelSessionHint: 'Este ámbito solo busca mensajes indexados; pulsa Ctrl+F para buscar en vivo',
         panelRegexPaused: 'Ámbito de contenido en pausa en modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el presupuesto del índice; algunos archivos no están indexados', contentTooShort: 'El contenido requiere al menos 3 caracteres (usa Ctrl+F para búsquedas más cortas)', contentTimeout: 'La búsqueda de contenido agotó el tiempo; reduce la consulta o el ámbito', contentBadChars: 'La búsqueda de contenido no admite NUL/caracteres de control',
+        shortQueryFallback: 'Resultados aproximados: una consulta de 2 caracteres usa el respaldo de subcadena acotado (puede ser más lento o limitado)',
         panelCaseShort: 'Aa', panelWholeShort: 'Palabra', panelModeLabel: 'Modo',
         watchDegraded: 'vigilante degradado; refresco periódico activo',
         copyAll: 'Copiar rutas', copiedAll: 'Se copiaron {n} rutas',
@@ -465,6 +470,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         evidenceMissingHint: 'El destino indexado ya no existe; abrir y localizar fallarán.',
         evidenceDeniedHint: 'El espacio de trabajo actual no puede leer esta evidencia; las acciones están desactivadas.',
         evidenceUnknownHint: 'El host no informó la frescura de este resultado; solo refleja la instantánea del índice.',
+        evidenceOmittedHint: 'No se cargaron evidencias para esta fila (solo los primeros {n} resultados las incluyen); reduce la consulta para cargarlas.',
         evidenceOpenFile: 'Abrir archivo', evidenceOpenSession: 'Abrir sesión', evidenceReveal: 'Localizar',
         quickSwitchTitle: 'Cambio rápido',
         quickSwitchHint: 'Pega una referencia de evidencia (ref://…) o una mención @ruta / @sesión: Enter la abre o salta a ella.',
@@ -528,6 +534,7 @@ contentWarning: 'Aviso del índice: {list}', contentBudget: 'Se alcanzó el pres
         panelSessionHint: 'Este escopo busca apenas mensagens indexadas; use Ctrl+F para buscar ao vivo',
         panelRegexPaused: 'Escopo de conteúdo pausado no modo regex', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índice foi atingido; alguns arquivos não estão indexados', contentTooShort: 'O conteúdo exige pelo menos 3 caracteres (use Ctrl+F para buscas menores)', contentTimeout: 'A busca de conteúdo excedeu o tempo; reduza a consulta ou o escopo', contentBadChars: 'A busca de conteúdo não suporta NUL/caracteres de controle',
+        shortQueryFallback: 'Resultados aproximados: consultas de 2 caracteres usam o retorno de subcadeia limitado (pode ser mais lento ou truncado)',
         panelCaseShort: 'Aa', panelWholeShort: 'Palavra', panelModeLabel: 'Modo',
         watchDegraded: 'watcher degradado; atualização periódica ativa',
         copyAll: 'Copiar caminhos', copiedAll: '{n} caminhos copiados',
@@ -551,6 +558,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         evidenceMissingHint: 'O destino indexado não existe mais; abrir e localizar vão falhar.',
         evidenceDeniedHint: 'O workspace atual não tem autorização para ler esta evidência; as ações estão desativadas.',
         evidenceUnknownHint: 'O host não informou o frescor deste resultado; ele reflete apenas o instantâneo do índice.',
+        evidenceOmittedHint: 'As evidências desta linha não foram carregadas (apenas os primeiros {n} resultados as incluem); restrinja a consulta para carregá-las.',
         evidenceOpenFile: 'Abrir arquivo', evidenceOpenSession: 'Abrir sessão', evidenceReveal: 'Localizar',
         quickSwitchTitle: 'Troca rápida',
         quickSwitchHint: 'Cole uma referência de evidência (ref://…) ou uma menção @caminho / @sessão: Enter abre ou salta para ela.',
@@ -614,6 +622,7 @@ contentWarning: 'Aviso do índice: {list}', contentBudget: 'O orçamento do índ
         panelSessionHint: 'यह क्षेत्र केवल इंडेक्स किए संदेश खोजता है; लाइव खोज के लिए Ctrl+F दबाएँ',
         panelRegexPaused: 'रेगेक्स मोड में सामग्री क्षेत्र रुका है', panelCountBounded: '≥ {n}', panelCountExact: '{n}',
 contentWarning: 'इंडेक्स चेतावनी: {list}', contentBudget: 'सामग्री इंडेक्स बजट पूरा; कुछ फ़ाइलें इंडेक्स नहीं हैं', contentTooShort: 'सामग्री के लिए कम से कम 3 अक्षर चाहिए (छोटी खोज के लिए Ctrl+F)', contentTimeout: 'सामग्री खोज का समय समाप्त; क्वेरी या क्षेत्र घटाएँ', contentBadChars: 'सामग्री खोज NUL/नियंत्रण अक्षर नहीं लेती',
+        shortQueryFallback: 'अनुमानित परिणाम: 2 अक्षर की क्वेरी सीमित सबस्ट्रिंग फ़ॉलबैक वापरती है (धीमी या सीमित हो सकती है)',
         panelCaseShort: 'Aa', panelWholeShort: 'शब्द', panelModeLabel: 'मोड',
         watchDegraded: 'वॉचर क्षीण; आवधिक रिफ्रेश सक्रिय',
         copyAll: 'पथ कॉपी करें', copiedAll: '{n} पथ कॉपी हुए',
@@ -637,6 +646,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         evidenceMissingHint: 'इंडेक्स किया गया लक्ष्य अब मौजूद नहीं है; खोलना और ढूँढना विफल होगा।',
         evidenceDeniedHint: 'वर्तमान वर्कस्पेस इस प्रमाण को पढ़ने के लिए अधिकृत नहीं है; क्रियाएँ अक्षम हैं।',
         evidenceUnknownHint: 'होस्ट ने इस हिट की ताज़गी नहीं बताई; यह केवल इंडेक्स स्नैपशॉट दर्शाता है।',
+        evidenceOmittedHint: 'इस पंक्ति के लिए साक्ष्य लोड नहीं हुए (केवल पहले {n} परिणाम इन्हें लाते हैं); क्वेरी सीमित करें तो ये लोड होंगे।',
         evidenceOpenFile: 'फ़ाइल खोलें', evidenceOpenSession: 'सत्र खोलें', evidenceReveal: 'स्थान दिखाएँ',
         quickSwitchTitle: 'त्वरित स्विच',
         quickSwitchHint: 'प्रमाण रेफ़ (ref://…) या @पथ / @सत्र उल्लेख चिपकाएँ: Enter खोलता या उस पर जाता है।',
@@ -769,6 +779,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         contentTooShort: "コンテンツ検索には 3 文字以上必要です (短い検索は Ctrl+F)",
         contentTimeout: "コンテンツ検索がタイムアウトしました。キーワードまたは範囲を絞ってください",
         contentBadChars: "コンテンツ検索は NUL/制御文字に対応していません",
+        shortQueryFallback: "概算結果：2 文字のクエリは有界の部分一致フォールバックを使います（遅い、または上限付きの場合があります）",
         panelCaseShort: "Aa",
         panelWholeShort: "単語",
         panelModeLabel: "モード",
@@ -806,6 +817,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         evidenceMissingHint: "インデックスされた対象はもう存在しません。開く・位置表示は失敗します。",
         evidenceDeniedHint: "現在のワークスペースにはこの証拠を読む権限がありません。操作は無効です。",
         evidenceUnknownHint: "ホストはこのヒットの鮮度を報告していません。インデックスのスナップショットのみを反映します。",
+        evidenceOmittedHint: "この行の証拠は読み込まれていません（最初の {n} 件のみ証拠付き）。クエリを絞ると読み込めます。",
         evidenceOpenFile: "ファイルを開く", evidenceOpenSession: "セッションを開く", evidenceReveal: "位置を表示",
         quickSwitchTitle: "クイック切り替え",
         quickSwitchHint: "証拠参照（ref://…）または @パス / @セッション メンションを貼り付け、Enter で開くか移動します。",
@@ -938,6 +950,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         contentTooShort: "Le contenu nécessite au moins 3 caractères (utilisez Ctrl+F pour les recherches plus courtes)",
         contentTimeout: "Délai de recherche de contenu dépassé ; affinez la requête ou la portée",
         contentBadChars: "La recherche de contenu ne prend pas en charge les caractères NUL/de contrôle",
+        shortQueryFallback: "Résultats approximatifs : une requête de 2 caractères utilise le repli par sous-chaîne borné (plus lent ou limité)",
         panelCaseShort: "Aa",
         panelWholeShort: "Mot",
         panelModeLabel: "Mode",
@@ -975,6 +988,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         evidenceMissingHint: "La cible indexée n’existe plus ; l’ouverture et la localisation échoueront.",
         evidenceDeniedHint: "L’espace de travail actuel n’est pas autorisé à lire cette preuve ; les actions sont désactivées.",
         evidenceUnknownHint: "L’hôte n’a pas signalé la fraîcheur de ce résultat ; il ne reflète que l’instantané de l’index.",
+        evidenceOmittedHint: "Les preuves de cette ligne ne sont pas chargées (seuls les {n} premiers résultats en portent) ; affinez la requête pour les charger à la demande.",
         evidenceOpenFile: "Ouvrir le fichier", evidenceOpenSession: "Ouvrir la session", evidenceReveal: "Localiser",
         quickSwitchTitle: "Bascule rapide",
         quickSwitchHint: "Collez une référence de preuve (ref://…) ou une mention @chemin / @session : Entrée l’ouvre ou y accède.",
@@ -1107,6 +1121,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         contentTooShort: "Inhalt braucht mindestens 3 Zeichen (Ctrl+F für kürzere Suchen)",
         contentTimeout: "Zeitüberschreitung bei der Inhaltssuche; Suchanfrage oder Bereich einschränken",
         contentBadChars: "Inhaltssuche unterstützt keine NUL-/Steuerzeichen",
+        shortQueryFallback: "Ungefähre Ergebnisse: 2-Zeichen-Abfragen nutzen den begrenzten Teilstring-Fallback (evtl. langsamer oder gekürzt)",
         panelCaseShort: "Aa",
         panelWholeShort: "Wort",
         panelModeLabel: "Modus",
@@ -1144,6 +1159,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         evidenceMissingHint: "Das indexierte Ziel existiert nicht mehr; Öffnen und Anzeigen werden fehlschlagen.",
         evidenceDeniedHint: "Der aktuelle Arbeitsbereich darf diese Evidenz nicht lesen; Aktionen sind deaktiviert.",
         evidenceUnknownHint: "Der Host meldet für diesen Treffer keine Frische; er spiegelt nur den Index-Snapshot wider.",
+        evidenceOmittedHint: "Für diese Zeile wurden keine Belege geladen (nur die ersten {n} Ergebnisse enthalten sie); schränke die Abfrage ein, um sie bei Bedarf zu laden.",
         evidenceOpenFile: "Datei öffnen", evidenceOpenSession: "Sitzung öffnen", evidenceReveal: "Anzeigen",
         quickSwitchTitle: "Schnellwechsel",
         quickSwitchHint: "Füge eine Evidenzreferenz (ref://…) oder eine @Pfad- / @Sitzung-Erwähnung ein: Enter öffnet sie.",
@@ -1276,6 +1292,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         contentTooShort: "Для поиска по содержимому нужно не менее 3 символов (для коротких запросов используйте Ctrl+F)",
         contentTimeout: "Время ожидания поиска по содержимому истекло; сузьте запрос или область",
         contentBadChars: "Поиск по содержимому не поддерживает NUL и управляющие символы",
+        shortQueryFallback: "Приблизительные результаты: запрос из 2 символов использует ограниченный резервный поиск по подстроке (может быть медленнее или ограничен)",
         panelCaseShort: "Aa",
         panelWholeShort: "Слово",
         panelModeLabel: "Режим",
@@ -1313,6 +1330,7 @@ contentWarning: 'इंडेक्स चेतावनी: {list}', contentBu
         evidenceMissingHint: "Проиндексированный объект больше не существует; открытие и поиск не удадутся.",
         evidenceDeniedHint: "Текущее рабочее пространство не имеет права читать это доказательство; действия отключены.",
         evidenceUnknownHint: "Хост не сообщил актуальность для этого результата; показан только снимок индекса.",
+        evidenceOmittedHint: "Для этой строки доказательства не загружены (их содержат только первые {n} результатов); сузьте запрос, чтобы загрузить их по требованию.",
         evidenceOpenFile: "Открыть файл", evidenceOpenSession: "Открыть сессию", evidenceReveal: "Показать в папке",
         quickSwitchTitle: "Быстрый переход",
         quickSwitchHint: "Вставьте ссылку на доказательство (ref://…) или упоминание @путь / @сессия: Enter откроет или перейдёт.",
@@ -3066,6 +3084,10 @@ self.onmessage = event => {
     const SEARCH_ROW_LIMIT = 300
     /** `content-query-too-short` threshold shared with the content index. */
     const SEARCH_MIN_CONTENT_CHARS = 3
+    /** 2-codepoint queries use the bounded LIKE fallback when the server enables it. */
+    const SEARCH_SHORT_CONTENT_CHARS = 2
+    /** `/combined full` enriches only this many hits; later rows stay evidence-free. */
+    const SEARCH_EVIDENCE_LIMIT = 10
     /** The panel's bounded-count budget (mirrors src/combined.ts's default). */
     const SEARCH_COUNT_LIMIT = 1000
     /** Highlight expressions are compiled once per query, not twice per row. */
@@ -3124,7 +3146,9 @@ self.onmessage = event => {
     /**
      * Decide which phases one panel query runs. Names always run; bodies and
      * sessions need an enabled content index, a non-regex match mode and at
-     * least `minChars` characters (the content index rejects shorter queries).
+     * least `minChars` characters. The panel passes 2 for normal mode (the
+     * server's bounded short-query fallback) and 3 for extended mode (the
+     * trigram floor), so callers keep control of the effective threshold.
      */
     function searchPhasePlan(input) {
       const settings = input !== null && typeof input === 'object' ? input : {}
@@ -3181,6 +3205,17 @@ self.onmessage = event => {
         includeArchived: settings.includeArchived === true,
         count: 'none',
       }
+      // Only the settled full request carries evidence, and it enriches just the
+      // visible head: a stat/hash round-trip per row would undo the 0.20.1 win.
+      // The renderer tolerates the missing fields on later rows (on-demand hint).
+      if (phase === 'full') {
+        // Literal (not the module constant): this pure helper is evaluated on
+        // its own by the static tests, so it must stay self-contained.
+        const requested = typeof settings.evidenceLimit === 'number' && Number.isFinite(settings.evidenceLimit)
+          ? Math.trunc(settings.evidenceLimit)
+          : 10
+        body.evidenceLimit = Math.max(0, Math.min(50, requested))
+      }
       if (phase === 'names') {
         body.files = filesScope
         body.dirs = dirsScope
@@ -3223,10 +3258,12 @@ self.onmessage = event => {
         truncated: content !== null && content.truncated === true,
         tookMs: 0,
         pending: true,
+        shortQueryFallback: false,
       }
       if (content !== null && content.progress !== null && typeof content.progress === 'object') group.progress = content.progress
       if (matchMode === 'regex') group.error = 'content-regex-not-supported'
       else if (typeof queryLength === 'number' && queryLength > 0 && queryLength < (typeof minChars === 'number' ? minChars : 3)) group.error = 'content-query-too-short'
+      else if (matchMode === 'normal' && queryLength === 2) group.shortQueryFallback = true
       return group
     }
 
@@ -3335,6 +3372,10 @@ self.onmessage = event => {
       const [desc, setDesc] = useState(prefs.desc)
       const [scopes, setScopes] = useState(prefs.scopes)
       const [groups, setGroups] = useState(null)
+      // True once the settled `full` request painted: only then is a missing
+      // evidence block an "outside the evidence window" row rather than a
+      // preview row that is about to be enriched.
+      const [settled, setSettled] = useState(false)
       const [loading, setLoading] = useState(false)
       const [loadingMore, setLoadingMore] = useState(false)
       const [filter, setFilter] = useState('')
@@ -3382,6 +3423,10 @@ self.onmessage = event => {
         ? { content: scopes.content, files: false, dirs: false }
         : { content: scopes.content, files: scopes.files, dirs: scopes.dirs }
       const anyScope = effectiveScopes.content || effectiveScopes.files || effectiveScopes.dirs
+      // Normal mode searches bodies from 2 characters (the server's bounded
+      // short-query fallback); extended mode needs the trigram floor of 3. The
+      // same threshold drives the search plan and the placeholder guard.
+      const contentMinChars = matchMode === 'normal' ? SEARCH_SHORT_CONTENT_CHARS : SEARCH_MIN_CONTENT_CHARS
       // Adopt the content half of a /status response: counters, live progress
       // and the building flag drive the panel without any extra search request.
       const adoptStatus = useCallback(next => {
@@ -3507,13 +3552,32 @@ self.onmessage = event => {
 
       // Two-phase search. Phase 1 (names, 90ms debounce) is a compact
       // files/dirs page and paints in ~20-30ms. Phase 2 (bodies/sessions) runs
-      // only after the 300ms typing pause, only for 3+ character queries, is
-      // compact and asks for a cheap bounded count. Phase 3 is one full settled
-      // request (rich evidence + exact count) at 900ms idle; queries that cannot
-      // query content get that full request directly at 300ms. Every phase is
-      // cancellable and cached in the 20-entry LRU.
+      // only after the 300ms typing pause and only for queries that meet
+      // `contentMinChars` (2 normal / 3 extended); it is compact and asks for a
+      // cheap bounded count. Phase 3 is one full settled request (evidence on
+      // the first SEARCH_EVIDENCE_LIMIT hits + exact count) at 900ms idle;
+      // queries that cannot query content get that full request directly at
+      // 300ms. Every phase is cancellable and cached in the 20-entry LRU, and an
+      // empty search box sends no request at all.
       useEffect(() => {
         if (!open) return undefined
+        // An empty search box is not a query: cancel the in-flight phases and
+        // clear the list without sending the names/full requests (0.20.1 spent
+        // two requests and ~100 stat calls on an empty box).
+        if (query.trim() === '') {
+          const idle = searchRef.current
+          idle.generation += 1
+          for (const controller of idle.controllers) controller.abort()
+          idle.controllers = []
+          setGroups({})
+          setSettled(false)
+          setLoading(false)
+          setLoadingMore(false)
+          setOffsets({ files: 0, dirs: 0, content: 0 })
+          setError('')
+          setTook(0)
+          return undefined
+        }
         if (!anyScope) {
           // Cancel whatever was in flight: with every scope off there is no
           // generation that may still apply its response to the cleared list.
@@ -3522,6 +3586,7 @@ self.onmessage = event => {
           for (const controller of idle.controllers) controller.abort()
           idle.controllers = []
           setGroups(null)
+          setSettled(false)
           setLoading(false)
           setOffsets({ files: 0, dirs: 0, content: 0 })
           setError('')
@@ -3533,6 +3598,7 @@ self.onmessage = event => {
         const generation = search.generation
         for (const controller of search.controllers) controller.abort()
         search.controllers = []
+        setSettled(false)
         const isCurrent = () => search.generation === generation
         const isAbort = cause => cause !== null && typeof cause === 'object' && cause.name === 'AbortError'
         const fetchPhase = async (body, cacheKey) => {
@@ -3558,8 +3624,9 @@ self.onmessage = event => {
           limit: PAGE_NAME,
           contentLimit: PAGE_CONTENT,
           countLimit: SEARCH_COUNT_LIMIT,
+          evidenceLimit: SEARCH_EVIDENCE_LIMIT,
         }
-        const plan = searchPhasePlan({ query, scopes: effectiveScopes, contentEnabled: availableContent, matchMode, minChars: SEARCH_MIN_CONTENT_CHARS })
+        const plan = searchPhasePlan({ query, scopes: effectiveScopes, contentEnabled: availableContent, matchMode, minChars: contentMinChars })
         const contentScopeOn = effectiveScopes.content && availableContent
         const applied = { content: false, full: false }
         // True once any phase painted rows: later background failures must not
@@ -3603,7 +3670,7 @@ self.onmessage = event => {
               }))
             } else {
               const preview = {}
-              if (contentScopeOn) preview.content = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+              if (contentScopeOn) preview.content = contentPlaceholderGroup(contentState, matchMode, plan.text.length, contentMinChars)
               if (data.files !== undefined) preview.files = data.files
               if (data.dirs !== undefined) preview.dirs = data.dirs
               setGroups(preview)
@@ -3652,7 +3719,7 @@ self.onmessage = event => {
             adoptSearchState(data)
           } catch (cause) {
             if (isAbort(cause) || !isCurrent() || applied.full) return
-            const fallback = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+            const fallback = contentPlaceholderGroup(contentState, matchMode, plan.text.length, contentMinChars)
             fallback.pending = false
             fallback.error = cause instanceof Error ? cause.message : String(cause)
             setGroups(previous => mergeContentPhase(previous, { content: fallback }))
@@ -3669,9 +3736,10 @@ self.onmessage = event => {
             const data = await fetchPhase(body, 'full:' + JSON.stringify(body))
             if (!isCurrent()) return
             applied.full = true
+            setSettled(true)
             const full = {}
             if (contentScopeOn) {
-              const placeholder = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+              const placeholder = contentPlaceholderGroup(contentState, matchMode, plan.text.length, contentMinChars)
               placeholder.pending = false
               full.content = data.content !== undefined ? data.content : placeholder
             }
@@ -3704,7 +3772,7 @@ self.onmessage = event => {
           // Content-only scopes (e.g. the session filter): a names request would
           // be empty, so paint the placeholder now and let the body phase fill it.
           const preview = {}
-          if (contentScopeOn) preview.content = contentPlaceholderGroup(contentState, matchMode, plan.text.length, SEARCH_MIN_CONTENT_CHARS)
+          if (contentScopeOn) preview.content = contentPlaceholderGroup(contentState, matchMode, plan.text.length, contentMinChars)
           setGroups(preview)
           setOffsets({ files: 0, dirs: 0, content: 0 })
           setLoading(false)
@@ -4253,6 +4321,9 @@ self.onmessage = event => {
         // the opaque "ref" label and keep origin/title in the tooltip.
         const urlRef = typeof hit.ref === 'string' ? parseUrlRefInfo(hit.ref) : null
         const model = evidenceForHit(group, hit)
+        // The settled request enriches only a page head; later rows stay
+        // actionable (path/actions) and are flagged for the on-demand hint.
+        const evidenceLoaded = model.freshnessReported || model.permissionsReported
         const stateBadge = model.denied
           ? h('span', { className: 'dsh-locator-badge dsh-locator-badge-deny' }, t('permissionDenied'))
           : model.freshness.state === 'stale' || model.freshness.state === 'missing'
@@ -4269,6 +4340,7 @@ self.onmessage = event => {
           role: 'option',
           'aria-selected': index === selected ? 'true' : 'false',
           'data-index': index,
+          'data-evidence': evidenceLoaded ? 'rich' : settled ? 'omitted' : 'pending',
           className: 'dsh-locator-row' + (isContent ? ' dsh-locator-rowcontent' : '') + (index === selected ? ' sel' : ''),
           title: hit.path,
           // Row click opens the evidence details; the same inspector is on
@@ -4363,10 +4435,15 @@ self.onmessage = event => {
       const renderEvidence = () => {
         if (evidence === null) return null
         const fresh = freshnessLabel(evidence.freshness.state)
+        // The settled full response carries evidence only on its first
+        // SEARCH_EVIDENCE_LIMIT hits; rows past that window get an explicit
+        // on-demand hint instead of a misleading "unknown" freshness.
+        const omitted = settled && !evidence.freshnessReported && !evidence.permissionsReported
         const hint = evidence.denied ? t('evidenceDeniedHint')
           : evidence.freshness.state === 'stale' ? t('evidenceStaleHint')
             : evidence.freshness.state === 'missing' ? t('evidenceMissingHint')
-              : evidence.freshnessReported ? '' : t('evidenceUnknownHint')
+              : omitted ? t('evidenceOmittedHint', { n: SEARCH_EVIDENCE_LIMIT })
+                : evidence.freshnessReported ? '' : t('evidenceUnknownHint')
         const observed = typeof evidence.freshness.observedAt === 'number'
           ? t('evidenceObserved', { time: formatTime(evidence.freshness.observedAt) })
           : ''
@@ -4451,13 +4528,27 @@ self.onmessage = event => {
         })
         return typeof progress.path === 'string' && progress.path !== '' ? text + ' · ' + shortProgressPath(progress.path) : text
       }
+      // A 2-codepoint normal-mode query is the server's bounded substring
+      // fallback; mark it as approximate even before the response arrives (and
+      // when the server predates the shortQueryFallback field).
+      const shortFallbackQuery = matchMode === 'normal' && query.trim().length === 2
+      const isShortFallbackWarning = code => typeof code === 'string'
+        && (code === 'short-query-fallback' || code.startsWith('content-query-short-fallback'))
       const renderGroup = (key, label, group, extra) => {
         if (!scopes[key] || group === undefined) return null
         const hits = Array.isArray(group.hits) ? group.hits : []
         const visibleHits = hits.filter(hit => rowIndexByKey.has(panelHitKey(key, hit)))
         const count = typeof group.returned === 'number' ? group.returned : hits.length
-        const warnings = Array.isArray(group.warnings) && group.warnings.length > 0
-          ? t('contentWarning', { list: group.warnings.join(', ') })
+        // Known short-query fallback warning codes are explained by the
+        // localized approximate-results note; unknown codes stay verbatim.
+        const warningCodes = Array.isArray(group.warnings) ? group.warnings.filter(code => !isShortFallbackWarning(code)) : []
+        const warnings = warningCodes.length > 0
+          ? t('contentWarning', { list: warningCodes.join(', ') })
+          : null
+        const fallbackWarnings = Array.isArray(group.warnings) && group.warnings.some(isShortFallbackWarning)
+        const shortFallback = key === 'content' && typeof group.error !== 'string'
+          && (group.shortQueryFallback === true || fallbackWarnings || shortFallbackQuery)
+          ? t('shortQueryFallback')
           : null
         const budget = key === 'content' && group.truncated === true ? t('contentBudget') : null
         const note = key === 'content'
@@ -4465,7 +4556,7 @@ self.onmessage = event => {
             : contentBuilding ? contentProgressText()
               : (content?.capped ? t('contentCapped', { n: count }) : (query.trim() !== '' ? t('relevance') : null)))
           : (group.deduped > 0 ? t('deduped', { n: group.deduped }) : (group.truncated ? t('showing', { n: hits.length }) : null))
-        const combinedNote = [note, warnings, budget].filter(value => value !== null && value !== '').join(' · ')
+        const combinedNote = [note, shortFallback, warnings, budget].filter(value => value !== null && value !== '').join(' · ')
         if (typeof group.error === 'string' && group.error !== '') {
           const informational = ['content-regex-not-supported', 'content-query-too-short', 'invalid-control-char'].includes(group.error)
           const message = contentErrorText(group.error)
@@ -4484,8 +4575,8 @@ self.onmessage = event => {
                 filter.trim() !== '' && hits.length > 0
                   ? t('filterEmpty')
                   : (key === 'content' && scopes.content
-                    ? (sessionOnly && query.trim().length >= 3 ? t('panelSessionHint')
-                      : query.trim().length < 3 ? t('contentShort')
+                    ? (sessionOnly && query.trim().length >= contentMinChars ? t('panelSessionHint')
+                      : query.trim().length < contentMinChars ? t('contentShort')
                         : (group.pending === true || contentBuilding ? t('loading') : t('emptyResults')))
                     : (query.trim() === '' ? t('emptyQuery') : t('emptyResults'))))
             : visibleHits.map(hit => rowFor(key, hit, rowIndexByKey.get(panelHitKey(key, hit)))),
@@ -4634,7 +4725,9 @@ self.onmessage = event => {
             ? h('div', { className: 'dsh-locator-empty' }, t('emptyScopes'))
             : groups === null
               ? (error === '' ? h('div', { className: 'dsh-locator-empty' }, t('loading')) : null)
-              : [
+              : rows.length === 0 && query.trim() === '' && error === ''
+                ? h('div', { className: 'dsh-locator-empty', role: 'status' }, t('emptyQuery'))
+                : [
                   renderGroup('content', t('groupContent'), content),
                   renderGroup('files', t('groupFiles'), files),
                   renderGroup('dirs', t('groupDirs'), dirs),

@@ -14,6 +14,18 @@
  * and the whole-word post-filter stops after a fixed number of rows, body bytes
  * or milliseconds and reports a bounded count.
  *
+ * 0.20.2 adds two quality fixes on top of that:
+ * - wide-page kind grouping (P0-1): the adaptive-rank wide path used to page in
+ *   rowid order, and a full build indexes sessions first, so common words
+ *   (the/function/error) returned a page that was 100% session documents. A wide
+ *   unranked page is now fetched per kind (file first, then at most
+ *   WIDE_SESSION_MAX_SHARE of the requested page from sessions) and re-sorted
+ *   in-page with a cheap term-frequency/title/depth/line heuristic.
+ * - short-query fallback (P0-2): a 2-codepoint query (ai / js / 索引) cannot be
+ *   served by the trigram index. When the caller opts in with
+ *   shortQueryFallback, a bounded scan returns name matches first and then body
+ *   hits within a fixed wall clock, instead of rejecting the query.
+ *
  * 0.20.0 adds three policies on top of that:
  * - adaptive rank (P0-6): one bounded count of the raw match set decides whether
  *   ORDER BY rank is affordable; wide sets page in rowid order and a cheap JS
@@ -94,6 +106,17 @@ export interface ContentSearchOptions {
    * "always rank" behavior for narrow queries.
    */
   rankAdaptive?: boolean
+  /**
+   * Bounded LIKE fallback for 2-codepoint queries (0.20.2, P0-2). The trigram
+   * index cannot serve a 2-character term (ai / js / 索引), so such a query is
+   * normally rejected with 'content-query-too-short'. When this is true the
+   * query is answered by a bounded scan instead: file-name (stored path) hits
+   * first, then body hits under a fixed wall-clock budget, with a
+   * 'content-query-short-fallback' warning and shortQueryFallback: true on the
+   * result. One-codepoint queries stay rejected. Default off for direct
+   * embedders; the plugin turns it on from contentShortQueryFallback.
+   */
+  shortQueryFallback?: boolean
   /** Drop session documents entirely (the unknown-session fallback). */
   excludeSessions?: boolean
   /** Include archived sessions in this query (panel checkbox or config). */
@@ -142,6 +165,12 @@ export interface ContentSearchResult {
   count: ContentCount
   warnings: string[]
   error?: string
+  /**
+   * True when a 2-codepoint query was answered by the bounded short-query
+   * fallback, so the page is approximate (name hits plus a bounded body scan)
+   * rather than trigram-exact. Absent for every normal query.
+   */
+  shortQueryFallback?: boolean
 }
 
 /** Shortest text a trigram tokenizer can index. */
@@ -172,6 +201,61 @@ export const RANK_ADAPTIVE_THRESHOLD = 2_000
 export const DEGRADED_COUNT_LIMIT = 500
 
 /**
+ * Shortest term the bounded short-query fallback accepts (0.20.2, P0-2). One
+ * codepoint is still rejected: a single character matches so much of a corpus
+ * that even a bounded scan is not worth answering.
+ */
+export const SHORT_TERM_MIN = 2
+
+/**
+ * Wall-clock budget for one short-query fallback, in ms. The scan never starts
+ * another rowid chunk after the deadline, so the overshoot is bounded by one
+ * chunk; this is also the number the UI can use to label the result
+ * approximate.
+ */
+export const SHORT_QUERY_FALLBACK_MAX_MS = 2_000
+
+/**
+ * Rows scanned per fallback chunk. The body scan is split into explicit rowid
+ * ranges so cancellation and the deadline are observed between chunks; a
+ * chunk of a pathological corpus (many multi-MB documents) bounds the
+ * worst-case overshoot of the wall-clock budget.
+ */
+const SHORT_QUERY_FALLBACK_CHUNK_ROWS = 512
+
+/**
+ * Minimum fallback chunk after adaptive shrinking. A corpus chunk made of
+ * multi-MB documents can take long enough that one chunk exceeds the remaining
+ * wall clock; the scan halves the chunk size when a chunk runs past
+ * SHORT_QUERY_FALLBACK_SLOW_CHUNK_MS.
+ */
+const SHORT_QUERY_FALLBACK_MIN_CHUNK_ROWS = 64
+const SHORT_QUERY_FALLBACK_SLOW_CHUNK_MS = 50
+
+/** How many name hits (path matches) the fallback collects before body hits. */
+const SHORT_QUERY_NAME_MIN_LIMIT = 40
+const SHORT_QUERY_NAME_MAX_LIMIT = 500
+
+/**
+ * Maximum session share of one requested wide page (0.20.2, P0-1). The file
+ * page fills the requested page first, so a file-rich common-word query returns
+ * file hits only (the research prototype hit 100% files versus 100% sessions
+ * before the fix); sessions only fill slots the file page leaves empty and are
+ * capped here so they can never dominate a page.
+ */
+export const WIDE_SESSION_MAX_SHARE = 0.3
+
+/**
+ * Term-frequency terminator for the wide-page rerank: counting stops after this
+ * many occurrences, so a word present on every line cannot make the heuristic
+ * scan a whole document.
+ */
+const FREQ_SCAN_CAP = 64
+
+/** Bytes of each body sampled for the term-frequency heuristic. */
+const FREQ_BODY_MAX = 65_536
+
+/**
  * Candidate-rowid cap for the split workspace count. Above it the rowid probe
  * list is so broad that the combined column count wins; below it the two narrow
  * halves are an order of magnitude cheaper.
@@ -181,11 +265,26 @@ const COMPOSITE_ROWID_LIMIT = 5_000
 /** docs_meta candidate count used as the split-count guard. */
 const COMPOSITE_CANDIDATE_SQL = "SELECT count(*) AS n FROM docs_meta WHERE path LIKE ? ESCAPE '\\'"
 
-/** Read-only connection pragmas for content search (worker and embedders). */
+/**
+ * Page cache for one search connection, KiB (0.20.2, P1). Raised from 16 MiB to
+ * 64 MiB after measuring the live 4.1 GB snapshot: hot wide-query p50 fell from
+ * 72.9 ms to 57.3 ms (-21%) and hot narrow p50 from 23.2 ms to 19.4 ms (-16%),
+ * while fresh-connection cold latency stayed at ~21 ms (narrow) / ~68 ms (wide)
+ * and the process RSS did not move (the 256 MiB mmap window dominates). The
+ * bound is deliberate and must stay explicit: the host can run two search
+ * workers at once, so 2 x 64 MiB is the worst case.
+ */
+export const SEARCH_CACHE_KIB = 64 * 1024
+
+/**
+ * Read-only connection pragmas for content search (worker and embedders).
+ * temp_store stays MEMORY so a transient sorter never spills to disk; between
+ * them these are the whole per-connection memory profile.
+ */
 const SEARCH_PRAGMAS: readonly string[] = [
   'PRAGMA busy_timeout = 5000',
   'PRAGMA query_only = ON',
-  'PRAGMA cache_size = -16384',
+  `PRAGMA cache_size = -${SEARCH_CACHE_KIB}`,
   'PRAGMA mmap_size = 268435456',
   'PRAGMA temp_store = MEMORY',
 ]
@@ -327,6 +426,36 @@ export interface ContentQueryCheck {
   phrase: boolean
   warnings: string[]
   error?: string
+  /**
+   * True when every term is too short for the trigram index but long enough for
+   * the bounded short-query fallback (2 codepoints). Callers that did not opt
+   * into the fallback get an error instead, so this is only set with
+   * `allowShort`.
+   */
+  short: boolean
+}
+
+/** Knobs for {@link checkContentQuery}. */
+export interface ContentQueryCheckOptions {
+  /**
+   * Accept 2-codepoint terms for the bounded LIKE fallback (0.20.2, P0-2).
+   * Default false keeps the 0.20.0 contract: the panel can show
+   * 'content-query-too-short' without touching the store.
+   */
+  allowShort?: boolean
+}
+
+/**
+ * Decide what to do with terms that the trigram tokenizer cannot index.
+ * @returns an entry error, or `short: true` when the caller may fall back.
+ */
+function shortTermsStatus(terms: readonly string[], allowShort: boolean): { error?: string; short: boolean } {
+  if (!terms.some(term => codePointCount(term) < TRIGRAM_MIN)) return { short: false }
+  // A one-codepoint term stays rejected even with the fallback: it matches so
+  // much of any real corpus that a bounded scan cannot produce a useful page.
+  if (terms.some(term => codePointCount(term) < SHORT_TERM_MIN)) return { short: false, error: 'content-query-too-short' }
+  if (!allowShort) return { short: false, error: 'content-query-too-short' }
+  return { short: true }
 }
 
 /**
@@ -334,53 +463,64 @@ export interface ContentQueryCheck {
  *
  * Content search only supports substrings the FTS5 trigram tokenizer can
  * serve. A 1–2 character term used to fall back to a whole-corpus `LIKE` scan,
- * which is both slow and unbounded; it is now a hard, visible error instead.
- * The same limits apply after extended-mode escapes are decoded, and lengths
- * are measured in Unicode code points so emoji are not mistaken for long text.
+ * which is both slow and unbounded; it became a hard error in 0.20.0. 0.20.2
+ * reintroduces it as an explicit, bounded fallback: callers that pass
+ * `allowShort` accept 2-codepoint terms and searchContent answers them with a
+ * deadline-bounded scan. The same limits apply after extended-mode escapes are
+ * decoded, and lengths are measured in Unicode code points so emoji are not
+ * mistaken for long text.
  * @param query - raw query text.
  * @param matchMode - `normal` (whitespace-separated terms) or `extended`.
+ * @param options - `allowShort` opts into the bounded fallback.
  * @returns normalized terms, or the first entry error.
  */
-export function checkContentQuery(query: string, matchMode: ContentMatchMode): ContentQueryCheck {
+export function checkContentQuery(
+  query: string,
+  matchMode: ContentMatchMode,
+  options: ContentQueryCheckOptions = {},
+): ContentQueryCheck {
   const warnings: string[] = []
+  const allowShort = options.allowShort === true
   const text = query.trim()
-  if (text === '') return { ok: true, terms: [], phrase: false, warnings }
+  if (text === '') return { ok: true, terms: [], phrase: false, warnings, short: false }
   if (codePointCount(text) > MAX_QUERY_CODEPOINTS) {
-    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-long' }
+    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-long', short: false }
   }
   if (hasControlChars(text)) {
     // A NUL (or other C0 byte) in the query must never be passed to SQLite:
     // some string paths would stop at it and turn the query into "match
     // everything". Reject it explicitly instead.
-    return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char' }
+    return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char', short: false }
   }
   if (matchMode === 'extended') {
     const decoded = decodeExtended(text)
     warnings.push(...decoded.warnings)
     if (!decoded.ok) {
-      return { ok: false, terms: [], phrase: false, warnings, error: decoded.error ?? 'invalid-escape' }
+      return { ok: false, terms: [], phrase: false, warnings, error: decoded.error ?? 'invalid-escape', short: false }
     }
     if (hasControlChars(decoded.text)) {
-      return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char' }
+      return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char', short: false }
     }
     const words = splitWords(decoded.text)
-    if (words.length === 0) return { ok: true, terms: [], phrase: true, warnings }
+    if (words.length === 0) return { ok: true, terms: [], phrase: true, warnings, short: false }
     if (words.length > MAX_QUERY_TERMS) {
-      return { ok: false, terms: [], phrase: true, warnings, error: 'content-query-too-many-terms' }
+      return { ok: false, terms: [], phrase: true, warnings, error: 'content-query-too-many-terms', short: false }
     }
-    if (words.some(word => codePointCount(word) < TRIGRAM_MIN)) {
-      return { ok: false, terms: [], phrase: true, warnings, error: 'content-query-too-short' }
+    const status = shortTermsStatus(words, allowShort)
+    if (status.error !== undefined) {
+      return { ok: false, terms: [], phrase: true, warnings, error: status.error, short: false }
     }
-    return { ok: true, terms: [decoded.text], phrase: true, warnings }
+    return { ok: true, terms: [decoded.text], phrase: true, warnings, short: status.short }
   }
   const terms = splitTerms(text)
   if (terms.length > MAX_QUERY_TERMS) {
-    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-many-terms' }
+    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-many-terms', short: false }
   }
-  if (terms.some(term => codePointCount(term) < TRIGRAM_MIN)) {
-    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-short' }
+  const status = shortTermsStatus(terms, allowShort)
+  if (status.error !== undefined) {
+    return { ok: false, terms: [], phrase: false, warnings, error: status.error, short: false }
   }
-  return { ok: true, terms, phrase: false, warnings }
+  return { ok: true, terms, phrase: false, warnings, short: status.short }
 }
 
 /** Whether `index` starts a whole-word occurrence of `length` bytes. */
@@ -633,6 +773,10 @@ interface QueryPlan {
   countBounded: boolean
   /** Scope filters are present, so a wide exact count is not worth paying. */
   filtered: boolean
+  /** File documents can survive the scope filters. */
+  canHitFiles: boolean
+  /** Session documents can survive the scope filters. */
+  canHitSessions: boolean
   /**
    * Workspace scope counted as two kind-separated halves, each with a narrow
    * rowid probe set (see CompositeCountPlan). Absent for every other scope.
@@ -714,6 +858,12 @@ function buildPlan(terms: readonly string[], options: {
   const page = pageFilters(filters)
   const count = countFilters(filters)
   const filtered = page.sql !== ''
+  // Which document kinds can survive the scope filters: the wide-page kind
+  // grouping (P0-1) only splits into file/session pages when both are possible.
+  const filePathOnly = filters.sessionPath !== null && filters.pathPrefix === null && !filters.fileHitsAllRoots
+  const canHitFiles = !filePathOnly
+  const canHitSessions = filters.excludeSessions !== true
+    && !(filters.allowedSessions !== null && filters.allowedSessions.length === 0)
   const plan = (matchWhere: string, matchParams: Array<string | number>, rankCapable: boolean, countBounded: boolean): QueryPlan => {
     const composite = compositeCountPlan(filters, matchWhere, matchParams)
     return {
@@ -730,6 +880,8 @@ function buildPlan(terms: readonly string[], options: {
       rankCapable,
       countBounded,
       filtered,
+      canHitFiles,
+      canHitSessions,
       ...(composite === null ? {} : { composite }),
     }
   }
@@ -762,10 +914,55 @@ const DOC_SQL = `SELECT d.kind AS kind, d.path AS path, d.title AS title,
   FROM docs d LEFT JOIN docs_meta m ON m.rowid = d.rowid
   WHERE d.rowid = ?`
 
+/** The plan fields a hit builder needs (also usable by the short-query fallback). */
+type HitPlan = Pick<QueryPlan, 'terms' | 'caseSensitive' | 'wholeWord'>
+
+/** Hits built for one page, with the rerank samples aligned by index. */
+interface BuiltHits {
+  hits: ContentHit[]
+  /** Term frequency per hit for the wide-page rerank (0 when not requested). */
+  frequency: number[]
+}
+
+/**
+ * Count query-term occurrences in a bounded sample of one body. Used only as a
+ * cheap tie-breaker for the unranked wide page: a document that repeats the
+ * term is usually more relevant than one that mentions it once. Counting stops
+ * at FREQ_SCAN_CAP and reads at most FREQ_BODY_MAX bytes, so the heuristic
+ * never turns into a second full-corpus scan.
+ */
+function countTermFrequency(body: string, needles: readonly string[], caseSensitive: boolean): number {
+  if (needles.length === 0) return 0
+  const sample = body.length > FREQ_BODY_MAX ? body.slice(0, FREQ_BODY_MAX) : body
+  const hay = caseSensitive ? sample : sample.toLowerCase()
+  let total = 0
+  for (const needle of needles) {
+    let from = 0
+    while (total < FREQ_SCAN_CAP) {
+      const index = hay.indexOf(needle, from)
+      if (index < 0) break
+      total++
+      from = index + needle.length
+    }
+    if (total >= FREQ_SCAN_CAP) break
+  }
+  return total
+}
+
 /** Build hits from rowids: metadata, snippet, first-match line and score. */
-function buildHits(db: DatabaseSync, plan: QueryPlan, rowids: readonly number[], scores: ReadonlyMap<number, number>): ContentHit[] {
+function buildHits(
+  db: DatabaseSync,
+  plan: HitPlan,
+  rowids: readonly number[],
+  scores: ReadonlyMap<number, number>,
+  withFrequency = false,
+): BuiltHits {
   const statement = db.prepare(DOC_SQL)
   const hits: ContentHit[] = []
+  const frequency: number[] = []
+  const needles = withFrequency
+    ? plan.terms.filter(term => term !== '').map(term => plan.caseSensitive ? term : term.toLowerCase())
+    : []
   for (const rowid of rowids) {
     const row = statement.get(rowid) as DocRow | undefined
     if (row === undefined || typeof row.body !== 'string') continue
@@ -784,8 +981,9 @@ function buildHits(db: DatabaseSync, plan: QueryPlan, rowids: readonly number[],
       ...(line === undefined ? {} : { line }),
     }
     hits.push(hit)
+    if (withFrequency) frequency.push(countTermFrequency(row.body, needles, plan.caseSensitive))
   }
-  return hits
+  return { hits, frequency }
 }
 
 /** Candidate rowids for one page (no post-filter). */
@@ -808,6 +1006,48 @@ function pageRowids(
     if (typeof row.score === 'number') scores.set(row.rowid, row.score)
   }
   return { rowids, scores }
+}
+
+/**
+ * Candidate rowids for one wide page, fetched per document kind (0.20.2, P0-1).
+ *
+ * The adaptive-rank wide path skips bm25 and used to page in raw rowid order. A
+ * full content build indexes sessions before files, so for a common word
+ * (the/function/error) the lowest rowids — and therefore the whole page — were
+ * session documents. Fetching the file page and the session page separately
+ * makes the composition explicit: files fill the requested page first, and
+ * sessions only fill slots the file page leaves empty, at most
+ * WIDE_SESSION_MAX_SHARE of the requested page. A page a file-rich query
+ * returns is therefore all files (the research prototype measured 100% files
+ * versus 100% sessions before the fix).
+ *
+ * Kind filters go through docs_meta rowid sets instead of the FTS UNINDEXED
+ * kind column: the session set is small, so the file page can skip it cheaply
+ * even when the match list starts with thousands of session rows, and the
+ * session page never has to materialize every file body to test the column.
+ */
+function widePageRowids(db: DatabaseSync, plan: QueryPlan, limit: number, offset: number): number[] {
+  const fileRows = kindPageRowids(db, plan, 'file', limit, offset)
+  const remaining = limit - fileRows.length
+  const sessionQuota = Math.min(remaining, Math.floor(limit * WIDE_SESSION_MAX_SHARE))
+  if (sessionQuota <= 0) return fileRows
+  return fileRows.concat(kindPageRowids(db, plan, 'session', sessionQuota, offset))
+}
+
+/** One kind's page from the unranked matcher, in rowid order. */
+function kindPageRowids(db: DatabaseSync, plan: QueryPlan, kind: 'file' | 'session', limit: number, offset: number): number[] {
+  const kindWhere = kind === 'file'
+    ? " AND rowid NOT IN (SELECT rowid FROM docs_meta WHERE kind = 'session')"
+    : " AND rowid IN (SELECT rowid FROM docs_meta WHERE kind = 'session')"
+  const rows = db
+    .prepare(`SELECT rowid AS rowid FROM docs WHERE ${plan.pageWhere}${kindWhere} LIMIT ? OFFSET ?`)
+    .all(...plan.pageParams, limit, offset) as Array<{ rowid?: number }>
+  const rowids: number[] = []
+  for (const row of rows) {
+    if (typeof row.rowid !== 'number') continue
+    rowids.push(row.rowid)
+  }
+  return rowids
 }
 
 /** Exact COUNT over one WHERE fragment. */
@@ -897,21 +1137,30 @@ function pathDepth(path: string): number {
 /**
  * Cheap relevance heuristic for a wide page that skipped bm25.
  *
- * At most MAX_LIMIT hits are in hand, so any JS sort is free. Documents whose
- * title contains a query term come first, then shallower paths (a word that
- * appears everywhere usually means a file near a root), then earlier match
- * lines, then path order so a page is deterministic.
+ * At most MAX_LIMIT hits are in hand, so any JS sort is free. Order: term
+ * frequency (bounded sample), then documents whose title contains a query
+ * term, then shallower paths (a word that appears everywhere usually means a
+ * file near a root), then earlier match lines, then path order so a page is
+ * deterministic. Frequency is 0 for callers that did not ask for samples.
  */
-function lightSortHits(hits: ContentHit[], plan: QueryPlan): ContentHit[] {
+function lightSortHits(hits: ContentHit[], plan: HitPlan, frequency?: readonly number[]): ContentHit[] {
   const needles = plan.terms.filter(term => term !== '').map(term => plan.caseSensitive ? term : term.toLowerCase())
   const decorated = hits.map((hit, order) => {
     const title = plan.caseSensitive ? hit.title : hit.title.toLowerCase()
     let titleHits = 0
     for (const needle of needles) if (title.includes(needle)) titleHits++
-    return { hit, order, titleHits, depth: pathDepth(hit.path), line: hit.line ?? Number.MAX_SAFE_INTEGER }
+    return {
+      hit,
+      order,
+      freq: frequency?.[order] ?? 0,
+      titleHits,
+      depth: pathDepth(hit.path),
+      line: hit.line ?? Number.MAX_SAFE_INTEGER,
+    }
   })
   decorated.sort((a, b) =>
-    b.titleHits - a.titleHits
+    b.freq - a.freq
+    || b.titleHits - a.titleHits
     || a.depth - b.depth
     || a.line - b.line
     || a.hit.path.localeCompare(b.hit.path)
@@ -920,12 +1169,358 @@ function lightSortHits(hits: ContentHit[], plan: QueryPlan): ContentHit[] {
 }
 
 /**
- * Put a read-only content connection into the search profile (P2).
+ * Sort one wide page group by kind.
  *
- * Search workers each get a 16 MiB page cache and a 256 MiB mmap window so
- * repeated queries keep their FTS pages warm without touching the build
- * connection. Failures are ignored: an older SQLite or a filesystem that
- * rejects mmap must never stop search from working.
+ * The file page and the session page are each re-sorted with the cheap
+ * heuristic; files stay in front of sessions (P0-1 file priority). Frequency
+ * samples arrive aligned with the unsorted hit list, so they are split by kind
+ * here.
+ */
+function lightSortWideGroups(hits: ContentHit[], plan: HitPlan, frequency: readonly number[]): ContentHit[] {
+  const files: ContentHit[] = []
+  const sessions: ContentHit[] = []
+  const fileFreq: number[] = []
+  const sessionFreq: number[] = []
+  for (const [index, hit] of hits.entries()) {
+    const sample = frequency[index] ?? 0
+    if (hit.kind === 'session') {
+      sessions.push(hit)
+      sessionFreq.push(sample)
+    } else {
+      files.push(hit)
+      fileFreq.push(sample)
+    }
+  }
+  return [...lightSortHits(files, plan, fileFreq), ...lightSortHits(sessions, plan, sessionFreq)]
+}
+
+/** A literal substring predicate for one term, matched against one column. */
+function literalMatcher(column: string, term: string, caseSensitive: boolean): { sql: string; param: string } {
+  // GLOB is byte-exact (case-sensitive) and works for any length; LIKE with an
+  // explicit ESCAPE is the case-insensitive (ASCII folding) form. Both reuse
+  // the same escaping helpers the FTS path uses.
+  if (caseSensitive) return { sql: column + ' GLOB ?', param: '*' + escapeGlob(term) + '*' }
+  return { sql: column + " LIKE ? ESCAPE '\\'", param: '%' + escapeLike(term) + '%' }
+}
+
+/**
+ * Column names of the FTS5 content table backing `docs`, or null when the table
+ * is not a regular (internally contented) FTS5 table.
+ *
+ * A full scan of the FTS5 virtual table costs ~300 ms of fixed startup on a
+ * multi-GB corpus (the iterator materialises its position lists), which would
+ * blow the fallback budget before any row is read. The content table is an
+ * ordinary table whose `id` is the document rowid, so a bounded rowid range
+ * scans in a millisecond. Columns are mapped from the `docs` column order
+ * (c0 = first declared column), so a future schema column order does not
+ * silently read the wrong column; if the content table is ever absent (an
+ * external-content or contentless FTS5 schema) the caller falls back to the
+ * virtual table, which is correct but slower.
+ */
+function shortFallbackContentTable(
+  db: DatabaseSync,
+): { body: string; kind: string; path: string; sessionId: string | null } | null {
+  try {
+    const exists = db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'docs_content'")
+      .get() as { ok?: number } | undefined
+    if (exists === undefined) return null
+    const columns = db.prepare('PRAGMA table_info(docs)').all() as Array<{ cid?: number; name?: string }>
+    const indexes = new Map<string, number>()
+    for (const column of columns) {
+      if (typeof column.cid !== 'number' || typeof column.name !== 'string') continue
+      indexes.set(column.name, column.cid)
+    }
+    const body = indexes.get('body')
+    const kind = indexes.get('kind')
+    const path = indexes.get('path')
+    if (body === undefined || kind === undefined || path === undefined) return null
+    const sessionId = indexes.get('session_id')
+    return {
+      body: 'c' + String(body),
+      kind: 'c' + String(kind),
+      path: 'c' + String(path),
+      sessionId: sessionId === undefined ? null : 'c' + String(sessionId),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** All terms present as (optionally whole-word) substrings of one body. */
+function containsAllTerms(body: string, terms: readonly string[], caseSensitive: boolean, wholeWord: boolean): boolean {
+  if (wholeWord) return matchesWholeWord(body, terms, caseSensitive)
+  const hay = caseSensitive ? body : body.toLowerCase()
+  for (const term of terms) {
+    if (term === '') continue
+    if (!hay.includes(caseSensitive ? term : term.toLowerCase())) return false
+  }
+  return true
+}
+
+/** Call context for the bounded short-query fallback. */
+interface ShortFallbackContext {
+  limit: number
+  offset: number
+  countMode: ContentCountMode
+  countLimit: number
+  pathPrefix: string | null
+}
+
+/**
+ * Bounded fallback for a 2-codepoint query (0.20.2, P0-2).
+ *
+ * The trigram index cannot serve a term shorter than three codepoints, so
+ * 'ai', 'js', '索引' used to be rejected outright. With shortQueryFallback this
+ * path answers them instead, deterministically bounded in four ways:
+ *
+ * 1. Name hits first: documents whose stored path contains every term, newest
+ *    first. A name match fills page slots before any body scan runs.
+ * 2. The remaining slots come from a body scan split into explicit rowid-range
+ *    chunks, so cancellation and the wall clock are observed between chunks
+ *    (the whole query stops at SHORT_QUERY_FALLBACK_MAX_MS plus at most one
+ *    chunk). SQL predicates carry an escaped LIKE/GLOB and the scan is a plain
+ *    sequential walk of docs_content, never a full FTS match.
+ * 3. The page stops the scan as soon as it is full; the count then reports a
+ *    bounded floor instead of paying for a full exact count.
+ * 4. Whole-word post-filtering reads bodies by rowid for the (few) SQL matches.
+ *
+ * File documents are returned when file scope is active. A pure session scope
+ * (panel "this conversation") enumerates the one indexed session log and
+ * matches its bodies in JS; there is no file page to prefer there.
+ */
+function shortQueryFallbackSearch(
+  db: DatabaseSync,
+  check: ContentQueryCheck,
+  options: ContentSearchOptions,
+  context: ShortFallbackContext,
+): ContentSearchResult {
+  const warnings = new Set<string>(check.warnings)
+  warnings.add('content-query-short-fallback')
+  const deadline = performance.now() + SHORT_QUERY_FALLBACK_MAX_MS
+  const cancelled = (): boolean => typeof options.isCancelled === 'function' && options.isCancelled()
+  const caseSensitive = options.caseSensitive === true
+  const wholeWord = options.wholeWord === true
+  const terms = check.terms
+  const hitPlan: HitPlan = { terms, caseSensitive, wholeWord }
+  const sessionPath = options.sessionPath ?? null
+  const fileHitsAllRoots = options.fileHitsAllRoots === true
+  const excluded = options.excludeSessions === true
+    || (options.allowedSessionIds !== undefined && options.allowedSessionIds.length === 0)
+  // Mirrors pageFilters: a pure session scope only admits that session log, so
+  // it has no file document to hit; every other scope searches file documents.
+  const sessionOnlyScope = sessionPath !== null && context.pathPrefix === null && !fileHitsAllRoots
+  const filesInScope = !sessionOnlyScope
+  if (sessionOnlyScope && excluded) {
+    // The scope filter admits only session documents and the caller excluded
+    // sessions: no document can match, so there is nothing to scan.
+    return { hits: [], count: emptyCount(context.countMode), warnings: [...warnings], shortQueryFallback: true }
+  }
+  let wallClockHit = false
+
+  if (filesInScope) {
+    // Name hits: path matches from docs_meta (small table, sequential scan).
+    const nameRows: number[] = []
+    let nameComplete = true
+    const nameLimit = Math.min(
+      SHORT_QUERY_NAME_MAX_LIMIT,
+      Math.max(SHORT_QUERY_NAME_MIN_LIMIT, context.offset + context.limit + 1),
+    )
+    if (nameLimit > 0) {
+      const nameWhere: string[] = ["kind = 'file'"]
+      const nameParams: Array<string | number> = []
+      if (context.pathPrefix !== null) {
+        nameWhere.push("path LIKE ? ESCAPE '\\'")
+        nameParams.push(escapeLike(context.pathPrefix) + '%')
+      }
+      for (const term of terms) {
+        const matcher = literalMatcher('path', term, caseSensitive)
+        nameWhere.push(matcher.sql)
+        nameParams.push(matcher.param)
+      }
+      const rows = db
+        .prepare(`SELECT rowid AS rowid FROM docs_meta WHERE ${nameWhere.join(' AND ')} ORDER BY mtime DESC LIMIT ?`)
+        .all(...nameParams, nameLimit) as Array<{ rowid?: number }>
+      for (const row of rows) {
+        if (typeof row.rowid !== 'number') continue
+        nameRows.push(row.rowid)
+      }
+      nameComplete = nameRows.length < nameLimit
+    }
+    if (cancelled()) return cancelledResult()
+    const namePage = nameRows.slice(context.offset, context.offset + context.limit)
+    const nameSet = new Set(nameRows)
+    const bodyLimit = context.limit - namePage.length
+    // A page already full of name hits needs no body scan at all.
+    const bodyOffset = context.offset >= nameRows.length ? context.offset - nameRows.length : 0
+
+    const bodyRows: number[] = []
+    let bodyMatched = 0
+    // A page already filled by name hits leaves no body slot; the unscanned
+    // body hits then make the count a bounded floor instead of an exact count.
+    let bodyStopped = bodyLimit <= 0
+    if (bodyLimit > 0) {
+      // Scan the FTS5 content table when it exists: it is an ordinary table
+      // with the document rowid as INTEGER PRIMARY KEY, so one 512-row chunk
+      // costs ~1 ms. Scanning the docs virtual table instead costs ~300 ms of
+      // fixed FTS iterator startup per statement on a multi-GB corpus (measured
+      // on the 4.1 GB live snapshot), which would exhaust the budget in six
+      // chunks before the page filled.
+      const contentColumns = shortFallbackContentTable(db)
+      const table = contentColumns !== null ? 'docs_content' : 'docs'
+      const key = contentColumns !== null ? 'id' : 'rowid'
+      const bodyColumn = contentColumns !== null ? contentColumns.body : 'body'
+      const kindColumn = contentColumns !== null ? contentColumns.kind : 'kind'
+      const pathColumn = contentColumns !== null ? contentColumns.path : 'path'
+      const bodyWhere: string[] = [kindColumn + " = 'file'"]
+      const bodyParams: Array<string | number> = []
+      if (context.pathPrefix !== null) {
+        bodyWhere.push(pathColumn + " LIKE ? ESCAPE '\\'")
+        bodyParams.push(escapeLike(context.pathPrefix) + '%')
+      }
+      for (const term of terms) {
+        const matcher = literalMatcher(bodyColumn, term, caseSensitive)
+        bodyWhere.push(matcher.sql)
+        bodyParams.push(matcher.param)
+      }
+      const maxRow = db.prepare('SELECT max(rowid) AS n FROM docs_meta').get() as { n?: number } | undefined
+      const maxRowid = Number(maxRow?.n ?? 0)
+      const chunk = db.prepare(
+        `SELECT ${key} AS rowid FROM ${table} WHERE ${key} > ? AND ${key} <= ? AND ${bodyWhere.join(' AND ')} ORDER BY ${key}`,
+      )
+      const bodyStatement = wholeWord
+        ? db.prepare(`SELECT ${bodyColumn} AS body FROM ${table} WHERE ${key} = ?`)
+        : null
+      let chunkRows = SHORT_QUERY_FALLBACK_CHUNK_ROWS
+      let cursor = 0
+      while (cursor < maxRowid) {
+        if (cancelled()) return cancelledResult()
+        if (performance.now() >= deadline) {
+          wallClockHit = true
+          bodyStopped = true
+          break
+        }
+        const high = Math.min(maxRowid, cursor + chunkRows)
+        const chunkStarted = performance.now()
+        const rows = chunk.all(cursor, high, ...bodyParams) as Array<{ rowid?: number }>
+        // Shrink the next chunk when this one was slow (for example a run of
+        // multi-MB extracted documents), so one chunk cannot overshoot the
+        // remaining wall clock by much.
+        if (performance.now() - chunkStarted > SHORT_QUERY_FALLBACK_SLOW_CHUNK_MS) {
+          chunkRows = Math.max(SHORT_QUERY_FALLBACK_MIN_CHUNK_ROWS, Math.floor(chunkRows / 2))
+        }
+        for (const row of rows) {
+          const rowid = row.rowid
+          if (typeof rowid !== 'number' || nameSet.has(rowid)) continue
+          if (bodyStatement !== null) {
+            const body = (bodyStatement.get(rowid) as { body?: string } | undefined)?.body
+            if (typeof body !== 'string' || !matchesWholeWord(body, terms, caseSensitive)) continue
+          }
+          bodyMatched++
+          if (bodyMatched > bodyOffset && bodyRows.length < bodyLimit) bodyRows.push(rowid)
+          if (bodyRows.length >= bodyLimit) {
+            bodyStopped = true
+            break
+          }
+          if (context.countMode !== 'none' && bodyMatched > context.countLimit) {
+            bodyStopped = true
+            break
+          }
+        }
+        if (bodyStopped) break
+        cursor = high
+      }
+    }
+
+    const hits = buildHits(db, hitPlan, [...namePage, ...bodyRows], new Map()).hits
+    const known = nameRows.length + bodyMatched
+    return {
+      hits,
+      count: shortFallbackCount(known, nameComplete, bodyStopped, wallClockHit, context, warnings),
+      warnings: [...warnings],
+      shortQueryFallback: true,
+    }
+  }
+
+  // Pure session scope: one session log, bodies matched in JS under the deadline.
+  const sessionRows = (db
+    .prepare("SELECT rowid AS rowid FROM docs_meta WHERE path = ? AND kind = 'session' ORDER BY rowid")
+    .all(sessionPath) as Array<{ rowid?: number }>)
+    .map(row => row.rowid)
+    .filter((rowid): rowid is number => typeof rowid === 'number')
+  const sessionColumns = shortFallbackContentTable(db)
+  const sessionStatement = sessionColumns !== null && sessionColumns.sessionId !== null
+    ? db.prepare(`SELECT ${sessionColumns.body} AS body, ${sessionColumns.sessionId} AS session_id FROM docs_content WHERE id = ?`)
+    : db.prepare('SELECT body AS body, session_id AS session_id FROM docs WHERE rowid = ?')
+  const allowedSessions = options.allowedSessionIds
+  const archivedSessions = options.excludeArchivedSessions ?? []
+  const pageRows: number[] = []
+  let matched = 0
+  let stopped = false
+  for (const rowid of sessionRows) {
+    if (cancelled()) return cancelledResult()
+    if (performance.now() >= deadline) {
+      wallClockHit = true
+      stopped = true
+      break
+    }
+    const row = sessionStatement.get(rowid) as { body?: string; session_id?: string | null } | undefined
+    if (row === undefined || typeof row.body !== 'string') continue
+    const sessionId = typeof row.session_id === 'string' ? row.session_id : null
+    if (allowedSessions !== undefined && (sessionId === null || !allowedSessions.includes(sessionId))) continue
+    if (sessionId !== null && archivedSessions.includes(sessionId)) continue
+    if (!containsAllTerms(row.body, terms, caseSensitive, wholeWord)) continue
+    matched++
+    if (matched > context.offset && pageRows.length < context.limit) pageRows.push(rowid)
+    if (pageRows.length >= context.limit) {
+      stopped = true
+      break
+    }
+    if (context.countMode !== 'none' && matched > context.countLimit) {
+      stopped = true
+      break
+    }
+  }
+  const hits = buildHits(db, hitPlan, pageRows, new Map()).hits
+  return {
+    hits,
+    count: shortFallbackCount(matched, true, stopped, wallClockHit, context, warnings),
+    warnings: [...warnings],
+    shortQueryFallback: true,
+  }
+}
+
+/**
+ * Count for the short-query fallback: exact only when the scan finished without
+ * observing the page-full, count-cap or deadline stop; otherwise the known
+ * number of matches becomes a bounded floor.
+ */
+function shortFallbackCount(
+  known: number,
+  nameComplete: boolean,
+  stopped: boolean,
+  wallClockHit: boolean,
+  context: ShortFallbackContext,
+  warnings: Set<string>,
+): ContentCount {
+  if (wallClockHit) warnings.add('content-query-short-fallback-truncated')
+  if (context.countMode === 'none') return { value: 0, kind: 'unknown' }
+  if (stopped || !nameComplete || known > context.countLimit) {
+    warnings.add('bounded-count')
+    return { value: Math.min(known, context.countLimit), kind: 'bounded', limit: context.countLimit }
+  }
+  return { value: known, kind: 'exact' }
+}
+
+/**
+ * Put a read-only content connection into the search profile (P2, raised in
+ * 0.20.2 P1).
+ *
+ * Search workers each get a bounded page cache (SEARCH_CACHE_KIB, currently
+ * 64 MiB), a 256 MiB mmap window and an in-memory temp store so repeated
+ * queries keep their FTS pages warm without touching the build connection.
+ * Failures are ignored: an older SQLite or a filesystem that rejects mmap must
+ * never stop search.
  */
 export function configureSearchConnection(db: DatabaseSync): void {
   for (const sql of SEARCH_PRAGMAS) {
@@ -1032,6 +1627,18 @@ function scanWholeWord(
  * the number of matching documents and dominates a common-word query. Whole-word
  * queries never rank: their post-filter rewrites the result set anyway.
  *
+ * Ordering (0.20.2, P0-1): the wide unranked page is now fetched per document
+ * kind — the file page fills the requested page first and sessions only fill
+ * leftover slots, capped at WIDE_SESSION_MAX_SHARE — then each group is
+ * re-sorted in page by term frequency/title/depth/line. Narrow sets keep the
+ * exact bm25 order unchanged.
+ *
+ * Short queries (0.20.2, P0-2): with options.shortQueryFallback a 2-codepoint
+ * query is answered by the bounded name+body fallback (see
+ * shortQueryFallbackSearch) instead of being rejected; the result carries
+ * shortQueryFallback: true and a 'content-query-short-fallback' warning.
+ * One-codepoint queries stay rejected.
+ *
  * Counting (0.20.0, P1-3): the page uses rowid-subquery filters while the count
  * uses docs-column filters, and wide filtered sets report a bounded count
  * instead of paying an O(match-set) exact COUNT.
@@ -1065,7 +1672,7 @@ export function searchContent(
     }
   }
 
-  const check = checkContentQuery(query, matchMode)
+  const check = checkContentQuery(query, matchMode, { allowShort: options.shortQueryFallback === true })
   const warnings = [...check.warnings]
   if (!check.ok) {
     return {
@@ -1078,6 +1685,17 @@ export function searchContent(
   if (check.terms.length === 0) return { hits: [], count: emptyCount(countMode), warnings }
 
   const pathPrefix = normalizePathPrefix(options.pathPrefix)
+  // P0-2: a 2-codepoint query is answered by the bounded fallback instead of
+  // the trigram matcher. The fallback owns its own scope filters and page.
+  if (check.short) {
+    return shortQueryFallbackSearch(db, check, options, {
+      limit: capped,
+      offset,
+      countMode,
+      countLimit,
+      pathPrefix,
+    })
+  }
   const plan = buildPlan(check.terms, {
     caseSensitive: options.caseSensitive === true,
     wholeWord: options.wholeWord === true,
@@ -1103,7 +1721,7 @@ export function searchContent(
     const scanned = scanWholeWord(db, plan, capped, offset, countMode, effectiveCountLimit, sessionScoped, resolveScanBudget(options.scanBudget), isCancelled ?? undefined)
     for (const warning of scanned.warnings) warnings.push(warning)
     if (scanned.error !== undefined) return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [...new Set(warnings)], error: scanned.error }
-    const hits = buildHits(db, plan, scanned.rowids, new Map())
+    const hits = buildHits(db, plan, scanned.rowids, new Map()).hits
     return { hits, count: scanned.count, warnings: [...new Set(warnings)] }
   }
 
@@ -1138,8 +1756,22 @@ export function searchContent(
   }
   if (cancelled()) return cancelledResult()
 
-  const page = pageRowids(db, plan, capped, offset, rankOrder)
-  let hits = buildHits(db, plan, page.rowids, page.scores)
-  if (!rankOrder) hits = lightSortHits(hits, plan)
+  // Narrow sets keep the exact bm25 order (unchanged 0.20.1 behavior). A wide
+  // unranked set pages per document kind (P0-1): files first, sessions capped,
+  // each group re-sorted in-page by the cheap frequency/title/depth/line
+  // heuristic. Other unranked paths (GLOB bodies, the degraded profile) keep
+  // one rowid page but still get the in-page re-sort.
+  let hits: ContentHit[]
+  if (rankOrder) {
+    const page = pageRowids(db, plan, capped, offset, true)
+    hits = buildHits(db, plan, page.rowids, page.scores).hits
+  } else if (wide && plan.canHitFiles && plan.canHitSessions) {
+    const built = buildHits(db, plan, widePageRowids(db, plan, capped, offset), new Map(), true)
+    hits = lightSortWideGroups(built.hits, plan, built.frequency)
+  } else {
+    const page = pageRowids(db, plan, capped, offset, false)
+    const built = buildHits(db, plan, page.rowids, new Map(), true)
+    hits = lightSortHits(built.hits, plan, built.frequency)
+  }
   return { hits, count, warnings: [...new Set(warnings)] }
 }

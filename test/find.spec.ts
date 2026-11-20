@@ -5,7 +5,7 @@ import { zstdCompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { ContentIndex } from '../src/content.ts'
-import { CONTENT_STATE_SCHEMA, makeFindTool } from '../src/find.ts'
+import { CONTENT_STATE_SCHEMA, contentPathExcluded, contentScopeOptionsOf, makeFindTool } from '../src/find.ts'
 import type { ContentSearchOptions } from '../src/content-search.ts'
 import { sessionEventRef } from '../src/refs.ts'
 import type { LocatorRuntime } from '../src/runtime.ts'
@@ -242,6 +242,31 @@ describe('locator_find workspace scope', () => {
   })
 
 
+  it('marks a 2-code-point page as a short-query fallback', async () => {
+    const fake = withAuth({
+      search: async () => ({
+        hits: [{ kind: 'file' as const, path: '/home/yy/ai.md', title: 'ai.md', snippet: 'ai body', score: 1 }],
+        count: { value: 1, kind: 'exact' as const },
+        warnings: ['content-query-short-fallback'],
+        shortQueryFallback: true,
+      }),
+      status: () => ({ building: false, files: 1, sessions: 0, messages: 0, truncated: false, updatedAt: 1, error: '', warnings: [] }),
+    })
+    const tool = makeFindTool(fake, undefined, [])
+    const result = await tool.execute({ query: 'ai' }, exec()) as {
+      ok: boolean
+      shortQueryFallback?: boolean
+      warnings?: string[]
+    }
+    expect(result.ok).toBe(true)
+    expect(result.shortQueryFallback).toBe(true)
+    expect(result.warnings).toContain('content-query-short-fallback')
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, result)).toEqual([])
+    const text = tool.output.render({ query: 'ai' }, result as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(text).toContain('short-query fallback')
+  })
+
   it('denies an explicit session id outside the caller workspace', async () => {
     const calls: ContentSearchOptions[] = []
     const fake = withAuth({
@@ -387,4 +412,115 @@ describe('locator_find workspace scope', () => {
     expect(validateJsonSchemaValue(schema, result)).toEqual([])
   })
 
+})
+
+describe('workspace content scope fallback (0.20.2)', () => {
+  const state = { building: false, files: 1, sessions: 1, messages: 1, truncated: false, updatedAt: 1, error: '', warnings: [] }
+  function exec(cwd: string) {
+    return { agent: { session: { id: 'caller-session', header: { cwd } } } } as never
+  }
+  /** A runtime view whose config carries the two 0.20.2 content-scope knobs. */
+  function runtime(contentExcludes: string[], shortQueryFallback = true): LocatorRuntime {
+    return { config: { contentExcludes, contentShortQueryFallback: shortQueryFallback }, roots: ['/mnt/d'] } as unknown as LocatorRuntime
+  }
+  const fileHit = { kind: 'file' as const, path: '/home/yy/global.md', title: 'global.md', snippet: 'global hit', score: 1 }
+
+  it('reports a cwd under a contentExcludes rule as outside the content roots', () => {
+    expect(contentPathExcluded('/mnt/d/Projects/dsh', ['/mnt/d/'])).toBe(true)
+    expect(contentPathExcluded('/mnt/d/Projects/dsh', ['node_modules'])).toBe(false)
+    expect(contentPathExcluded('/home/yy/pkg/node_modules/x', ['node_modules'])).toBe(true)
+    expect(contentPathExcluded('/home/yy/.dsh/sessions', [])).toBe(true)
+    expect(contentPathExcluded('/home/yy/work', [])).toBe(false)
+  })
+
+  it('reads the content-scope knobs off the runtime config defensively', () => {
+    expect(contentScopeOptionsOf(undefined)).toEqual({})
+    expect(contentScopeOptionsOf(runtime(['/mnt/d/']))).toEqual({ contentExcludes: ['/mnt/d/'], shortQueryFallback: true })
+    expect(contentScopeOptionsOf(runtime([], false))).toEqual({ contentExcludes: [], shortQueryFallback: false })
+    const bare = { config: {} } as unknown as LocatorRuntime
+    expect(contentScopeOptionsOf(bare)).toEqual({ contentExcludes: [], shortQueryFallback: true })
+  })
+
+  it('retries an empty workspace page across all content roots and marks it global', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = withAuth({
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        if (calls.length === 1) return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+        return { hits: [fileHit], count: { value: 1, kind: 'exact' as const }, warnings: [] }
+      },
+      status: () => ({ ...state }),
+    })
+    const tool = makeFindTool(fake, undefined, ['/mnt/d'], false, { rt: runtime(['/mnt/d/']) })
+    const result = await tool.execute({ query: 'note' }, exec('/mnt/d/Projects/dsh')) as { ok: boolean; hits?: Array<{ path?: string }>; scopeFallback?: string }
+    expect(calls).toHaveLength(2)
+    // The first query keeps the workspace narrowing; the retry drops it and
+    // asks the content layer for file hits across every content root.
+    expect(calls[0]).toMatchObject({ pathPrefix: '/mnt/d/Projects/dsh', sessionId: 'caller-session' })
+    expect(calls[1]!.pathPrefix).toBeUndefined()
+    expect(calls[1]!.fileHitsAllRoots).toBe(true)
+    expect(result.ok).toBe(true)
+    expect(result.scopeFallback).toBe('global')
+    expect(result.hits?.map(hit => hit.path)).toEqual(['/home/yy/global.md'])
+  })
+
+  it('keeps the workspace query alone when the cwd is inside the content index', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = withAuth({
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+      },
+      status: () => ({ ...state }),
+    })
+    const tool = makeFindTool(fake, undefined, ['/mnt/d'], false, { rt: runtime([]) })
+    const result = await tool.execute({ query: 'note' }, exec('/mnt/d/Projects/dsh')) as { scopeFallback?: string }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.pathPrefix).toBe('/mnt/d/Projects/dsh')
+    expect(result.scopeFallback).toBeUndefined()
+  })
+
+  it('never widens an explicit pathPrefix and never retries a paged query', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = withAuth({
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+      },
+      status: () => ({ ...state }),
+    })
+    const tool = makeFindTool(fake, undefined, ['/mnt/d'], false, { rt: runtime(['/mnt/d/']) })
+    await tool.execute({ query: 'note', pathPrefix: '/mnt/d/Projects' }, exec('/mnt/d/Projects/dsh'))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.pathPrefix).toBe('/mnt/d/Projects')
+    calls.length = 0
+    await tool.execute({ query: 'note', offset: 10 }, exec('/mnt/d/Projects/dsh'))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.offset).toBe(10)
+  })
+
+  it('marks the fallback even when the global page is also empty', async () => {
+    const calls: ContentSearchOptions[] = []
+    const fake = withAuth({
+      search: async (_query: string, _limit: number, options: ContentSearchOptions) => {
+        calls.push(options)
+        return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+      },
+      status: () => ({ ...state }),
+    })
+    const tool = makeFindTool(fake, undefined, ['/mnt/d'], false, { rt: runtime(['/mnt/d/']) })
+    const result = await tool.execute({ query: 'note' }, exec('/mnt/d/Projects/dsh')) as { scopeFallback?: string }
+    expect(calls).toHaveLength(2)
+    expect(result.scopeFallback).toBe('global')
+  })
+
+  it('keeps the existing cwd-not-indexed marker for a cwd outside every root', async () => {
+    const fake = withAuth({
+      search: async () => ({ hits: [fileHit], count: { value: 1, kind: 'exact' as const }, warnings: [] }),
+      status: () => ({ ...state }),
+    })
+    const tool = makeFindTool(fake, undefined, ['/home/yy'], false, { rt: runtime(['/mnt/d/']) })
+    const result = await tool.execute({ query: 'note' }, exec('/mnt/d/elsewhere')) as { scopeFallback?: string }
+    expect(result.scopeFallback).toBe('cwd-not-indexed; files searched across configured roots')
+  })
 })
