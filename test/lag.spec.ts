@@ -93,7 +93,11 @@ describe('content build cooperativeness', () => {
     const status = content.status()
     const p95 = percentile(gaps, 95)
     const maxGap = gaps[gaps.length - 1] ?? 0
-    const p95Budget = Math.min(1_000, Math.max(120, baselineP95 * 4))
+    // One FTS5 body insert is synchronous; a slow Windows runner can spend
+    // >200 ms on a 200 KB trigram row even though the build yields between
+    // rows. Keep the CI floor above one insertion and still catch whole-build
+    // blocking (the live host runs on Linux, where the relative bound is used).
+    const p95Budget = Math.min(1_000, Math.max(process.env.CI === 'true' ? 300 : 120, baselineP95 * 4))
     const maxBudget = Math.min(2_000, Math.max(process.env.CI === 'true' ? 500 : 250, baselineMax * 4))
 
     // The build must finish, and a single synchronous page/session must not hold
