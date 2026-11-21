@@ -20,6 +20,15 @@ import { type ContentSearchOptions, type ContentSearchResult } from './content-s
 import { type CodeSymbol } from './symbols.ts';
 import type { LocatorRuntime } from './runtime.ts';
 export type { CodeSymbol, SymbolKind } from './symbols.ts';
+/**
+ * `docs_meta.kind_id` codes (schema v4). `content-search.ts` imports these so
+ * document-kind filters target the integer column instead of a text column.
+ * The codes are persisted: never renumber them.
+ */
+export declare const DOC_KIND_FILE = 0;
+export declare const DOC_KIND_SESSION = 1;
+/** Persisted `docs_meta.kind_id` for one document kind. */
+export declare function docKindId(kind: 'file' | 'session'): number;
 export interface ContentHit {
     kind: 'file' | 'session';
     path: string;
@@ -74,8 +83,12 @@ export interface ContentState {
     truncated: boolean;
     error: string;
     /**
-     * Non-fatal problems from the last build/refresh: unreadable session logs,
-     * a quarantined database, and so on. Empty when everything was read.
+     * Non-fatal problems from the current/most recent build/refresh: unreadable
+     * session logs, budget truncation, and so on. A successful full rebuild
+     * drops the database-condition warnings it resolved (`content-db-corrupt`,
+     * `content-db-incompatible`, `content-db-over-budget`); their cumulative
+     * counts remain visible in `diagnostics().warningCounts`. Empty when
+     * everything was read.
      */
     warnings: string[];
     updatedAt: number;
@@ -118,9 +131,20 @@ export interface ContentCoverage {
  */
 export interface ContentDiagnostics {
     coverage: ContentCoverage;
+    /**
+     * `content.db` file size in bytes (stat). This is what the file occupies on
+     * disk, including the free list left by FTS merges, so it is NOT the size of
+     * the indexed data; compare it with {@link ContentDiagnostics.dbLiveBytes}.
+     */
     dbBytes: number;
+    /** Size of the `content.db-wal` sidecar in bytes; 0 when every commit is checkpointed. */
     walBytes: number;
-    /** Live database bytes: (page_count - freelist_count) * page_size (P0-5). */
+    /**
+     * Live database bytes: (page_count - freelist_count) * page_size (P0-5).
+     * This is the storage cost of the indexed data and the currency of
+     * `dbBudgetBytes`; a fresh FTS merge can make `dbBytes` much larger without
+     * changing this number.
+     */
     dbLiveBytes: number;
     /** Reclaimable free-list bytes: freelist_count * page_size. */
     freelistBytes: number;
@@ -133,15 +157,27 @@ export interface ContentDiagnostics {
     ftsOptimizedAt: number;
     /** FTS optimize failures recorded since this database was created. */
     optimizeWarnings: number;
+    /** Bytes handed back to the filesystem by the last idle vacuum, 0 when none ran. */
+    lastVacuumBytes: number;
+    /** Epoch ms of the last idle vacuum, 0 when never run. */
+    lastVacuumAt: number;
     lastRefreshMs: number;
     /** Wall-clock ms of the last incremental (live) refresh; 0 before one ran. */
     liveRefreshMsLast: number;
     lastRefreshMode: 'full' | 'incremental' | 'fast' | 'deferred' | '';
+    /** Content database schema version this build writes (v4 = normalized paths). */
+    schemaVersion: number;
     engineGeneration: number | null;
     symbolsPerFile: number;
     /** Document extraction runs in a worker thread (false: in-process fallback). */
     extractWorker: boolean;
-    /** Persisted non-fatal warning counters (0.20.2 P1-8); absent when empty. */
+    /**
+     * Persisted non-fatal warning counters (0.20.2 P1-8); absent when empty.
+     * The counters are cumulative for the state directory: they survive a full
+     * rebuild and keep the history of warnings that `state.warnings` dropped as
+     * resolved (0.21.1), so an AI reader can still see that a quarantine or budget
+     * event happened after the database was rebuilt.
+     */
     warningCounts?: Record<string, number>;
 }
 export interface ContentOptions {
@@ -237,6 +273,11 @@ export interface ContentOptions {
     /** Override the periodic full file-index sweep interval (tests). */
     fullSweepIntervalMs?: number;
     /**
+     * Override the full-sweep wall-clock budget in ms (tests). 0 aborts a sweep
+     * before it reads a page; the production value is {@link FULL_SWEEP_BUDGET_MS}.
+     */
+    fullSweepBudgetMs?: number;
+    /**
      * Parallel file read/decode/symbol-extraction workers during a full build
      * (default 4, clamped to 1..8). Body writes always stay on the main thread:
      * the pool only prefetches rows, which keeps SQLite single-writer safe.
@@ -275,6 +316,19 @@ export interface RepoMapFile {
     path: string;
     symbols: CodeSymbol[];
 }
+/**
+ * Symbol-kind names indexed by their persisted integer code (schema v4). The
+ * array order is the on-disk format: append new kinds at the end and never
+ * reorder entries. The public interface keeps returning the string names.
+ */
+export declare const SYMBOL_KIND_BY_CODE: readonly CodeSymbol['kind'][];
+/**
+ * Symbol-language names indexed by their persisted integer code (schema v4).
+ * Kept in the order of `symbols.ts`'s language registry; new languages must be
+ * appended here so a database written by a newer extractor stays readable. A
+ * language missing from this table is stored as NULL and reads back as "".
+ */
+export declare const SYMBOL_LANGUAGE_BY_CODE: readonly string[];
 export declare class ContentIndex {
     private readonly rt;
     private readonly options;
@@ -306,6 +360,8 @@ export declare class ContentIndex {
     /** Queued write operations since the last batch commit. */
     private inBatch;
     private batchOps;
+    /** Body characters written into the open batch (see BATCH_BODY_BYTES). */
+    private batchBodyBytes;
     /** A full build created the symbols table without its indexes; create them at the end. */
     private symbolIndexesPending;
     /** Fresh full build: symbols indexes are created after the insert pass, so per-file deletes must wait. */
@@ -313,6 +369,8 @@ export declare class ContentIndex {
     private readonly symbolsBulkPurge;
     /** Persisted counters kept in content_meta so caps checks stay O(1). */
     private fileDocs;
+    /** Session documents (messages/tool results) written by this instance; live build counter (0.21.1). */
+    private sessionDocs;
     private oversizedDocs;
     private countersLoaded;
     /** Indexable file entries seen by the last full sweep (coverage denominator). */
@@ -339,12 +397,20 @@ export declare class ContentIndex {
     private readonly sniffRejects;
     /** Start of the current incremental refresh, for its wall-clock budget. */
     private refreshStartedAt;
+    /** Start of the current full file sweep, for {@link FULL_SWEEP_BUDGET_MS}. */
+    private sweepStartedAt;
     /** The current incremental refresh hit its budget and deferred the rest. */
     private refreshBudgetHit;
-    /** An idle FTS optimize is scheduled/running (never two at once). */
-    private idleOptimizeRunning;
+    /** Idle maintenance (symbol indexes / FTS merge / vacuum) is scheduled or running. */
+    private idleMaintenanceRunning;
+    /** A finish() asked for idle maintenance while one was already running. */
+    private idleMaintenanceQueued;
     /** The FTS index still needs its idle merge; retried after the next pass. */
     private idleOptimizeNeeded;
+    /** Bytes returned to the filesystem by the last idle vacuum (0 = never/none). */
+    private lastVacuumBytes;
+    /** Epoch ms of the last idle vacuum, 0 when never run. */
+    private lastVacuumAt;
     /** File-index generation observed while walking the last dump. */
     private engineGeneration;
     /** Wall clock at the start of the current build. */
@@ -379,14 +445,14 @@ export declare class ContentIndex {
     /** Refresh the cached database, WAL, live-page and segment measurements. */
     private measureDatabase;
     /**
-     * Approximate FTS5 segment count: each segment b-tree page is one row in the
-     * docs_data shadow table whose rowid encodes the segment id in its high
-     * bits (page number in the low 32). Counting distinct high words is version
-     * stable across the SQLite builds Node ships and needs no structure-record
-     * parsing. The exact count is a full scan of a table that can be over 2 GB,
-     * so it is only measured for a small corpus; a large one reports the known
-     * result of a converged merge (1) or 0 = "not measured yet". Diagnostics
-     * only, never a correctness input.
+     * Exact live FTS5 segment count from the index structure record (0.21.0).
+     * The record is a single row in the docs_data shadow table (rowid 10): a
+     * 4-byte configuration cookie followed by varints `nLevel` and `nSegment`.
+     * Reading it is one primary-key lookup, so the count is exact even for a
+     * multi-GB index — the old COUNT(DISTINCT id >> 32) heuristic had to scan the
+     * whole shadow table and gave up above 128 MB, which also meant the idle
+     * auto-merge could not see a segmented production index.
+     * Diagnostics and the idle-merge trigger only, never a correctness input.
      */
     private measureFtsSegments;
     /**
@@ -444,6 +510,11 @@ export declare class ContentIndex {
      * - `corrupt`: zero bytes, unreadable, or not a SQLite database.
      * - `incompatible`: has our tables but a different schema version/shape.
      * - `ok`: safe to reuse.
+     *
+     * The shape probe covers the v4 path normalization: a database that kept the
+     * old `docs_meta.doc_key/path/kind` columns (or lost `paths`) can never be
+     * read by the v4 SQL, so it must take the same rebuild path as an old
+     * `user_version` instead of failing halfway through a refresh.
      */
     private classifyDatabase;
     /**
@@ -535,6 +606,12 @@ export declare class ContentIndex {
     /** Total engine entries, used as the files-phase progress denominator. */
     private engineEntries;
     /**
+     * Set the FTS5 `automerge` configuration option on this connection (0.21.0).
+     * A fresh build writes 0 so per-batch commits never merge segments, then
+     * restores {@link FTS_AUTOMERGE_DEFAULT} before the single bounded merge.
+     */
+    private setFtsAutomerge;
+    /**
      * FTS5 incremental merge ("FTS optimize", 0.20.2 P0-2). 0.20.1 used the
      * invalid syntax INSERT INTO docs(docs) VALUES('merge=4,32'), swallowed the
      * error and therefore never wrote fts_optimized_at. The supported form is
@@ -550,11 +627,33 @@ export declare class ContentIndex {
     private optimizeFts;
     /** Yield between bounded merge rounds (idle task, host stays responsive). */
     private yieldForMerge;
-    /** Schedule the post-build FTS merge as an idle task (P0-2 optimizeInIdle). */
-    private scheduleIdleOptimize;
-    private runIdleOptimize;
+    /**
+     * Schedule idle maintenance after a build/refresh reports done (0.21.0):
+     * create deferred symbol indexes, re-merge a segmented FTS index, then hand
+     * freed pages back to the filesystem. One task at a time; a request that
+     * arrives while it runs is queued and runs right after it.
+     */
+    private scheduleIdleMaintenance;
+    private runIdleMaintenance;
+    /** The idle maintenance steps themselves; each yields and re-checks state. */
+    private performIdleMaintenance;
+    /**
+     * Hand free pages back to the filesystem in bounded shards (0.21.0 idle
+     * maintenance). `incremental_vacuum` is synchronous, so it runs
+     * {@link IDLE_VACUUM_PAGES} pages at a time and yields between shards; a build
+     * that starts meanwhile aborts the vacuum (the next idle pass retries). The WAL
+     * is folded back afterwards so the shrink is visible on disk.
+     */
+    private vacuumFreePages;
     /** Wall-clock budget check for one incremental refresh (P0-3). */
     private refreshBudgetExceeded;
+    /**
+     * Wall-clock budget check for one full file sweep (0.21.0). The sweep has its
+     * own much larger budget: it is the only pass that reconciles deletions, and
+     * aborting it on the 8 s incremental budget left a permanent partial-sweep
+     * long tail on a 160k-file index.
+     */
+    private sweepBudgetExceeded;
     /**
      * Yield every ~40 ms (or every 64 documents) while refreshing, instead of
      * every ~8 ms as during a build: a live refresh is allowed to take a little
@@ -598,7 +697,9 @@ export declare class ContentIndex {
     private evictForBudget;
     /** Delete one stored document row and adjust every derived counter. */
     private removeDocRow;
-    /** Body bytes stored for one document key (0 when it is not indexed). */
+    /** Body bytes stored for one file path (0 when it is not indexed). */
+    private storedFileBytes;
+    /** Body bytes stored for one document being replaced (0 when not indexed). */
     private storedBytes;
     private deleteDoc;
     private deletePath;
@@ -612,8 +713,8 @@ export declare class ContentIndex {
     private observeGeneration;
     /** Whether a dump page proves the engine supports generation/modification filters. */
     private generationSupported;
-    /** Stored mtime for one file document key, undefined when not indexed. */
-    private storedMtime;
+    /** Stored mtime for one file path, undefined when it is not indexed. */
+    private storedFileMtime;
     /**
      * Index every file document from scratch (a full content rebuild).
      *
@@ -669,6 +770,13 @@ export declare class ContentIndex {
      * rows with one batched path IN delete instead of one scan per file.
      */
     private fullFileSweep;
+    /**
+     * 4 KiB text sniff for sweep-only candidates (extensionless, unknown name,
+     * not stored yet). Mirrors the full build's up-front sniff: a read failure
+     * counts as a rejection so a vanished or binary file never becomes part of
+     * the coverage denominator. Rejections are cached per mtime in sniffRejects.
+     */
+    private sniffSweepCandidates;
     /** Would storing a file of this size overflow the configured body budget? */
     private wouldExceed;
     private readFileDoc;
@@ -748,26 +856,32 @@ export declare class ContentIndex {
     private ensureRefsTables;
     /** Replace one session log's ref occurrences after re-reading it. */
     private replaceSessionRefs;
-    /** Add the additive `sources.cwd` column without bumping the schema version. */
-    private ensureSourcesCwdColumn;
-    /** Add the additive docs_meta.format column without bumping the schema version. */
-    private ensureDocsMetaFormatColumn;
-    /** Create the additive symbols table; true when it was missing. */
-    private ensureSymbolsTables;
+    /** Stored id of one path spelling, or null when it was never indexed. */
+    private existingPathId;
+    /**
+     * Stored id of one path spelling, inserting the spelling on first use.
+     * @returns the row id, or null when the path is empty or the database failed.
+     */
+    private pathId;
+    /**
+     * Drop one path row once neither docs_meta nor symbols reference it any
+     * more. Best effort: a leaked row only costs the path text, never a lookup,
+     * and a full rebuild starts from an empty table anyway.
+     */
+    private releasePathId;
     /**
      * Create the symbols indexes after a full insert pass (or when an existing
      * database is missing them, e.g. a build interrupted before this step).
+     * Schema v4 indexes the normalized path id, so lookups by path never scan
+     * the wide symbol table for a path string.
      */
     private ensureSymbolIndexes;
-    /**
-     * Add the additive session-log columns used by streaming/tail refreshes
-     * (sources.byte_len, last_line, title, capped) without bumping the schema
-     * version. Rows from an older database keep NULL and are re-read in full.
-     */
-    private ensureSessionColumns;
     /** Open a build transaction; nested calls are ignored. */
     private beginBatch;
-    /** Count one queued write; commit and start a new transaction at the limit. */
+    /**
+     * Count one queued write (and, for documents, its body length); commit and
+     * start a new transaction when either batch limit is reached.
+     */
     private batchTick;
     /** Commit the open batch (no-op when none is open). */
     private commitBatch;
@@ -777,6 +891,8 @@ export declare class ContentIndex {
     private symbolsPerFile;
     /** Full-sweep interval for the generation fast path. */
     private fullSweepIntervalMs;
+    /** Full-sweep wall-clock budget; the test override may be 0 (abort at once). */
+    private fullSweepBudgetMs;
     /** Effective session-log read cap; 0 means unlimited. */
     private sessionMaxBytes;
     /** Effective extraction worker deadline. */
@@ -797,29 +913,34 @@ export declare class ContentIndex {
     private writeFileSymbols;
     /** Replace every stored symbol of one file (additive table; failures ignored). */
     private writeSymbols;
-    /** Remove every stored symbol of one deleted file. */
-    private deleteSymbols;
+    /** Remove every stored symbol of one deleted file and release its path row. */
+    private deleteSymbolsById;
     /**
-     * Remove the symbol rows of many deleted files with a bounded path IN list
-     * (0.20.2 P0-4). One DELETE per ~131 files instead of one full-scan DELETE
-     * per file: the old per-file loop dominated the eviction path of a
+     * Remove the symbol rows of many deleted files with a bounded path-id IN
+     * list (0.20.2 P0-4). One DELETE per ~131 files instead of one full-scan
+     * DELETE per file: the old per-file loop dominated the eviction path of a
      * saturated build.
+     */
+    private deleteSymbolsByIds;
+    /**
+     * Remove the symbol rows of many deleted files given their path spellings.
+     * Eviction collects stored paths; the normalized table needs their ids.
      */
     private deleteSymbolsBulk;
     /** Drop every stored symbol after symbol indexing is turned off. */
     private clearSymbols;
     /**
-     * Apply the symbol-index toggle and run the one-time fill when this database
-     * predates the additive table (or symbols were off when it was last built).
-     * Called on every incremental path, including the branches that end early,
-     * so a finish() can never record symbols=1 without the fill having run.
+     * Apply the symbol-index toggle and run the one-time fill when symbols were
+     * off when the database was last built (or the per-file cap changed). Called
+     * on every incremental path, including the branches that end early, so a
+     * finish() can never record symbols=1 without the fill having run.
      */
     private syncSymbols;
     /**
      * One-time fill of the symbol table from the bodies already stored in the
-     * database: a database that predates the additive table (or one whose symbol
-     * rules changed) never has to walk the disk again. Bodies are paged so a
-     * 1 GB corpus is never loaded at once.
+     * database: a database whose symbol rules changed (cap, generated-code
+     * exclusion) or that has symbol indexing toggled on never has to walk the
+     * disk again. Bodies are paged so a 1 GB corpus is never loaded at once.
      */
     private backfillSymbols;
     /**
@@ -871,8 +992,15 @@ export declare class ContentIndex {
     private rootSpellings;
     /**
      * Symbol count per file path, restricted to the requested roots, ranked in
-     * SQL and cut to the repo-map candidate limit. Runs as one index-only
-     * aggregate per root spelling instead of loading every symbol row.
+     * SQL and cut to the repo-map candidate limit.
+     *
+     * Two plans keep this close to the v3 covering-index scan (which stored the
+     * path text in the symbol row): a narrow root probes the (path_id, line)
+     * index once per matching path, while a wide root (a whole workspace root or
+     * the entire index) streams the GROUP BY path_id aggregate in index order —
+     * no temp b-tree — and filters the joined path after it. Measured on 183 k
+     * symbols: whole-index root 29 ms (probe) vs 8 ms (aggregate); a 2.5 % root
+     * is 0.8 ms (probe) vs 5.6 ms (aggregate), hence the width threshold.
      */
     private symbolPathCounts;
     /**

@@ -14,6 +14,13 @@
  * and the whole-word post-filter stops after a fixed number of rows, body bytes
  * or milliseconds and reports a bounded count.
  *
+ * 0.21.0 adapts the query layer to content schema v4: docs_meta identifies a
+ * document by (path_id, kind_id) and keeps the path text once in the normalized
+ * `paths` dictionary. Every docs_meta scope filter resolves through that
+ * dictionary (META_ROWIDS_*), while the FTS `docs` table and its own
+ * path/kind UNINDEXED columns stay unchanged. Filters, counts, paging and the
+ * short-query fallback keep their 0.20.2 behavior.
+ *
  * 0.20.2 adds two quality fixes on top of that:
  * - wide-page kind grouping (P0-1): the adaptive-rank wide path used to page in
  *   rowid order, and a full build indexes sessions first, so common words
@@ -40,7 +47,12 @@
 
 import { sep } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import type { ContentHit } from './content.ts'
+// Schema v4 (see content.ts) persists document kinds as integer codes and the
+// path text in the normalized `paths` dictionary. content.ts statically imports
+// this module, so importing its constants back closes a module cycle: the
+// bindings below are only read inside query functions (never while either
+// module evaluates), which keeps the cycle safe in both entry orders.
+import { DOC_KIND_FILE, DOC_KIND_SESSION, type ContentHit } from './content.ts'
 
 /** How the query text is interpreted. */
 export type ContentMatchMode = 'normal' | 'extended' | 'regex'
@@ -262,8 +274,27 @@ const FREQ_BODY_MAX = 65_536
  */
 const COMPOSITE_ROWID_LIMIT = 5_000
 
+/*
+ * Schema v4 (see content.ts) stores document identity as (path_id, kind_id):
+ * the path text lives once in the `paths` dictionary, so every
+ * filter that used docs_meta.path/kind resolves through it explicitly. The FTS
+ * `docs` table is unchanged and keeps its own path/kind columns, so
+ * only docs_meta filters need these fragments.
+ */
+
+/** docs_meta rowids whose stored path equals one spelled path (v4). */
+const META_ROWIDS_BY_PATH = 'SELECT m.rowid FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE p.path = ?'
+
+/** docs_meta rowids whose stored path starts with one prefix (v4). */
+const META_ROWIDS_BY_PREFIX = "SELECT m.rowid FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE p.path LIKE ? ESCAPE '\\'"
+
+/** docs_meta rowids for one persisted document-kind code (v4). */
+function metaRowidsByKind(kindId: number): string {
+  return 'SELECT rowid FROM docs_meta WHERE kind_id = ' + String(kindId)
+}
+
 /** docs_meta candidate count used as the split-count guard. */
-const COMPOSITE_CANDIDATE_SQL = "SELECT count(*) AS n FROM docs_meta WHERE path LIKE ? ESCAPE '\\'"
+const COMPOSITE_CANDIDATE_SQL = "SELECT count(*) AS n FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE p.path LIKE ? ESCAPE '\\'"
 
 /**
  * Page cache for one search connection, KiB (0.20.2, P1). Raised from 16 MiB to
@@ -669,20 +700,20 @@ function pageFilters(filters: PlanFilters): FilterFragment {
     // log, file rows under the caller's cwd. They must be composed by kind —
     // ANDing the two path filters matched no row at all (0.11.0–0.11.6 bug),
     // so file bodies were never searchable in workspace scope.
-    sql.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR (kind = 'file' AND rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\')))")
+    sql.push(" AND ((kind = 'session' AND rowid IN (" + META_ROWIDS_BY_PATH + ")) OR (kind = 'file' AND rowid IN (" + META_ROWIDS_BY_PREFIX + ')))')
     params.push(sessionPath, escapeLike(pathPrefix) + '%')
   } else if (sessionPath !== null && fileHitsAllRoots) {
     // The caller cwd is outside every indexed root: file documents come from
     // the whole index, session documents still from the caller's session log.
-    sql.push(" AND ((kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)) OR kind = 'file')")
+    sql.push(" AND ((kind = 'session' AND rowid IN (" + META_ROWIDS_BY_PATH + ")) OR kind = 'file')")
     params.push(sessionPath)
   } else if (sessionPath !== null) {
     // Pure session scope (panel "this conversation", sessionId-only requests).
-    sql.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
+    sql.push(' AND rowid IN (' + META_ROWIDS_BY_PATH + ')')
     params.push(sessionPath)
   } else if (pathPrefix !== null) {
     // File scope without a session: session rows stay available as before.
-    sql.push(" AND (kind = 'session' OR rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\'))")
+    sql.push(" AND (kind = 'session' OR rowid IN (" + META_ROWIDS_BY_PREFIX + '))')
     params.push(escapeLike(pathPrefix) + '%')
   }
   if (excludeSessions) sql.push(" AND kind = 'file'")
@@ -717,6 +748,10 @@ function pageFilters(filters: PlanFilters): FilterFragment {
  * Pure session scope is the one exception: exactly one indexed session log is
  * the narrowest filter there is (a single path equality, a handful of docs), so
  * the rowid-subquery form stays cheapest for both exact and bounded counts.
+ *
+ * Schema v4 leaves the docs-column form valid: the FTS docs table still
+ * carries its own kind/path UNINDEXED columns. Only the docs_meta identity
+ * (pure session scope below) is resolved through the normalized dictionary.
  */
 function countFilters(filters: PlanFilters): FilterFragment {
   const { sessionPath, pathPrefix, excludeSessions, fileHitsAllRoots, archivedExcluded, allowedSessions } = filters
@@ -729,7 +764,7 @@ function countFilters(filters: PlanFilters): FilterFragment {
     sql.push(" AND ((kind = 'session' AND path = ?) OR kind = 'file')")
     params.push(sessionPath)
   } else if (sessionPath !== null) {
-    sql.push(' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)')
+    sql.push(' AND rowid IN (' + META_ROWIDS_BY_PATH + ')')
     params.push(sessionPath)
   } else if (pathPrefix !== null) {
     sql.push(" AND (kind = 'session' OR path LIKE ? ESCAPE '\\')")
@@ -817,9 +852,9 @@ function compositeCountPlan(
   const { sessionPath, pathPrefix, excludeSessions, allowedSessions, archivedExcluded } = filters
   if (sessionPath === null || pathPrefix === null) return null
   const pattern = escapeLike(pathPrefix) + '%'
-  const fileWhere = matchWhere + " AND kind = 'file' AND rowid IN (SELECT rowid FROM docs_meta WHERE path LIKE ? ESCAPE '\\')"
+  const fileWhere = matchWhere + " AND kind = 'file' AND rowid IN (" + META_ROWIDS_BY_PREFIX + ')'
   const sessionParams: Array<string | number> = [...matchParams, sessionPath]
-  let sessionWhere: string | null = matchWhere + " AND kind = 'session' AND rowid IN (SELECT rowid FROM docs_meta WHERE path = ?)"
+  let sessionWhere: string | null = matchWhere + " AND kind = 'session' AND rowid IN (" + META_ROWIDS_BY_PATH + ')'
   if (excludeSessions === true || (allowedSessions !== null && allowedSessions.length === 0)) {
     sessionWhere = null
     sessionParams.length = 0
@@ -1036,9 +1071,12 @@ function widePageRowids(db: DatabaseSync, plan: QueryPlan, limit: number, offset
 
 /** One kind's page from the unranked matcher, in rowid order. */
 function kindPageRowids(db: DatabaseSync, plan: QueryPlan, kind: 'file' | 'session', limit: number, offset: number): number[] {
+  // Schema v4: the kind code is an integer docs_meta column; the rowid set still
+  // drives the FTS probe exactly like the v3 text kind did.
+  const sessionRowids = metaRowidsByKind(DOC_KIND_SESSION)
   const kindWhere = kind === 'file'
-    ? " AND rowid NOT IN (SELECT rowid FROM docs_meta WHERE kind = 'session')"
-    : " AND rowid IN (SELECT rowid FROM docs_meta WHERE kind = 'session')"
+    ? ' AND rowid NOT IN (' + sessionRowids + ')'
+    : ' AND rowid IN (' + sessionRowids + ')'
   const rows = db
     .prepare(`SELECT rowid AS rowid FROM docs WHERE ${plan.pageWhere}${kindWhere} LIMIT ? OFFSET ?`)
     .all(...plan.pageParams, limit, offset) as Array<{ rowid?: number }>
@@ -1319,7 +1357,8 @@ function shortQueryFallbackSearch(
   let wallClockHit = false
 
   if (filesInScope) {
-    // Name hits: path matches from docs_meta (small table, sequential scan).
+    // Name hits: path matches from docs_meta joined to the normalized paths
+    // dictionary (schema v4); still a small-table scan, newest first.
     const nameRows: number[] = []
     let nameComplete = true
     const nameLimit = Math.min(
@@ -1327,19 +1366,19 @@ function shortQueryFallbackSearch(
       Math.max(SHORT_QUERY_NAME_MIN_LIMIT, context.offset + context.limit + 1),
     )
     if (nameLimit > 0) {
-      const nameWhere: string[] = ["kind = 'file'"]
+      const nameWhere: string[] = ['m.kind_id = ' + String(DOC_KIND_FILE)]
       const nameParams: Array<string | number> = []
       if (context.pathPrefix !== null) {
-        nameWhere.push("path LIKE ? ESCAPE '\\'")
+        nameWhere.push("p.path LIKE ? ESCAPE '\\'")
         nameParams.push(escapeLike(context.pathPrefix) + '%')
       }
       for (const term of terms) {
-        const matcher = literalMatcher('path', term, caseSensitive)
+        const matcher = literalMatcher('p.path', term, caseSensitive)
         nameWhere.push(matcher.sql)
         nameParams.push(matcher.param)
       }
       const rows = db
-        .prepare(`SELECT rowid AS rowid FROM docs_meta WHERE ${nameWhere.join(' AND ')} ORDER BY mtime DESC LIMIT ?`)
+        .prepare(`SELECT m.rowid AS rowid FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE ${nameWhere.join(' AND ')} ORDER BY m.mtime DESC LIMIT ?`)
         .all(...nameParams, nameLimit) as Array<{ rowid?: number }>
       for (const row of rows) {
         if (typeof row.rowid !== 'number') continue
@@ -1443,8 +1482,10 @@ function shortQueryFallbackSearch(
   }
 
   // Pure session scope: one session log, bodies matched in JS under the deadline.
+  // Schema v4: the log path resolves through the paths dictionary and the kind
+  // is the persisted integer code (session docs may share that log path).
   const sessionRows = (db
-    .prepare("SELECT rowid AS rowid FROM docs_meta WHERE path = ? AND kind = 'session' ORDER BY rowid")
+    .prepare('SELECT m.rowid AS rowid FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE p.path = ? AND m.kind_id = ' + String(DOC_KIND_SESSION) + ' ORDER BY m.rowid')
     .all(sessionPath) as Array<{ rowid?: number }>)
     .map(row => row.rowid)
     .filter((rowid): rowid is number => typeof rowid === 'number')

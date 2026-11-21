@@ -431,9 +431,11 @@ describe('ContentIndex', () => {
       expect(statSync(state).mode & 0o777).toBe(0o700)
     }
     const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
-    const index = check.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'docs_meta_path'").get()
+    const index = check.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'docs_meta_path_id'").get()
+    const pathsIndex = check.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'paths_path'").get()
     check.close()
     expect(index).toBeDefined()
+    expect(pathsIndex).toBeDefined()
   })
 
   it('refuses a concurrent build but takes over a stale lock', async () => {
@@ -566,7 +568,11 @@ describe('ContentIndex', () => {
     second.boot()
     await settle(second)
     expect(second.status().error).toBe('')
-    expect(second.status().warnings).toContain('content-db-incompatible')
+    // 0.21.1: the successful rebuild resolved the condition, so the stale code
+    // must not stay in the live warnings; the historical count stays visible.
+    expect(second.status().warnings).not.toContain('content-db-incompatible')
+    expect(second.diagnostics().warningCounts?.['content-db-incompatible']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-incompatible') ?? 0).toBeGreaterThanOrEqual(1)
     const quarantined = readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))
     expect(quarantined).toHaveLength(1)
     expect((await second.search('schema probe', 5)).length).toBeGreaterThan(0)
@@ -1113,7 +1119,9 @@ describe('content database self-healing', () => {
     content.boot()
     await settle(content)
     expect(content.status().error).toBe('')
-    expect(content.status().warnings).toContain('content-db-corrupt')
+    expect(content.status().warnings).not.toContain('content-db-corrupt')
+    expect(content.diagnostics().warningCounts?.['content-db-corrupt']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-corrupt') ?? 0).toBeGreaterThanOrEqual(1)
     expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
     expect((await content.search('HEALMARK', 5)).length).toBeGreaterThan(0)
   })
@@ -1134,7 +1142,9 @@ describe('content database self-healing', () => {
     content.boot()
     await settle(content)
     expect(content.status().error).toBe('')
-    expect(content.status().warnings).toContain('content-db-incompatible')
+    expect(content.status().warnings).not.toContain('content-db-incompatible')
+    expect(content.diagnostics().warningCounts?.['content-db-incompatible']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-incompatible') ?? 0).toBeGreaterThanOrEqual(1)
     expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
     expect((await content.search('PARTIALDBMARK', 5)).length).toBeGreaterThan(0)
   })
@@ -1153,7 +1163,9 @@ describe('content database self-healing', () => {
     content.boot()
     await settle(content)
     expect(content.status().error).toBe('')
-    expect(content.status().warnings).toContain('content-db-corrupt')
+    expect(content.status().warnings).not.toContain('content-db-corrupt')
+    expect(content.diagnostics().warningCounts?.['content-db-corrupt']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-corrupt') ?? 0).toBeGreaterThanOrEqual(1)
     expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
     expect((await content.search('EMPTYDBMARK', 5)).length).toBeGreaterThan(0)
   })
@@ -1327,6 +1339,45 @@ describe('content database self-healing', () => {
     expect(validateJsonSchemaValue(schema, content.status())).toEqual([])
   })
 
+  it('publishes live file counts while a full build is running', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-live-files-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-live-files-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries: GenerationEntry[] = []
+    const total = 900
+    for (let index = 0; index < total; index++) {
+      const name = 'note-' + String(index).padStart(3, '0') + '.md'
+      const path = join(root, name)
+      const body = 'LIVE-COUNT-' + String(index) + ' body'
+      writeFileSync(path, body)
+      entries.push({ path, name, size: Buffer.byteLength(body), mtime: Date.now() + index, ext: 'md', dir: false })
+    }
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    let observed = 0
+    let lastLive = 0
+    for (let i = 0; i < 20_000 && content.status().building; i++) {
+      const snapshot = content.status()
+      const progress = snapshot.progress
+      if (progress !== undefined && progress.phase === 'files' && progress.indexed > 0) {
+        // 0.21.1: status().files is the live count, never the old database's
+        // total (0 on a first build) while progress.indexed already climbs.
+        expect(snapshot.files).toBe(progress.indexed)
+        expect(snapshot.files).toBeGreaterThanOrEqual(lastLive)
+        expect(snapshot.files).toBe(content.diagnostics().coverage.indexedFiles)
+        lastLive = snapshot.files
+        observed++
+      }
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    expect(observed).toBeGreaterThan(0)
+    expect(content.status().building).toBe(false)
+    expect(content.status().progress).toBeUndefined()
+    expect(content.status().files).toBe(total)
+  })
+
   it('reports the session phase while building session documents', async () => {
     const state = mkdtempSync(join(tmpdir(), 'locator-progress-session-state-'))
     const sessions = mkdtempSync(join(tmpdir(), 'locator-progress-sessions-'))
@@ -1353,6 +1404,42 @@ describe('content database self-healing', () => {
     expect(content.status().progress).toBeUndefined()
   })
 
+  it('publishes live session and message counts while the session phase is running', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-live-sessions-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-live-sessions-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }), () => rmSync(sessions, { recursive: true, force: true }))
+    const line = (id: string) => JSON.stringify({ type: 'user/message', data: { id, seq: 1, content: [{ type: 'text', text: `live session marker ${id}` }] } })
+    const total = 60
+    for (let i = 0; i < total; i++) {
+      const dir = join(sessions, '--workspace--', `session-live-${String(i)}`)
+      mkdirSync(dir, { recursive: true })
+      const log = join(dir, 'session.v4.jsonl.zstd')
+      writeFileSync(log, zstdCompressSync(Buffer.from(line(`msg-${String(i)}`))))
+      const settledAt = new Date(Date.now() - 120_000)
+      utimesSync(log, settledAt, settledAt)
+    }
+    const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1_000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 100 })
+    cleanups.push(() => content.close())
+    content.start()
+    let observed = false
+    for (let i = 0; i < 20_000 && content.status().building; i++) {
+      const snapshot = content.status()
+      const progress = snapshot.progress
+      if (progress !== undefined && progress.phase === 'sessions' && progress.indexed > 0) {
+        // 0.21.1: the indexed session logs and their message documents are
+        // already stored; status must publish them instead of keeping 0.
+        expect(snapshot.sessions).toBe(progress.indexed)
+        expect(snapshot.messages).toBeGreaterThanOrEqual(snapshot.sessions)
+        observed = true
+      }
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    expect(observed).toBe(true)
+    await settle(content)
+    expect(content.status().sessions).toBe(total)
+    expect(content.status().messages).toBe(total)
+  })
 
   it('composes session and workspace filters by document kind', async () => {
     const root = mkdtempSync(join(tmpdir(), 'locator-ws-root-'))
@@ -1567,7 +1654,7 @@ describe('content database self-healing', () => {
     expect(reopened.status().files).toBe(before.files)
     expect(reopened.refsFor(urlRef('https://example.com/a.pdf#page=3'))).toHaveLength(1)
     const version = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
-    expect(Number((version.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version)).toBe(3)
+    expect(Number((version.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version)).toBe(4)
     version.close()
     content.close()
   })
@@ -1623,7 +1710,7 @@ describe('document extraction (P1-1)', () => {
     expect(textHit).toBeDefined()
     expect(textHit !== undefined && 'format' in textHit).toBe(false)
     const raw = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
-    const row = raw.prepare('SELECT format FROM docs_meta WHERE path = ?').get(docPath) as { format?: string } | undefined
+    const row = raw.prepare('SELECT m.format AS format FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE p.path = ?').get(docPath) as { format?: string } | undefined
     raw.close()
     expect(row?.format).toBe('docx')
     // Hit enrichment is opt-in: without the flag a search carries no format, so
@@ -1714,7 +1801,7 @@ describe('document extraction (P1-1)', () => {
     expect((await content.search('ocr scanned locator marker', 5)).some(hit => hit.path === pdfPath)).toBe(true)
   })
 
-  it('keeps the additive schema at user_version 3', async () => {
+  it('writes the normalized schema v4 at user_version 4', async () => {
     const root = mkdtempSync(join(tmpdir(), 'locator-doc-schema-root-'))
     const state = mkdtempSync(join(tmpdir(), 'locator-doc-schema-state-'))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
@@ -1728,12 +1815,26 @@ describe('document extraction (P1-1)', () => {
     await settle(content)
     const raw = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
     const version = raw.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
-    const formatColumns = raw.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('docs_meta') WHERE name = 'format'").get() as { n?: number } | undefined
-    const symbols = raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'symbols'").get() as { n?: number } | undefined
+    const columns = (table: string): Set<string> => new Set(
+      (raw.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>)
+        .map(row => row.name)
+        .filter((name): name is string => typeof name === 'string'),
+    )
+    const docsMeta = columns('docs_meta')
+    const symbols = columns('symbols')
+    const paths = columns('paths')
+    const partialIndexes = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('docs_meta_file_path', 'docs_meta_session_key')")
+      .all() as Array<{ name?: string }>).map(row => row.name)
     raw.close()
-    expect(Number(version?.user_version)).toBe(3)
-    expect(Number(formatColumns?.n)).toBe(1)
-    expect(Number(symbols?.n)).toBe(1)
+    expect(Number(version?.user_version)).toBe(4)
+    expect(content.diagnostics().schemaVersion).toBe(4)
+    // docs_meta: normalized identity columns, no v3 path text/doc_key/kind.
+    expect([...docsMeta].sort()).toEqual(['format', 'kind_id', 'mtime', 'node_key', 'path_id', 'rowid', 'session_key'])
+    expect(symbols.has('path_id')).toBe(true)
+    expect(symbols.has('path')).toBe(false)
+    expect(paths.has('id')).toBe(true)
+    expect(paths.has('path')).toBe(true)
+    expect(partialIndexes.sort()).toEqual(['docs_meta_file_path', 'docs_meta_session_key'])
   })
 })
 
@@ -1813,14 +1914,16 @@ describe('code symbols and repo map (P1-2)', () => {
     expect(content.repoMap([join(root, 'elsewhere')], 100_000)).toEqual([])
   })
 
-  it('backfills symbols for a database built before the additive table existed', async () => {
+  it('rebuilds a database with a damaged v4 shape instead of migrating online', async () => {
     const { content, state, paths } = await buildSymbolIndex()
     const indexed = content.status().files
     content.close()
     const raw = new DatabaseSync(join(state, 'content.db'))
+    // A file whose normalized tables were dropped/partially created: the v4 SQL
+    // cannot read it, and no online migration exists. It must be quarantined
+    // and rebuilt transactionally rather than half-written.
     raw.exec('DROP TABLE symbols')
-    raw.exec("UPDATE content_meta SET value = 0 WHERE key = 'symbols'")
-    raw.exec('ALTER TABLE docs_meta DROP COLUMN format')
+    raw.exec('DROP TABLE paths')
     raw.close()
     const entries = fixtures.map(([name]) => {
       const path = paths[name] ?? ''
@@ -1832,15 +1935,42 @@ describe('code symbols and repo map (P1-2)', () => {
     reopened.boot()
     await settle(reopened)
     expect(reopened.status().error).toBe('')
+    expect(reopened.status().warnings).not.toContain('content-db-incompatible')
+    expect(reopened.diagnostics().warningCounts?.['content-db-incompatible']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-incompatible') ?? 0).toBeGreaterThanOrEqual(1)
+    expect(readdirSync(state).filter(name => name.startsWith('content.db.corrupt-'))).toHaveLength(1)
     expect(reopened.status().files).toBe(indexed)
     expect(reopened.outline(paths['main.go'] ?? '').map(symbol => symbol.name)).toEqual(['Server', 'Start', 'NewServer'])
     expect(reopened.findSymbols('Shape').length).toBeGreaterThan(0)
     const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
     const version = check.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
-    const formatColumns = check.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('docs_meta') WHERE name = 'format'").get() as { n?: number } | undefined
+    const pathsTable = check.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'paths'").get() as { n?: number } | undefined
     check.close()
-    expect(Number(version?.user_version)).toBe(3)
-    expect(Number(formatColumns?.n)).toBe(1)
+    expect(Number(version?.user_version)).toBe(4)
+    expect(Number(pathsTable?.n)).toBe(1)
+  })
+
+  it('normalizes paths and persists symbol kind/language as integer codes', async () => {
+    const { content, state, paths } = await buildSymbolIndex()
+    const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const pathRows = db.prepare('SELECT id, path FROM paths ORDER BY id').all() as Array<{ id: number; path: string }>
+    // One dictionary row per distinct stored spelling: four fixtures, no dupes.
+    expect(pathRows).toHaveLength(Object.keys(paths).length)
+    expect(new Set(pathRows.map(row => row.path)).size).toBe(pathRows.length)
+    const mainId = pathRows.find(row => row.path === paths['main.go'])?.id
+    expect(mainId).toBeDefined()
+    const meta = db.prepare('SELECT COUNT(*) AS n FROM docs_meta WHERE kind_id = 0 AND path_id = ?').get(mainId ?? -1) as { n?: number }
+    expect(Number(meta.n)).toBe(1)
+    const codes = db.prepare('SELECT name, kind, language FROM symbols WHERE path_id = ? ORDER BY line, name').all(mainId ?? -1) as Array<{ name: string; kind: number; language: number }>
+    expect(codes.map(row => row.name)).toEqual(['Server', 'Start', 'NewServer'])
+    for (const row of codes) {
+      expect(Number.isInteger(row.kind)).toBe(true)
+      expect(Number.isInteger(row.language)).toBe(true)
+    }
+    db.close()
+    // The public interface decodes the codes back into the string names.
+    const outline = content.outline(paths['main.go'] ?? '')
+    expect(outline.map(symbol => [symbol.kind, symbol.language])).toEqual([['struct', 'go'], ['method', 'go'], ['function', 'go']])
   })
 
   it('does not index symbols when indexSymbols is disabled', async () => {
@@ -1902,6 +2032,14 @@ describe('symbol lookups across a symlinked root', () => {
     // The same lookups keep working through a plain (non-symlink) real path.
     const plain = join(realpathSync.native(base), 'real-root')
     expect(content.outline(join(plain, 'main.go')).map(symbol => symbol.name)).toEqual(['Server', 'Start'])
+    // pathSpellings semantics survive normalization: only the engine spelling is
+    // stored in the dictionary, and every alias resolves to that one row.
+    const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const storedPaths = (db.prepare('SELECT path FROM paths').all() as Array<{ path?: string }>).map(row => row.path)
+    const symbols = db.prepare('SELECT COUNT(*) AS n FROM symbols s JOIN paths p ON p.id = s.path_id WHERE p.path = ?').get(indexed) as { n?: number }
+    db.close()
+    expect(storedPaths).toEqual([indexed])
+    expect(Number(symbols.n)).toBeGreaterThan(0)
   })
 })
 
@@ -2108,6 +2246,15 @@ describe('body-budget eviction and coverage (P0-8)', () => {
     expect(second.diagnostics().coverage.evictedDocs).toBeGreaterThanOrEqual(1)
     expect((await second.search('EVICT-D', 5)).length).toBeGreaterThan(0)
     expect((await second.search('EVICT-B', 5)).length).toBe(0)
+    // Eviction releases the evicted file's path dictionary row, so the paths
+    // table holds exactly the identities docs_meta still references.
+    const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const orphans = check.prepare('SELECT COUNT(*) AS n FROM paths p WHERE NOT EXISTS (SELECT 1 FROM docs_meta WHERE path_id = p.id) AND NOT EXISTS (SELECT 1 FROM symbols WHERE path_id = p.id)').get() as { n?: number }
+    const pathRows = check.prepare('SELECT COUNT(*) AS n FROM paths').get() as { n?: number }
+    const referenced = check.prepare('SELECT COUNT(DISTINCT path_id) AS n FROM docs_meta').get() as { n?: number }
+    check.close()
+    expect(Number(orphans.n)).toBe(0)
+    expect(Number(pathRows.n)).toBe(Number(referenced.n))
   })
 
   it('reports persisted coverage counters without a body scan', async () => {
@@ -2141,9 +2288,9 @@ describe('content database maintenance (P1)', () => {
     const diagnostics = content.diagnostics()
     expect(diagnostics.ftsOptimizedAt).toBeGreaterThan(0)
     // 0.20.2 P0-2: the merge really converged (previously fts_optimized_at was
-    // always 0 because the invalid merge syntax was swallowed).
-    expect(diagnostics.ftsSegments).toBeGreaterThanOrEqual(1)
-    expect(diagnostics.ftsSegments).toBeLessThanOrEqual(2)
+    // always 0 because the invalid merge syntax was swallowed). 0.21.0 reads
+    // the exact segment count from the FTS5 structure record, so one segment.
+    expect(diagnostics.ftsSegments).toBe(1)
     expect(diagnostics.optimizeWarnings).toBe(0)
     expect(diagnostics.dbLiveBytes).toBeGreaterThan(0)
     expect(diagnostics.dbLiveBytes).toBeLessThanOrEqual(diagnostics.dbBytes)
@@ -2242,9 +2389,13 @@ describe('symbol slimming (P0-13)', () => {
     await settle(second)
     expect(second.outline(normal)).toHaveLength(2)
     const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
-    const row = db.prepare('SELECT COUNT(*) AS n FROM symbols WHERE path = ?').get(normal) as { n: number }
+    // Symbols are keyed by the normalized path id; a cap change rewrites them
+    // in place without leaking duplicate path dictionary rows.
+    const row = db.prepare('SELECT COUNT(*) AS n FROM symbols s JOIN paths p ON p.id = s.path_id WHERE p.path = ?').get(normal) as { n: number }
+    const pathRows = db.prepare('SELECT COUNT(*) AS n FROM paths WHERE path = ?').get(normal) as { n: number }
     db.close()
     expect(Number(row.n)).toBe(2)
+    expect(Number(pathRows.n)).toBe(1)
   })
 
   it('backfills symbols from stored bodies even when the file is gone', async () => {
@@ -2271,6 +2422,15 @@ describe('symbol slimming (P0-13)', () => {
     second.boot()
     await settle(second)
     expect(second.findSymbols('FromBody').map(hit => hit.path)).toEqual([path])
+    // The refilled rows still point at the existing path dictionary entry and
+    // still carry the integer codec (schema v4).
+    const check = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
+    const code = check.prepare('SELECT s.kind AS kind, s.language AS language FROM symbols s JOIN paths p ON p.id = s.path_id WHERE p.path = ?').get(path) as { kind?: number; language?: number } | undefined
+    const pathRows = check.prepare('SELECT COUNT(*) AS n FROM paths WHERE path = ?').get(path) as { n?: number }
+    check.close()
+    expect(typeof code?.kind).toBe('number')
+    expect(typeof code?.language).toBe('number')
+    expect(Number(pathRows.n)).toBe(1)
   })
 })
 describe('session streaming and tail refresh (P1-6)', () => {
@@ -2684,6 +2844,59 @@ describe('warnings persistence (P1-8)', () => {
     await settle(second)
     expect(second.diagnostics().warningCounts?.['content-session-log-unreadable']).toBeGreaterThanOrEqual(1)
   })
+  it('keeps only the current build warnings and preserves the resolved counts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-warn-history-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-warn-history-state-'))
+    const sessions = mkdtempSync(join(tmpdir(), 'locator-warn-history-sessions-'))
+    cleanups.push(
+      () => rmSync(root, { recursive: true, force: true }),
+      () => rmSync(state, { recursive: true, force: true }),
+      () => rmSync(sessions, { recursive: true, force: true }),
+    )
+    const path = join(root, 'history.md')
+    writeFileSync(path, 'warning history marker')
+    const entries = [{ path, name: 'history.md', size: 21, mtime: Date.now(), ext: 'md', dir: false }]
+    // Build 1 starts from a corrupt database: the successful full rebuild
+    // resolves it, so the stale code must not survive in the live warnings.
+    writeFileSync(join(state, 'content.db'), 'this is not a sqlite database at all')
+    const runtime = { dump: async () => ({ entries, next: 1, done: true }) } as unknown as LocatorRuntime
+    const options = { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 10 }
+    const content = new ContentIndex(runtime, options)
+    cleanups.push(() => content.close())
+    content.boot()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().warnings).not.toContain('content-db-corrupt')
+    expect(content.diagnostics().warningCounts?.['content-db-corrupt']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-corrupt') ?? 0).toBeGreaterThanOrEqual(1)
+    expect((await content.search('warning history', 5)).length).toBeGreaterThan(0)
+
+    // Build 2 adds a current problem (an unreadable settled session log).
+    // status().warnings must show exactly that, not build 1's resolved code.
+    const dir = join(sessions, '--workspace--', 'session-warn-history')
+    mkdirSync(dir, { recursive: true })
+    const log = join(dir, 'session.v4.jsonl.zstd')
+    writeFileSync(log, Buffer.from('not a zstd frame at all'))
+    const settledAt = new Date(Date.now() - 120_000)
+    utimesSync(log, settledAt, settledAt)
+    content.refresh()
+    await settle(content)
+    expect(content.status().warnings).toContain('content-session-log-unreadable')
+    expect(content.status().warnings.filter(code => code.startsWith('content-db-'))).toEqual([])
+    // The history survives in content_meta and diagnostics for AI readers.
+    expect(content.diagnostics().warningCounts?.['content-db-corrupt']).toBeGreaterThanOrEqual(1)
+    expect(content.diagnostics().warningCounts?.['content-session-log-unreadable']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-corrupt') ?? 0).toBeGreaterThanOrEqual(1)
+
+    // Build 3 is a second full rebuild: it must neither resurrect the resolved
+    // database warning nor drop the cumulative history recorded in build 1.
+    content.start()
+    await settle(content)
+    expect(content.status().warnings.filter(code => code.startsWith('content-db-'))).toEqual([])
+    expect(content.status().warnings).toContain('content-session-log-unreadable')
+    expect(content.diagnostics().warningCounts?.['content-db-corrupt']).toBeGreaterThanOrEqual(1)
+    expect(contentMeta(state).get('warn:content-db-corrupt') ?? 0).toBeGreaterThanOrEqual(1)
+  })
 })
 
 describe('content database live-page budget (P0-5)', () => {
@@ -2788,21 +3001,23 @@ describe('parallel prefetch (P1-9)', () => {
 })
 
 describe('0.20.2 storage maintenance', () => {
-  it('keeps BATCH_OPS batches intact across a thousand writes', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'locator-batch1000-root-'))
-    const state = mkdtempSync(join(tmpdir(), 'locator-batch1000-state-'))
+  it('crosses the 4,000-operation batch boundary without losing rows or the byte counter', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-batch4000-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-batch4000-state-'))
     cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
-    const entries = Array.from({ length: 1_050 }, (_, index) => {
+    // One document write per addDoc batch tick: 4,050 documents commit once in
+    // the middle of the pass, so the boundary and its reopen are exercised.
+    const entries = Array.from({ length: 4_050 }, (_, index) => {
       const path = join(root, 'b-' + String(index) + '.md')
-      writeFileSync(path, 'BATCH1000-' + String(index))
-      return { path, name: 'b-' + String(index) + '.md', size: 14, mtime: Date.now(), ext: 'md', dir: false }
+      writeFileSync(path, 'BATCH4000-' + String(index))
+      return { path, name: 'b-' + String(index) + '.md', size: 15, mtime: Date.now(), ext: 'md', dir: false }
     })
     const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
-    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 2_000, maxSessions: 0 })
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 5_000, maxSessions: 0 })
     cleanups.push(() => content.close())
     content.start()
     await settle(content)
-    expect(content.status().files).toBe(1_050)
+    expect(content.status().files).toBe(4_050)
     const meta = contentMeta(state)
     expect(meta.get('complete')).toBe(1)
     const db = new DatabaseSync(join(state, 'content.db'), { readOnly: true })
@@ -2830,6 +3045,10 @@ describe('0.20.2 storage maintenance', () => {
     db.close()
     expect(autoVacuum).toBe(2)
     expect(indexes).toContain('docs_meta_mtime')
+    expect(indexes).toContain('docs_meta_path_id')
+    expect(indexes).toContain('docs_meta_file_path')
+    expect(indexes).toContain('docs_meta_session_key')
+    expect(content.diagnostics().schemaVersion).toBe(4)
   })
 })
 
@@ -2881,7 +3100,7 @@ describe('idle FTS optimize (P0-2)', () => {
     const diagnostics = content.diagnostics()
     expect(diagnostics.ftsOptimizedAt).toBeGreaterThan(0)
     expect(diagnostics.optimizeWarnings).toBe(0)
-    expect(diagnostics.ftsSegments).toBeLessThanOrEqual(2)
+    expect(diagnostics.ftsSegments).toBe(1)
     expect((await content.search('idle optimize', 5)).length).toBeGreaterThan(0)
   })
 })
@@ -2909,5 +3128,257 @@ describe('optimize failure reporting (P0-2)', () => {
     reopened.boot()
     await settle(reopened)
     expect(reopened.diagnostics().optimizeWarnings).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('0.21.0 build connection settings', () => {
+  it('opens the content connection with a 64 MiB cache, a memory temp store and WAL', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-pragma-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-pragma-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'pragma marker')
+    const entries = [{ path, name: 'notes.md', size: statSync(path).size, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const db = (content as unknown as { db: DatabaseSync }).db
+    expect((db.prepare('PRAGMA cache_size').get() as { cache_size?: number }).cache_size).toBe(-65536)
+    expect((db.prepare('PRAGMA temp_store').get() as { temp_store?: number }).temp_store).toBe(2)
+    expect((db.prepare('PRAGMA journal_mode').get() as { journal_mode?: string }).journal_mode).toBe('wal')
+    // The build restores the FTS5 default; a persisted 0 would make every later
+    // incremental refresh defer its merges.
+    const automerge = db.prepare("SELECT v AS v FROM docs_config WHERE k = 'automerge'").get() as { v?: number }
+    expect(automerge.v).toBe(4)
+  })
+
+  it('turns FTS automerge off for the fresh insert pass and restores it before the merge', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-automerge-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-automerge-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'automerge marker')
+    const entries = [{ path, name: 'notes.md', size: statSync(path).size, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    // Spy on the FTS5 configuration writes: 0 before the insert pass, 4 before
+    // the bounded merge (the protocol this test protects).
+    const proto = DatabaseSync.prototype as unknown as { exec: (sql: string) => void }
+    const original = proto.exec
+    const writes: number[] = []
+    proto.exec = function (this: DatabaseSync, sql: string) {
+      if (sql.includes("'automerge'")) writes.push(sql.includes(', 0)') ? 0 : 4)
+      return original.call(this, sql)
+    }
+    try {
+      content.start()
+      await settle(content)
+    } finally {
+      proto.exec = original
+    }
+    expect(writes[0]).toBe(0)
+    expect(writes[writes.length - 1]).toBe(4)
+    expect(content.diagnostics().optimizeWarnings).toBe(0)
+  })
+})
+
+describe('0.21.0 full-sweep budget', () => {
+  it('uses its own budget instead of the 8 s live-refresh budget', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-sweepbudget-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-sweepbudget-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'sweep budget marker')
+    const entries = [{ path, name: 'notes.md', size: statSync(path).size, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const internal = content as unknown as {
+      refreshStartedAt: number
+      sweepStartedAt: number
+      refreshBudgetExceeded: () => boolean
+      sweepBudgetExceeded: () => boolean
+      fullSweepBudgetMs: () => number
+    }
+    expect(internal.fullSweepBudgetMs()).toBe(45_000)
+    // A sweep that started now is fine even though the live-refresh clock is
+    // already 30 s old — the sweep no longer inherits the 8 s incremental limit.
+    internal.refreshStartedAt = Date.now() - 30_000
+    internal.sweepStartedAt = Date.now()
+    expect(internal.refreshBudgetExceeded()).toBe(true)
+    expect(internal.sweepBudgetExceeded()).toBe(false)
+    internal.refreshStartedAt = Date.now()
+    internal.sweepStartedAt = Date.now() - 60_000
+    expect(internal.sweepBudgetExceeded()).toBe(true)
+  })
+
+  it('defers an over-budget sweep and completes it on a later refresh', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-sweepdefer-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-sweepdefer-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const { live, engine, runtime } = generationEngine(root)
+    const options = { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, fullSweepIntervalMs: 1 }
+    // A 0 ms budget aborts a sweep before it reads a page (test seam).
+    const aborted = new ContentIndex(runtime, { ...options, fullSweepBudgetMs: 0 } as ContentOptions)
+    cleanups.push(() => aborted.close())
+    aborted.start()
+    await settle(aborted)
+    expect(aborted.status().files).toBe(1)
+    await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+    rmSync(live)
+    engine.generation = 2
+    engine.entries = []
+    aborted.refresh()
+    await settle(aborted)
+    // The partial sweep must keep the live rows and warn about the budget.
+    expect(aborted.status().files).toBe(1)
+    expect(aborted.status().warnings).toContain('content-refresh-budget')
+    aborted.close()
+    const resumed = new ContentIndex(runtime, options)
+    cleanups.push(() => resumed.close())
+    resumed.boot()
+    await settle(resumed)
+    expect(resumed.status().files).toBe(0)
+    expect(await resumed.search('GENERATION-FIRST', 5)).toHaveLength(0)
+  })
+})
+
+describe('0.21.0 sweep coverage denominator', () => {
+  it('keeps extensionless binaries out of the sweep denominator like a full build does', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-sweepcov-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-sweepcov-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const textA = join(root, 'a.md')
+    const textB = join(root, 'b.md')
+    const blob = join(root, 'binary-blob')
+    writeFileSync(textA, 'SWEEPCOV-A text')
+    writeFileSync(textB, 'SWEEPCOV-B text')
+    writeFileSync(blob, Buffer.from([0, 1, 2, 3, 4, 5, 250, 251]))
+    const entries = [textA, textB, blob].map(path => ({ path, name: basename(path), size: statSync(path).size, mtime: Date.now(), ext: path.includes('.') ? 'md' : '', dir: false }))
+    const runtime = { dump: async () => ({ entries: [...entries], next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, {
+      stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, textSniff: true, fullSweepIntervalMs: 1,
+    })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().files).toBe(2)
+    expect(content.diagnostics().coverage.candidateFiles).toBe(2)
+    // A new extensionless binary appears; the full sweep must sniff it before
+    // counting a candidate, or the denominator (and the reported ratio) lies.
+    const blob2 = join(root, 'another-blob')
+    writeFileSync(blob2, Buffer.from([9, 8, 7, 0, 6, 5, 4, 3]))
+    entries.push({ path: blob2, name: basename(blob2), size: statSync(blob2).size, mtime: Date.now(), ext: '', dir: false })
+    await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+    content.refresh()
+    await settle(content)
+    const coverage = content.diagnostics().coverage
+    expect(coverage.indexedFiles).toBe(2)
+    expect(coverage.candidateFiles).toBe(2)
+    expect(coverage.ratio).toBeCloseTo(1)
+    expect(content.status().files).toBe(2)
+  })
+})
+
+describe('0.21.0 idle maintenance', () => {
+  it('creates deferred symbol indexes after the build reports done, never during it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-idlesym-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-idlesym-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const source = join(root, 'demo.ts')
+    writeFileSync(source, 'export function idleSymbolMarker(): number {\n  return 42\n}\n')
+    const entries = [{ path: source, name: 'demo.ts', size: statSync(source).size, mtime: Date.now(), ext: 'ts', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, {
+      stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, optimizeInIdle: true,
+    })
+    cleanups.push(() => content.close())
+    const internal = content as unknown as { ensureSymbolIndexes: () => void }
+    const original = internal.ensureSymbolIndexes.bind(content)
+    const calls: boolean[] = []
+    internal.ensureSymbolIndexes = () => {
+      calls.push(content.status().building)
+      original()
+    }
+    content.start()
+    await settle(content)
+    // The build ended without paying the one-time CREATE INDEX.
+    expect(calls).toHaveLength(0)
+    for (let i = 0; i < 200 && content.diagnostics().ftsOptimizedAt === 0; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every(building => building === false)).toBe(true)
+    const db = (content as unknown as { db: DatabaseSync }).db
+    const indexes = (db.prepare("PRAGMA index_list('symbols')").all() as Array<{ name?: string }>).map(row => row.name)
+    expect(indexes).toContain('symbols_path')
+    expect(indexes).toContain('symbols_name')
+    expect(content.findSymbols('idleSymbolMarker').length).toBeGreaterThan(0)
+  })
+
+  it('re-merges a split index after an incremental refresh and ends with one segment', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-idlemerge-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-idlemerge-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries: Array<{ path: string; name: string; size: number; mtime: number; ext: string; dir: boolean }> = []
+    for (let i = 0; i < 5; i++) {
+      const path = join(root, 'm' + String(i) + '.md')
+      writeFileSync(path, 'IDLEMERGE-' + String(i) + ' body')
+      entries.push({ path, name: 'm' + String(i) + '.md', size: 17, mtime: Date.now(), ext: 'md', dir: false })
+    }
+    const runtime = { dump: async () => ({ entries: [...entries], next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, {
+      stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0, optimizeInIdle: true, fullSweepIntervalMs: 1,
+    })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    for (let i = 0; i < 200 && content.diagnostics().ftsOptimizedAt === 0; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    expect(content.diagnostics().ftsSegments).toBe(1)
+    // Change two files: the refresh commits its own transaction, which appends a
+    // second segment on top of the merged one.
+    for (const index of [1, 3]) {
+      const path = join(root, 'm' + String(index) + '.md')
+      writeFileSync(path, 'IDLEMERGE-NEW-' + String(index) + ' body')
+      const entry = entries[index]
+      if (entry !== undefined) { entry.mtime = Date.now(); entry.size = statSync(path).size }
+    }
+    await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+    content.refresh()
+    await settle(content)
+    expect(content.diagnostics().ftsSegments).toBeGreaterThan(1)
+    for (let i = 0; i < 200 && content.diagnostics().ftsSegments !== 1; i++) await new Promise(resolve => setTimeout(resolve, 25))
+    const diagnostics = content.diagnostics()
+    expect(diagnostics.ftsSegments).toBe(1)
+    expect(diagnostics.optimizeWarnings).toBe(0)
+    expect((await content.search('IDLEMERGE-NEW-1', 5)).length).toBeGreaterThan(0)
+  })
+
+  it('vacuum shards free pages back and reports lastVacuumBytes/lastVacuumAt', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-idlevac-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-idlevac-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'vacuum marker')
+    const entries = [{ path, name: 'notes.md', size: statSync(path).size, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const internal = content as unknown as { db: DatabaseSync; generation: number; vacuumFreePages: (generation: number) => Promise<void> }
+    internal.db.exec('CREATE TABLE bloat (b BLOB)')
+    internal.db.prepare('INSERT INTO bloat (b) VALUES (?)').run(Buffer.alloc(2 * 1024 * 1024))
+    internal.db.exec('DROP TABLE bloat')
+    await internal.vacuumFreePages(internal.generation)
+    const diagnostics = content.diagnostics()
+    expect(diagnostics.freelistBytes).toBe(0)
+    expect(diagnostics.lastVacuumAt).toBeGreaterThan(0)
+    expect(diagnostics.lastVacuumBytes).toBeGreaterThan(1_000_000)
+    // The measurement is persisted for the next process.
+    expect(contentMeta(state).get('last_vacuum_at')).toBe(diagnostics.lastVacuumAt)
   })
 })

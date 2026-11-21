@@ -20,7 +20,7 @@ describe('contentLimits', () => {
 describe('0.19.0 additive configuration', () => {
   it('defaults the ignore layers and external hooks to off', () => {
     const resolved = resolveConfig({})
-    expect(resolved.notIndexed).toEqual([])
+    expect(resolved.notIndexed).toEqual(['_key.*', '发布令牌*', '.env', '.env.*', '*.pem', '*.key', '*.p12', '*.pfx', 'id_rsa*', 'id_ed25519*'])
     expect(resolved.notSearchable).toEqual([])
     expect(resolved.notReadable).toEqual([])
     expect(resolved.outputBudgetChars).toBe(8000)

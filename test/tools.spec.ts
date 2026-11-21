@@ -693,10 +693,11 @@ describe('locator_search modes, scope and budget', () => {
     const filtered = await scoped.execute({ query: 'a', limit: 10 }, exec) as { warnings?: string[]; hits?: Array<{ path: string }>; truncated?: boolean; nextOffset?: number }
     expect(filtered.hits?.map(hit => hit.path)).not.toContain('/root/secret.md')
     expect(filtered.warnings).toContain('scope-filtered:1')
-    expect(filtered.truncated).toBe(true)
-    // A lossy page consumes the whole fetched page so a later page cannot
-    // duplicate the hits that were kept from this one.
-    expect(filtered.nextOffset).toBe(3)
+    // 0.21.1: the scope-removed row is the last raw row of an exhausted page, so
+    // there is nothing left to page into and no nextOffset is reported. The
+    // scope drop is still surfaced through the warning code.
+    expect(filtered.truncated).toBe(false)
+    expect(filtered.nextOffset).toBeUndefined()
     const budgeted = await makeSearchTool(rt, { budgetChars: 200 }).execute({ query: 'a', limit: 10 }, exec) as { hits?: unknown[]; budget?: { truncated?: boolean; dropped?: number } }
     expect(budgeted.hits?.length).toBe(1)
     expect(budgeted.budget?.dropped).toBeGreaterThan(0)
@@ -1215,7 +1216,7 @@ describe('locator_status 0.20.0 observability', () => {
     expect(text).toContain('fts optimized')
     expect(text).toContain('live refresh 42 ms')
     expect(text).toContain('optimize warnings 2')
-    expect(text).toContain('extract warnings: content-session-log-unreadable 1')
+    expect(text).toContain('warning counts: content-session-log-unreadable 1')
   })
 
   it('keeps the status output valid when the content store has no diagnostics', async () => {
@@ -1336,5 +1337,382 @@ describe('locator_search content scope fallback (0.20.2)', () => {
     expect(validateJsonSchemaValue(schema, value)).toEqual([])
     const text = tool.output.render({ query: 'ai', mode: 'content' }, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
     expect(text).toContain('short-query fallback')
+  })
+})
+
+
+describe('locator_search 0.21.1 pagination contract', () => {
+  function execWithCwd(cwd: string) {
+    return { agent: { session: { id: 'caller-session', header: { cwd } } } } as never
+  }
+
+  it('slices the final name page to limit (workspace narrowing included)', async () => {
+    const root = tempDir('locator-ws-slice-')
+    const cwd = join(root, 'proj')
+    mkdirSync(cwd)
+    const hits = Array.from({ length: 10 }, (_, index) => searchHit(join(cwd, 'file-' + String(index) + '.md')))
+    const rt = fakeSearchRuntime([root], hits)
+    const tool = makeSearchTool(rt, { budgetChars: 8000 })
+    const value = await tool.execute({ query: 'file', limit: 3 }, execWithCwd(cwd)) as {
+      ok: boolean
+      returned?: number
+      hits?: unknown[]
+      nextOffset?: number
+      hasMore?: boolean
+      consumed?: number
+      totalAllRoots?: number
+      truncation?: { reason?: string; dropped?: number; consumed?: number }
+      warningHints?: Record<string, string>
+    }
+    expect(value.ok).toBe(true)
+    expect(value.returned).toBe(3)
+    expect(value.hits).toHaveLength(3)
+    expect(value.nextOffset).toBe(3)
+    expect(value.hasMore).toBe(true)
+    expect(value.consumed).toBe(3)
+    expect(value.truncation?.reason).toBe('page')
+    // The engine total is global; the workspace count is not claimed as total.
+    expect(value.totalAllRoots).toBe(10)
+    expect(value.warningHints?.['total-is-global']).toContain('configured roots')
+  })
+
+  it('fills a workspace page past narrowed rows and keeps the cursor lossless', async () => {
+    const root = tempDir('locator-ws-fill-')
+    const cwd = join(root, 'proj')
+    const other = join(root, 'other')
+    mkdirSync(cwd)
+    mkdirSync(other)
+    const outside = Array.from({ length: 25 }, (_, index) => searchHit(join(other, 'file-' + String(index) + '.md')))
+    const inside = Array.from({ length: 5 }, (_, index) => searchHit(join(cwd, 'file-' + String(index) + '.md')))
+    const rt = fakeSearchRuntime([root], [...outside, ...inside])
+    const tool = makeSearchTool(rt, { budgetChars: 8000 })
+    const first = await tool.execute({ query: 'file', limit: 3 }, execWithCwd(cwd)) as {
+      hits?: Array<{ path: string }>
+      nextOffset?: number
+      truncated?: boolean
+      truncation?: { reason?: string; dropped?: number }
+    }
+    expect(first.hits).toHaveLength(3)
+    expect(first.hits?.every(hit => hit.path.startsWith(cwd + '/'))).toBe(true)
+    expect(first.nextOffset).toBe(28)
+    expect(first.truncated).toBe(true)
+    expect(first.truncation).toMatchObject({ reason: 'scope', dropped: 25 })
+    const second = await tool.execute({ query: 'file', limit: 3, offset: first.nextOffset }, execWithCwd(cwd)) as {
+      hits?: Array<{ path: string }>
+      nextOffset?: number
+      truncated?: boolean
+    }
+    expect(second.hits?.map(hit => hit.path)).toEqual([join(cwd, 'file-3.md'), join(cwd, 'file-4.md')])
+    expect(second.truncated).toBe(false)
+    expect(second.nextOffset).toBeUndefined()
+    // Union of both pages: every workspace hit exactly once.
+    const union = [...(first.hits ?? []), ...(second.hits ?? [])].map(hit => hit.path)
+    expect([...new Set(union)]).toHaveLength(5)
+  })
+
+  it('reports an empty workspace page with a scope:"all" hint instead of a silent zero', async () => {
+    const root = tempDir('locator-ws-empty-')
+    const cwd = join(root, 'proj')
+    const other = join(root, 'other')
+    mkdirSync(cwd)
+    mkdirSync(other)
+    const rt = fakeSearchRuntime([root], [searchHit(join(other, 'a.md')), searchHit(join(other, 'b.md'))])
+    const value = await makeSearchTool(rt, { budgetChars: 8000 }).execute({ query: 'file' }, execWithCwd(cwd)) as {
+      hits?: unknown[]
+      warnings?: string[]
+      warningHints?: Record<string, string>
+      truncated?: boolean
+    }
+    expect(value.hits).toEqual([])
+    expect(value.warnings).toContain('workspace-empty')
+    expect(value.warningHints?.['workspace-empty']).toContain('scope:"all"')
+    expect(value.truncated).toBe(false)
+  })
+
+  it('keeps budget-dropped rows reachable through nextOffset (no gaps, no duplicates)', async () => {
+    const hits = Array.from({ length: 7 }, (_, index) => searchHit('/root/file-' + String(index) + '.md'))
+    const rt = fakeSearchRuntime(['/root'], hits)
+    // The budget keeps exactly one hit per page; every page must advance by one
+    // raw row so the union still covers all seven hits.
+    const tool = makeSearchTool(rt, { budgetChars: 250 })
+    const seen: string[] = []
+    let offset = 0
+    for (let guard = 0; guard < 20; guard++) {
+      const page = await tool.execute({ query: 'file', limit: 2, offset }, {} as never) as {
+        hits?: Array<{ path: string }>
+        nextOffset?: number
+        truncated?: boolean
+        truncation?: { reason?: string }
+      }
+      for (const hit of page.hits ?? []) seen.push(hit.path)
+      if (page.nextOffset === undefined) {
+        expect(page.truncated).toBe(false)
+        break
+      }
+      expect(page.truncation?.reason).toBe('budget')
+      offset = page.nextOffset
+    }
+    expect(seen).toEqual(hits.map(hit => hit.path))
+    expect(new Set(seen).size).toBe(seen.length)
+  })
+
+  it('honours the budgetChars argument and 0 disables the budget', async () => {
+    const hits = Array.from({ length: 3 }, (_, index) => searchHit('/root/file-' + String(index) + '.md'))
+    const rt = fakeSearchRuntime(['/root'], hits)
+    const tight = await makeSearchTool(rt).execute({ query: 'file', limit: 3, budgetChars: 120 }, {} as never) as {
+      returns?: number
+      hits?: unknown[]
+      budget?: { limitChars?: number }
+    }
+    expect(tight.budget?.limitChars).toBe(120)
+    expect(tight.hits).toHaveLength(1)
+    const unbounded = await makeSearchTool(rt).execute({ query: 'file', limit: 3, budgetChars: 0 }, {} as never) as {
+      hits?: unknown[]
+      budget?: { limitChars?: number }
+    }
+    expect(unbounded.budget?.limitChars).toBe(0)
+    expect(unbounded.hits).toHaveLength(3)
+  })
+})
+
+describe('locator_search 0.21.1 count semantics', () => {
+  const exec = {} as never
+
+  it('reports the content count as the primary total in count mode', async () => {
+    const calls: Array<{ limit: number; options: Record<string, unknown> }> = []
+    const content = {
+      status: () => contentState(),
+      authorizedSessionIds: () => new Set<string>(),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search(_query: string, limit: number, options: Record<string, unknown>) {
+        calls.push({ limit, options })
+        return { hits: [], count: { value: 5, kind: 'exact' as const }, warnings: [] }
+      },
+    } as unknown as ContentIndex
+    const rt = fakeSearchRuntime(['/root'], [], 0)
+    const value = await makeSearchTool(rt, { content }).execute({ query: 'needle', mode: 'count' }, exec) as {
+      ok: boolean
+      total?: number
+      totalCount?: number
+      nameCount?: number
+      contentCount?: { value: number; kind: string }
+      truncated?: boolean
+      hasMore?: boolean
+      warnings?: string[]
+    }
+    expect(value.ok).toBe(true)
+    expect(value.total).toBe(5)
+    expect(value.totalCount).toBe(5)
+    expect(value.contentCount).toMatchObject({ value: 5, kind: 'exact' })
+    // The name count is reported separately instead of pretending to be content.
+    expect(value.nameCount).toBe(0)
+    expect(value.hasMore).toBe(false)
+    expect(calls[0]?.options).toMatchObject({ count: 'exact' })
+  })
+
+  it('never reports 0 for an unknown content count and warns when the name count fails', async () => {
+    const content = {
+      status: () => contentState(),
+      authorizedSessionIds: () => new Set<string>(),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search() {
+        return { hits: [], count: { value: 0, kind: 'unknown' as const }, warnings: [] }
+      },
+    } as unknown as ContentIndex
+    const rt = {
+      roots: ['/root'],
+      config: { maxResults: 100, outputBudgetChars: 8000, excludes: [] },
+      status: { running: true },
+      start: () => {},
+      engineStatus: async () => undefined,
+      async search() {
+        throw new Error('engine down')
+      },
+    } as unknown as LocatorRuntime
+    const value = await makeSearchTool(rt, { content }).execute({ query: 'needle', mode: 'count' }, exec) as {
+      ok: boolean
+      total?: number
+      totalCount?: number
+      contentCount?: { kind: string }
+      warnings?: string[]
+      warningHints?: Record<string, string>
+    }
+    expect(value.ok).toBe(true)
+    expect(value.total).toBeUndefined()
+    expect(value.totalCount).toBeUndefined()
+    expect(value.contentCount?.kind).toBe('unknown')
+    expect(value.warnings).toContain('name-count-unavailable')
+  })
+
+  it('flags a bounded count and forwards countLimit', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const content = {
+      status: () => contentState(),
+      authorizedSessionIds: () => new Set<string>(),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search(_query: string, _limit: number, options: Record<string, unknown>) {
+        calls.push(options)
+        return { hits: [], count: { value: 7, kind: 'bounded' as const, limit: 7 }, warnings: [] }
+      },
+    } as unknown as ContentIndex
+    const value = await makeSearchTool(fakeSearchRuntime(['/root'], [], 0), { content })
+      .execute({ query: 'needle', mode: 'count', countLimit: 7 }, exec) as {
+        truncated?: boolean
+        warnings?: string[]
+        warningHints?: Record<string, string>
+      }
+    expect(calls[0]).toMatchObject({ countLimit: 7 })
+    expect(value.truncated).toBe(true)
+    expect(value.warnings).toContain('bounded-count')
+    expect(value.warningHints?.['bounded-count']).toContain('countLimit')
+  })
+})
+
+describe('locator_search 0.21.1 compact evidence', () => {
+  it('drops evidence fields in compact mode but keeps the ref', async () => {
+    const rt = fakeSearchRuntime(['/root'], [searchHit('/root/a.md')])
+    const value = await makeSearchTool(rt).execute({ query: 'a', detail: 'compact' }, {} as never) as {
+      detail?: string
+      hits?: Array<{ ref?: string; refStatus?: string; freshness?: unknown; permissions?: unknown; modified?: string }>
+    }
+    expect(value.detail).toBe('compact')
+    expect(value.hits?.[0]?.ref).toMatch(/^ref:\/\/file\?/)
+    expect(value.hits?.[0]?.refStatus).toBeUndefined()
+    expect(value.hits?.[0]?.freshness).toBeUndefined()
+    expect(value.hits?.[0]?.permissions).toBeUndefined()
+    expect(value.hits?.[0]?.modified).toBeUndefined()
+    const schema = makeSearchTool(rt).output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+  })
+
+  it('strips content-hit evidence in compact mode and keeps the ref', async () => {
+    const dir = tempDir('locator-search-compact-content-')
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'compact needle body\n')
+    const content = fakeContent([contentHit(file)])
+    const rt = fakeSearchRuntime([dir], [])
+    const value = await makeSearchTool(rt, { content }).execute({ query: 'needle', mode: 'content', detail: 'compact' }, {} as never) as {
+      contentHits?: Array<{ ref?: string; provenance?: unknown; freshness?: unknown; permissions?: unknown }>
+    }
+    expect(value.contentHits?.[0]?.ref).toMatch(/^ref:\/\/file\?/)
+    expect(value.contentHits?.[0]?.provenance).toBeUndefined()
+    expect(value.contentHits?.[0]?.freshness).toBeUndefined()
+    expect(value.contentHits?.[0]?.permissions).toBeUndefined()
+  })
+
+  it('marks name-hit visibility by the actual scope (roots for scope all)', async () => {
+    const root = tempDir('locator-search-visibility-')
+    const cwd = join(root, 'proj')
+    mkdirSync(cwd)
+    const rt = fakeSearchRuntime([root], [searchHit(join(cwd, 'a.md'))])
+    const narrowed = await makeSearchTool(rt).execute({ query: 'a' }, { agent: { session: { id: 's', header: { cwd } } } } as never) as {
+      hits?: Array<{ permissions?: { visibility?: string } }>
+    }
+    expect(narrowed.hits?.[0]?.permissions?.visibility).toBe('workspace')
+    const all = await makeSearchTool(rt).execute({ query: 'a', scope: 'all' }, { agent: { session: { id: 's', header: { cwd } } } } as never) as {
+      hits?: Array<{ permissions?: { visibility?: string } }>
+    }
+    expect(all.hits?.[0]?.permissions?.visibility).toBe('roots')
+  })
+
+  it('strips evidence beyond evidenceLimit in full mode', async () => {
+    const hits = [searchHit('/root/a.md'), searchHit('/root/b.md'), searchHit('/root/c.md')]
+    const value = await makeSearchTool(fakeSearchRuntime(['/root'], hits))
+      .execute({ query: 'a', limit: 3, evidenceLimit: 1 }, {} as never) as {
+      hits?: Array<{ ref?: string; freshness?: unknown; permissions?: unknown }>
+    }
+    expect(value.hits?.[0]?.freshness).toBeDefined()
+    expect(value.hits?.[1]?.freshness).toBeUndefined()
+    expect(value.hits?.[1]?.permissions).toBeUndefined()
+    // The citable identity survives the evidence budget.
+    expect(value.hits?.[1]?.ref).toMatch(/^ref:\/\/file\?/)
+  })
+})
+
+describe('locator_search 0.21.1 structured errors', () => {
+  it('adds errorInfo to the content-index-unavailable failure', async () => {
+    const rt = fakeSearchRuntime(['/root'], [])
+    const tool = makeSearchTool(rt)
+    const value = await tool.execute({ query: 'x', mode: 'content' }, {} as never) as {
+      ok: boolean
+      error?: string
+      errorInfo?: { code?: string; message?: string; retryable?: boolean; hint?: string }
+    }
+    expect(value.ok).toBe(false)
+    expect(value.error).toBe('content-index-unavailable')
+    expect(value.errorInfo?.code).toBe('content-index-unavailable')
+    expect(value.errorInfo?.message).toBe('content-index-unavailable')
+    expect(value.errorInfo?.retryable).toBe(false)
+    expect(value.errorInfo?.hint).toContain('mode "names"')
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+  })
+
+  it('adds errorInfo to engine failures and symbol path refusals', async () => {
+    const broken = {
+      roots: ['/root'],
+      config: { maxResults: 100, excludes: [] },
+      status: { running: true },
+      start: () => {},
+      async search() {
+        throw new Error('engine exploded')
+      },
+    } as unknown as LocatorRuntime
+    const failed = await makeSearchTool(broken).execute({ query: 'a' }, {} as never) as {
+      ok: boolean
+      errorInfo?: { code?: string; retryable?: boolean }
+    }
+    expect(failed.ok).toBe(false)
+    expect(failed.errorInfo?.code).toBe('engine-error')
+    expect(failed.errorInfo?.retryable).toBe(true)
+    const outline = makeOutlineTool({ status: () => contentState() } as unknown as ContentIndex, undefined, ['/tmp'])
+    const denied = await outline.execute({ path: '/etc/passwd' }, {} as never) as { errorInfo?: { code?: string } }
+    expect(denied.errorInfo?.code).toBe('content-path-denied')
+  })
+})
+
+describe('locator_search 0.21.1 concurrency declarations', () => {
+  it('marks the read-only tools concurrency-safe and keeps rebuild exclusive', () => {
+    const rt = fakeSearchRuntime(['/root'], [])
+    const search = makeSearchTool(rt)
+    const status = makeStatusTool(rt)
+    const find = makeFindTool(fakeContent([]))
+    expect(search.isConcurrencySafe?.({ query: 'a' })).toBe(true)
+    expect(status.isConcurrencySafe?.({})).toBe(true)
+    expect(find.isConcurrencySafe?.({ query: 'a' })).toBe(true)
+    expect(makeRebuildTool(rt).isConcurrencySafe).toBeUndefined()
+  })
+})
+
+describe('locator_status 0.21.1 building state', () => {
+  it('renders a building index with live counters instead of an empty one', async () => {
+    const runtime = {
+      start: () => {},
+      status: { running: true },
+      roots: ['/tmp'],
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      engineStatus: async () => undefined,
+    } as unknown as LocatorRuntime
+    const content = {
+      status: () => contentState({ building: true, files: 3, messages: 2, progress: { phase: 'files', scanned: 5, indexed: 12, startedAt: 1 } }),
+    } as unknown as ContentIndex
+    const tool = makeStatusTool(runtime, content)
+    const value = await tool.execute({}, fakeExec())
+    const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    const text = tool.output.render({}, value as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(text).toContain('content: building — 3 files / 2 messages indexed so far')
+    expect(text).not.toContain('content: 0 files')
+    const zero = await makeStatusTool(runtime, {
+      status: () => contentState({ building: true, files: 0, messages: 0, progress: { phase: 'files', scanned: 1, indexed: 42, startedAt: 1 } }),
+    } as unknown as ContentIndex).execute({}, fakeExec())
+    const zeroText = makeStatusTool(runtime, {
+      status: () => contentState({ building: true, files: 0, messages: 0, progress: { phase: 'files', scanned: 1, indexed: 42, startedAt: 1 } }),
+    } as unknown as ContentIndex).output.render({}, zero as never).map(block => (block as { text?: string }).text ?? '').join('\n')
+    expect(zeroText).toContain('42 entries indexed so far')
   })
 })

@@ -18,6 +18,9 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterAll, describe, expect, it } from 'vitest'
+// The persisted schema-v4 kind codes (0 = file, 1 = session) live in content.ts;
+// importing them keeps the fixture honest if the codes are ever re-read.
+import { DOC_KIND_FILE, DOC_KIND_SESSION } from '../src/content.ts'
 import {
   RANK_ADAPTIVE_THRESHOLD,
   SEARCH_CACHE_KIB,
@@ -53,7 +56,13 @@ interface TestIndex {
   firstRowid: number
 }
 
-/** Build a content.db-shaped database with the FTS5 trigram schema. */
+/**
+ * Build a content.db-shaped database with the schema v4 FTS5 trigram schema:
+ * normalized paths dictionary, integer document kinds, and the same derived
+ * indexes content.ts creates. The query layer resolves every docs_meta filter
+ * through the paths table, so a v3-shaped fixture would silently test SQL that
+ * the production database can no longer run.
+ */
 function createIndex(specs: readonly DocSpec[]): TestIndex {
   const dir = mkdtempSync(join(tmpdir(), 'locator-query-'))
   const path = join(dir, 'content.db')
@@ -63,23 +72,39 @@ function createIndex(specs: readonly DocSpec[]): TestIndex {
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA synchronous = OFF')
   db.exec('CREATE VIRTUAL TABLE docs USING fts5(body, kind UNINDEXED, path UNINDEXED, title UNINDEXED, session_id UNINDEXED, message_id UNINDEXED, tokenize = \'trigram\')')
-  db.exec('CREATE TABLE docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT, node_key TEXT)')
-  db.exec('CREATE INDEX docs_meta_path ON docs_meta(path)')
-  const insertDoc = db.prepare('INSERT INTO docs (body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?)')
-  const insertMeta = db.prepare('INSERT INTO docs_meta (doc_key, path, mtime, kind, node_key) VALUES (?, ?, ?, ?, ?)')
+  db.exec('CREATE TABLE paths (id INTEGER PRIMARY KEY, path TEXT NOT NULL)')
+  db.exec('CREATE UNIQUE INDEX paths_path ON paths(path)')
+  db.exec('CREATE TABLE docs_meta (rowid INTEGER PRIMARY KEY, path_id INTEGER NOT NULL, mtime INTEGER, kind_id INTEGER NOT NULL, node_key TEXT, format TEXT, session_key TEXT)')
+  db.exec('CREATE INDEX docs_meta_path_id ON docs_meta(path_id)')
+  db.exec('CREATE INDEX docs_meta_mtime ON docs_meta(mtime, rowid)')
+  db.exec('CREATE UNIQUE INDEX docs_meta_file_path ON docs_meta(path_id) WHERE kind_id = 0')
+  db.exec('CREATE UNIQUE INDEX docs_meta_session_key ON docs_meta(session_key) WHERE kind_id = 1')
+  db.exec('CREATE TABLE symbols (path_id INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, line INTEGER NOT NULL, language INTEGER, scope TEXT)')
+  db.exec('PRAGMA user_version = 4')
+  const insertDoc = db.prepare('INSERT INTO docs (rowid, body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  const insertPath = db.prepare('INSERT INTO paths (path) VALUES (?) ON CONFLICT(path) DO UPDATE SET path = excluded.path RETURNING id')
+  const insertMeta = db.prepare('INSERT INTO docs_meta (rowid, path_id, mtime, kind_id, node_key, format, session_key) VALUES (?, ?, ?, ?, ?, ?, ?)')
   db.exec('BEGIN')
   for (const [index, spec] of specs.entries()) {
+    const rowid = index + 1
     const kind = spec.kind ?? 'file'
     const pathValue = spec.path ?? under(ROOT, 'doc' + String(index) + '.md')
     const title = spec.title ?? 'doc' + String(index) + '.md'
     const sessionId = spec.sessionId ?? null
     const messageId = spec.messageId ?? null
-    insertDoc.run(spec.body, kind, pathValue, title, sessionId, messageId)
-    insertMeta.run('doc-' + String(index), pathValue, 0, kind, null)
+    insertDoc.run(rowid, spec.body, kind, pathValue, title, sessionId, messageId)
+    const pathId = Number((insertPath.get(pathValue) as { id?: number } | undefined)?.id ?? 0)
+    const kindId = kind === 'session' ? DOC_KIND_SESSION : DOC_KIND_FILE
+    // One document per session key: a test may index many messages of the same
+    // session log, so a row without messageId still needs its own key.
+    const sessionKey = kindId === DOC_KIND_SESSION
+      ? 'session:' + (spec.sessionId ?? 'none') + ':' + (spec.messageId ?? 'row-' + String(index))
+      : null
+    // Latest document last, so name-hit mtime ordering is deterministic.
+    insertMeta.run(rowid, pathId, index, kindId, null, null, sessionKey)
   }
   db.exec('COMMIT')
-  const first = db.prepare('SELECT min(rowid) AS rowid FROM docs').get() as { rowid?: number } | undefined
-  return { db, path, firstRowid: Number(first?.rowid ?? 1) }
+  return { db, path, firstRowid: 1 }
 }
 
 function titles(result: ContentSearchResult): string[] {
@@ -120,6 +145,25 @@ function sessionDocs(term: string, count: number): DocSpec[] {
   }
   return specs
 }
+
+describe('schema v4 query fixture', () => {
+  it('pins the normalized docs_meta/paths shape the query layer runs against', () => {
+    const index = createIndex([{ body: 'schema marker', path: under(ROOT, 'schema.md') }])
+    const columns = new Set(
+      (index.db.prepare('PRAGMA table_info(docs_meta)').all() as Array<{ name?: string }>)
+        .map(row => row.name)
+        .filter((name): name is string => typeof name === 'string'),
+    )
+    expect([...columns].sort()).toEqual(['format', 'kind_id', 'mtime', 'node_key', 'path_id', 'rowid', 'session_key'])
+    expect(columns.has('path')).toBe(false)
+    expect(columns.has('kind')).toBe(false)
+    expect(columns.has('doc_key')).toBe(false)
+    const version = index.db.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
+    expect(Number(version?.user_version)).toBe(4)
+    const pathRows = index.db.prepare('SELECT path FROM paths').all() as Array<{ path?: string }>
+    expect(pathRows.map(row => row.path)).toEqual([under(ROOT, 'schema.md')])
+  })
+})
 
 describe('adaptive rank ordering (P0-6)', () => {
   it('keeps bm25 ordering for a narrow result set', () => {
@@ -457,6 +501,33 @@ describe('short-query fallback (0.20.2 P0-2)', () => {
     expect(result.count).toEqual({ value: 0, kind: 'exact' })
   })
 
+  it('keeps a short-query session window on the caller log', () => {
+    const sessionPath = under(SESSIONS, 'current.jsonl.zst')
+    const index = createIndex([
+      { body: '索引 current message', kind: 'session', path: sessionPath, title: 'current', sessionId: 'session-one', messageId: 'm1' },
+      { body: '索引 other message', kind: 'session', path: under(SESSIONS, 'other.jsonl.zst'), title: 'other', sessionId: 'session-two', messageId: 'm1' },
+      { body: '索引 file body', path: under(ROOT, 'file.md') },
+    ])
+    const result = searchContent(index.db, '索引', 10, { shortQueryFallback: true, sessionPath })
+    expect(result.error).toBeUndefined()
+    expect(result.shortQueryFallback).toBe(true)
+    expect(result.hits).toHaveLength(1)
+    expect(result.hits[0]?.title).toBe('current')
+    expect(result.hits[0]?.sessionId).toBe('session-one')
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+  })
+
+  it('filters short-query name hits by path prefix through the paths dictionary', () => {
+    const index = createIndex([
+      { body: 'no body match at all', path: under(SCOPE, '索引-inside.md'), title: 'inside' },
+      { body: 'no body match at all', path: under(ROOT, '索引-outside.md'), title: 'outside' },
+    ])
+    const result = searchContent(index.db, '索引', 10, { shortQueryFallback: true, pathPrefix: SCOPE })
+    expect(result.error).toBeUndefined()
+    expect(result.hits.map(hit => hit.title)).toEqual(['inside'])
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+  })
+
   it('stops the fallback when the cancellation hook fires', () => {
     const index = createIndex([{ body: '索引 body' }])
     const result = searchContent(index.db, '索引', 10, { shortQueryFallback: true, isCancelled: () => true })
@@ -542,6 +613,65 @@ describe('filter SQL split and bounded counting (P1-3)', () => {
     expect(result.warnings).toContain('bounded-count')
     const generous = searchContent(index2.db, 'common', 5, { excludeSessions: true, countLimit: 5000 })
     expect(generous.count).toEqual({ value: RANK_ADAPTIVE_THRESHOLD + 105, kind: 'exact' })
+  })
+
+  it('composes a workspace page filter by kind through the paths dictionary', () => {
+    const sessionPath = under(SESSIONS, 'current.jsonl.zst')
+    const index = createIndex([
+      { body: 'anchor session body', kind: 'session', path: sessionPath, title: 'session', sessionId: 'session-one', messageId: 'm1' },
+      { body: 'anchor current file', path: under(ROOT, 'current.md'), title: 'current.md' },
+      { body: 'anchor other file', path: under(SCOPE, 'other.md'), title: 'other.md' },
+      { body: 'anchor stale session', kind: 'session', path: under(SESSIONS, 'other.jsonl.zst'), title: 'other-session', sessionId: 'session-two', messageId: 'm2' },
+    ])
+    // Workspace scope = session rows from this log OR file rows under this
+    // prefix; the v4 page filter resolves both through the paths dictionary.
+    const result = searchContent(index.db, 'anchor', 10, { sessionPath, pathPrefix: ROOT })
+    expect(result.error).toBeUndefined()
+    expect(result.hits.map(hit => hit.path).sort()).toEqual([under(ROOT, 'current.md'), sessionPath].sort())
+    expect(result.count).toEqual({ value: 2, kind: 'exact' })
+  })
+
+  it('restricts a pure session window through the paths dictionary', () => {
+    const sessionPath = under(SESSIONS, 'current.jsonl.zst')
+    const index = createIndex([
+      { body: 'window marker one', kind: 'session', path: sessionPath, title: 'm1', sessionId: 'session-one', messageId: 'm1' },
+      { body: 'window marker two', kind: 'session', path: sessionPath, title: 'm2', sessionId: 'session-one', messageId: 'm2' },
+      { body: 'window marker other', kind: 'session', path: under(SESSIONS, 'other.jsonl.zst'), title: 'other', sessionId: 'session-two', messageId: 'm1' },
+    ])
+    const result = searchContent(index.db, 'window', 10, { sessionPath })
+    expect(result.error).toBeUndefined()
+    expect(result.hits.map(hit => hit.title).sort()).toEqual(['m1', 'm2'])
+    expect(result.hits.every(hit => hit.sessionId === 'session-one')).toBe(true)
+    expect(result.count).toEqual({ value: 2, kind: 'exact' })
+  })
+
+  it('keeps sessions scoped to the caller log but all file roots with fileHitsAllRoots', () => {
+    const sessionPath = under(SESSIONS, 'current.jsonl.zst')
+    const index = createIndex([
+      { body: 'wings session marker', kind: 'session', path: sessionPath, title: 'session', sessionId: 'session-one', messageId: 'm1' },
+      { body: 'wings root file', path: under(ROOT, 'root.md'), title: 'root.md' },
+      { body: 'wings scope file', path: under(SCOPE, 'scope.md'), title: 'scope.md' },
+      { body: 'wings other session', kind: 'session', path: under(SESSIONS, 'other.jsonl.zst'), title: 'other-session', sessionId: 'session-two', messageId: 'm2' },
+    ])
+    const result = searchContent(index.db, 'wings', 10, { sessionPath, fileHitsAllRoots: true })
+    expect(result.error).toBeUndefined()
+    expect(result.hits.map(hit => hit.kind === 'file' ? hit.path : hit.sessionId).sort())
+      .toEqual([under(ROOT, 'root.md'), under(SCOPE, 'scope.md'), 'session-one'].sort())
+    expect(result.count).toEqual({ value: 3, kind: 'exact' })
+  })
+
+  it('pages a filtered wide set across offsets through the paths dictionary', () => {
+    const specs = wideCorpus('common', RANK_ADAPTIVE_THRESHOLD + 205)
+    const index = createIndex(specs)
+    const first = searchContent(index.db, 'common', 10, { pathPrefix: ROOT, offset: 0 })
+    const second = searchContent(index.db, 'common', 10, { pathPrefix: ROOT, offset: 10 })
+    expect(titles(first)).toHaveLength(10)
+    expect(titles(second)).toHaveLength(10)
+    expect(titles(first).filter(title => titles(second).includes(title))).toEqual([])
+    // Every fixture path lives under ROOT, but the filtered count is bounded by
+    // the wide filtered path (never an unbounded exact count).
+    expect(first.count).toEqual({ value: 1000, kind: 'bounded', limit: 1000 })
+    expect(first.warnings).toContain('bounded-count')
   })
 })
 

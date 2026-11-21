@@ -47,7 +47,16 @@ interface ExploreRef {
     messageId?: string;
     ref?: string;
     refStatus?: 'fresh' | 'stale' | 'missing' | 'unknown';
+    /**
+     * Content-index relevance rank (FTS5 `rank`, i.e. bm25 with FTS5's ordering):
+     * lower (more negative) is a better match. Name-index hits never carry a rank,
+     * so they always sort after ranked content hits.
+     */
     score?: number;
+    /** The probe that best explains this ref (a better-ranked content probe wins). */
+    matchedQuery?: string;
+    /** Every probe that matched this ref (`<origin>:<query>`), de-duplicated and capped. */
+    why?: string[];
     read: 'allowed' | 'denied';
     visibility: 'workspace' | 'roots' | 'session' | 'external';
 }

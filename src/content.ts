@@ -36,7 +36,26 @@ import type { DumpPage, LocatorRuntime } from './runtime.ts'
 
 export type { CodeSymbol, SymbolKind } from './symbols.ts'
 
-const SCHEMA_VERSION = 3
+/**
+ * Schema version of the content database. Any mismatch triggers the existing
+ * "quarantine and rebuild from scratch" path; there is no online migration.
+ * v4 normalizes paths into a `paths` dictionary and stores symbol/document
+ * kinds and languages as integer codes.
+ */
+const SCHEMA_VERSION = 4
+
+/**
+ * `docs_meta.kind_id` codes (schema v4). `content-search.ts` imports these so
+ * document-kind filters target the integer column instead of a text column.
+ * The codes are persisted: never renumber them.
+ */
+export const DOC_KIND_FILE = 0
+export const DOC_KIND_SESSION = 1
+
+/** Persisted `docs_meta.kind_id` for one document kind. */
+export function docKindId(kind: 'file' | 'session'): number {
+  return kind === 'file' ? DOC_KIND_FILE : DOC_KIND_SESSION
+}
 
 /** Work budget between two event-loop yields; keeps host latency low. */
 const SLICE_MS = 8
@@ -133,8 +152,32 @@ const SESSION_MAX_BYTES = 64 * 1024 * 1024
 /** Decoded characters read from a truncated session log before the head is cut. */
 const SESSION_HEAD_CHARS = 32 * 1024 * 1024
 
-/** One build transaction covers this many write operations before commit. */
-const BATCH_OPS = 1_000
+/**
+ * One build transaction covers this many write operations before commit.
+ * 0.21.0: 1,000 -> 4,000. Every batch commit costs a WAL sync point plus the
+ * FTS5 per-segment bookkeeping; on a 160k-file build the smaller batch spent a
+ * measurable slice of the pass committing. 4,000 keeps the transaction small
+ * enough that the page cache (64 MiB) holds its dirty pages.
+ *
+ * Crash window: a crash can lose the open batch (up to ~4,000 write operations or
+ * {@link BATCH_BODY_BYTES} of body text, whichever limit commits first).
+ * That is by design and self-healing — a fresh build writes `complete = 0`
+ * before its first row, so the next boot rebuilds from scratch; an incremental
+ * batch is re-derived from file mtimes and session sources on the next refresh.
+ * Nothing outside the lost batch can be inconsistent because the WAL only
+ * checkpoints after a committed batch.
+ */
+const BATCH_OPS = 4_000
+
+/**
+ * Commit early when the open batch holds this many body characters (0.21.0).
+ * A COMMIT flushes the FTS5 pending hash synchronously; after the 0.21.0 path
+ * lookup stopped flushes per document, one 4,000-document batch could hold tens
+ * of MB of bodies and block the host event loop for >100 ms on a large-file
+ * build. Whichever limit comes first (4,000 operations or 4 MiB of bodies)
+ * keeps that synchronous flush bounded.
+ */
+const BATCH_BODY_BYTES = 4 * 1024 * 1024
 
 /** A generation fast path still sweeps the whole file index this often (deletions). */
 const DEFAULT_FULL_SWEEP_INTERVAL_MS = 30 * 60_000
@@ -148,6 +191,23 @@ const EVICT_HEADROOM_RATIO = 0.05
 /** Quarantined content databases older than this are deleted. */
 const CORRUPT_RETENTION_MS = 7 * 24 * 60 * 60_000
 const CORRUPT_MAX_ARCHIVES = 2
+
+/**
+ * Warning codes that describe a pre-build database condition which a
+ * successful full rebuild resolves (0.21.1). Keeping them in `state.warnings`
+ * after the rebuild would tell the panel and AI readers that a problem still
+ * exists when the fresh database is healthy, so `finish()` removes them. The
+ * cumulative counts stay in `diagnostics().warningCounts` (content_meta
+ * `warn:*` rows), which is the durable history across rebuilds.
+ */
+const WARNINGS_RESOLVED_BY_REBUILD: ReadonlySet<string> = new Set([
+  'content-db-corrupt',
+  'content-db-incompatible',
+  // finish() re-evaluates the live-page budget and re-adds this code when the
+  // rebuilt database is still over budget, so dropping a pre-build occurrence
+  // cannot hide a current problem.
+  'content-db-over-budget',
+])
 
 /** Concatenated Zstandard frame magic (LE) used by DSH session logs. */
 const ZSTD_MAGIC = 0xfd2fb528
@@ -165,11 +225,35 @@ const REFRESH_SLICE_MS = 40
 /** Wall-clock budget for one incremental refresh before the rest is deferred. */
 const INCREMENTAL_REFRESH_BUDGET_MS = 8_000
 
+/**
+ * Wall-clock budget for one full file sweep (0.21.0). The sweep is the only
+ * pass that must finish to reconcile deletions/renames, so it gets its own,
+ * far larger budget than a normal live refresh: 8 s used to abort it a few
+ * pages in on a 160k-file index and leave a permanent long tail of partial
+ * sweeps. The loop still yields every ~8 ms, so a long sweep stays cooperative.
+ */
+const FULL_SWEEP_BUDGET_MS = 45_000
+
 /** Approximate pages of merged FTS data written per bounded merge round. */
 const FTS_MERGE_PAGES = 2_048
 
-/** Above this live size the exact segment count is not worth a full shadow scan. */
-const FTS_SEGMENT_SCAN_MAX_BYTES = 128 * 1024 * 1024
+/** FTS5 default automerge level (segments; a commit merges once it is exceeded). */
+const FTS_AUTOMERGE_DEFAULT = 4
+
+/** Fresh-build automerge: no per-commit merges, one bounded merge at idle. */
+const FTS_AUTOMERGE_DISABLED = 0
+
+/** FTS5 %_data row holding the index structure record (FTS5_STRUCTURE_ROWID). */
+const FTS5_STRUCTURE_ROWID = 10
+
+/** Pages handed back per `incremental_vacuum` shard while idling (0.21.0). */
+const IDLE_VACUUM_PAGES = 1_024
+
+/** Free-list bytes that justify an idle vacuum even without an FTS merge. */
+const IDLE_VACUUM_MIN_BYTES = 32 * 1024 * 1024
+
+/** Safety bound on idle vacuum shards (a converged free list stops far earlier). */
+const IDLE_VACUUM_MAX_ROUNDS = 10_000
 
 /** Safety bound on merge rounds (a converged index stops far earlier). */
 const FTS_MERGE_MAX_ROUNDS = 10_000
@@ -244,8 +328,12 @@ export interface ContentState {
   truncated: boolean
   error: string
   /**
-   * Non-fatal problems from the last build/refresh: unreadable session logs,
-   * a quarantined database, and so on. Empty when everything was read.
+   * Non-fatal problems from the current/most recent build/refresh: unreadable
+   * session logs, budget truncation, and so on. A successful full rebuild
+   * drops the database-condition warnings it resolved (`content-db-corrupt`,
+   * `content-db-incompatible`, `content-db-over-budget`); their cumulative
+   * counts remain visible in `diagnostics().warningCounts`. Empty when
+   * everything was read.
    */
   warnings: string[]
   updatedAt: number
@@ -290,9 +378,20 @@ export interface ContentCoverage {
  */
 export interface ContentDiagnostics {
   coverage: ContentCoverage
+  /**
+   * `content.db` file size in bytes (stat). This is what the file occupies on
+   * disk, including the free list left by FTS merges, so it is NOT the size of
+   * the indexed data; compare it with {@link ContentDiagnostics.dbLiveBytes}.
+   */
   dbBytes: number
+  /** Size of the `content.db-wal` sidecar in bytes; 0 when every commit is checkpointed. */
   walBytes: number
-  /** Live database bytes: (page_count - freelist_count) * page_size (P0-5). */
+  /**
+   * Live database bytes: (page_count - freelist_count) * page_size (P0-5).
+   * This is the storage cost of the indexed data and the currency of
+   * `dbBudgetBytes`; a fresh FTS merge can make `dbBytes` much larger without
+   * changing this number.
+   */
   dbLiveBytes: number
   /** Reclaimable free-list bytes: freelist_count * page_size. */
   freelistBytes: number
@@ -305,15 +404,27 @@ export interface ContentDiagnostics {
   ftsOptimizedAt: number
   /** FTS optimize failures recorded since this database was created. */
   optimizeWarnings: number
+  /** Bytes handed back to the filesystem by the last idle vacuum, 0 when none ran. */
+  lastVacuumBytes: number
+  /** Epoch ms of the last idle vacuum, 0 when never run. */
+  lastVacuumAt: number
   lastRefreshMs: number
   /** Wall-clock ms of the last incremental (live) refresh; 0 before one ran. */
   liveRefreshMsLast: number
   lastRefreshMode: 'full' | 'incremental' | 'fast' | 'deferred' | ''
+  /** Content database schema version this build writes (v4 = normalized paths). */
+  schemaVersion: number
   engineGeneration: number | null
   symbolsPerFile: number
   /** Document extraction runs in a worker thread (false: in-process fallback). */
   extractWorker: boolean
-  /** Persisted non-fatal warning counters (0.20.2 P1-8); absent when empty. */
+  /**
+   * Persisted non-fatal warning counters (0.20.2 P1-8); absent when empty.
+   * The counters are cumulative for the state directory: they survive a full
+   * rebuild and keep the history of warnings that `state.warnings` dropped as
+   * resolved (0.21.1), so an AI reader can still see that a quarantine or budget
+   * event happened after the database was rebuilt.
+   */
   warningCounts?: Record<string, number>
 }
 
@@ -410,6 +521,11 @@ export interface ContentOptions {
   /** Override the periodic full file-index sweep interval (tests). */
   fullSweepIntervalMs?: number
   /**
+   * Override the full-sweep wall-clock budget in ms (tests). 0 aborts a sweep
+   * before it reads a page; the production value is {@link FULL_SWEEP_BUDGET_MS}.
+   */
+  fullSweepBudgetMs?: number
+  /**
    * Parallel file read/decode/symbol-extraction workers during a full build
    * (default 4, clamped to 1..8). Body writes always stay on the main thread:
    * the pool only prefetches rows, which keeps SQLite single-writer safe.
@@ -449,6 +565,56 @@ export interface SymbolMatch {
 export interface RepoMapFile {
   path: string
   symbols: CodeSymbol[]
+}
+
+/**
+ * Symbol-kind names indexed by their persisted integer code (schema v4). The
+ * array order is the on-disk format: append new kinds at the end and never
+ * reorder entries. The public interface keeps returning the string names.
+ */
+export const SYMBOL_KIND_BY_CODE: readonly CodeSymbol['kind'][] = [
+  'function', 'method', 'class', 'struct', 'interface', 'trait', 'enum', 'type',
+  'constant', 'variable', 'module', 'namespace', 'heading', 'macro', 'property',
+  'union', 'object', 'impl',
+]
+
+/**
+ * Symbol-language names indexed by their persisted integer code (schema v4).
+ * Kept in the order of `symbols.ts`'s language registry; new languages must be
+ * appended here so a database written by a newer extractor stays readable. A
+ * language missing from this table is stored as NULL and reads back as "".
+ */
+export const SYMBOL_LANGUAGE_BY_CODE: readonly string[] = [
+  'go', 'typescript', 'javascript', 'python', 'rust', 'java', 'c', 'cpp',
+  'csharp', 'php', 'ruby', 'kotlin', 'swift', 'markdown',
+]
+
+const SYMBOL_KIND_CODE = new Map<string, number>(SYMBOL_KIND_BY_CODE.map((kind, code) => [kind, code]))
+const SYMBOL_LANGUAGE_CODE = new Map<string, number>(SYMBOL_LANGUAGE_BY_CODE.map((language, code) => [language, code]))
+
+/** Persisted integer code for one symbol kind; -1 is "unknown" and never stored. */
+function encodeSymbolKind(kind: string): number {
+  return SYMBOL_KIND_CODE.get(kind) ?? -1
+}
+
+/** Persisted integer code for one symbol language; null when unsupported. */
+function encodeSymbolLanguage(language: string): number | null {
+  const code = SYMBOL_LANGUAGE_CODE.get(language)
+  return code === undefined ? null : code
+}
+
+/** Decode one stored symbol-kind code; undefined for a malformed row. */
+function decodeSymbolKind(code: unknown): CodeSymbol['kind'] | undefined {
+  return typeof code === 'number' && Number.isInteger(code) && code >= 0 && code < SYMBOL_KIND_BY_CODE.length
+    ? SYMBOL_KIND_BY_CODE[code]
+    : undefined
+}
+
+/** Decode one stored symbol-language code; "" when absent/unknown. */
+function decodeSymbolLanguage(code: unknown): string {
+  return typeof code === 'number' && Number.isInteger(code) && code >= 0 && code < SYMBOL_LANGUAGE_BY_CODE.length
+    ? (SYMBOL_LANGUAGE_BY_CODE[code] ?? '')
+    : ''
 }
 
 interface DocRow {
@@ -550,13 +716,17 @@ export class ContentIndex {
   /** Queued write operations since the last batch commit. */
   private inBatch = false
   private batchOps = 0
+  /** Body characters written into the open batch (see BATCH_BODY_BYTES). */
+  private batchBodyBytes = 0
   /** A full build created the symbols table without its indexes; create them at the end. */
   private symbolIndexesPending = false
   /** Fresh full build: symbols indexes are created after the insert pass, so per-file deletes must wait. */
   private symbolsBulk = false
-  private readonly symbolsBulkPurge = new Set<string>()
+  private readonly symbolsBulkPurge = new Set<number>()
   /** Persisted counters kept in content_meta so caps checks stay O(1). */
   private fileDocs = 0
+  /** Session documents (messages/tool results) written by this instance; live build counter (0.21.1). */
+  private sessionDocs = 0
   private oversizedDocs = 0
   private countersLoaded = false
   /** Indexable file entries seen by the last full sweep (coverage denominator). */
@@ -583,12 +753,20 @@ export class ContentIndex {
   private readonly sniffRejects = new Map<string, number>()
   /** Start of the current incremental refresh, for its wall-clock budget. */
   private refreshStartedAt = 0
+  /** Start of the current full file sweep, for {@link FULL_SWEEP_BUDGET_MS}. */
+  private sweepStartedAt = 0
   /** The current incremental refresh hit its budget and deferred the rest. */
   private refreshBudgetHit = false
-  /** An idle FTS optimize is scheduled/running (never two at once). */
-  private idleOptimizeRunning = false
+  /** Idle maintenance (symbol indexes / FTS merge / vacuum) is scheduled or running. */
+  private idleMaintenanceRunning = false
+  /** A finish() asked for idle maintenance while one was already running. */
+  private idleMaintenanceQueued = false
   /** The FTS index still needs its idle merge; retried after the next pass. */
   private idleOptimizeNeeded = false
+  /** Bytes returned to the filesystem by the last idle vacuum (0 = never/none). */
+  private lastVacuumBytes = 0
+  /** Epoch ms of the last idle vacuum, 0 when never run. */
+  private lastVacuumAt = 0
   /** File-index generation observed while walking the last dump. */
   private engineGeneration: number | null = null
   /** Wall clock at the start of the current build. */
@@ -659,9 +837,12 @@ export class ContentIndex {
       ftsSegments: this.ftsSegments,
       ftsOptimizedAt: this.ftsOptimizedAt,
       optimizeWarnings: this.optimizeWarnings,
+      lastVacuumBytes: this.lastVacuumBytes,
+      lastVacuumAt: this.lastVacuumAt,
       lastRefreshMs: this.lastRefreshMs,
       liveRefreshMsLast: this.liveRefreshMsLast,
       lastRefreshMode: this.lastRefreshMode,
+      schemaVersion: SCHEMA_VERSION,
       engineGeneration: this.engineGeneration,
       symbolsPerFile: this.symbolsPerFile(),
       extractWorker: this.extractWorkerAvailable(),
@@ -703,27 +884,21 @@ export class ContentIndex {
   }
 
   /**
-   * Approximate FTS5 segment count: each segment b-tree page is one row in the
-   * docs_data shadow table whose rowid encodes the segment id in its high
-   * bits (page number in the low 32). Counting distinct high words is version
-   * stable across the SQLite builds Node ships and needs no structure-record
-   * parsing. The exact count is a full scan of a table that can be over 2 GB,
-   * so it is only measured for a small corpus; a large one reports the known
-   * result of a converged merge (1) or 0 = "not measured yet". Diagnostics
-   * only, never a correctness input.
+   * Exact live FTS5 segment count from the index structure record (0.21.0).
+   * The record is a single row in the docs_data shadow table (rowid 10): a
+   * 4-byte configuration cookie followed by varints `nLevel` and `nSegment`.
+   * Reading it is one primary-key lookup, so the count is exact even for a
+   * multi-GB index — the old COUNT(DISTINCT id >> 32) heuristic had to scan the
+   * whole shadow table and gave up above 128 MB, which also meant the idle
+   * auto-merge could not see a segmented production index.
+   * Diagnostics and the idle-merge trigger only, never a correctness input.
    */
   private measureFtsSegments(): void {
     if (this.db === null) { this.ftsSegments = 0; return }
-    const usage = this.pageUsage()
-    if (usage.live > FTS_SEGMENT_SCAN_MAX_BYTES) {
-      // A converged merge leaves the trigram index as one segment; before the
-      // first optimize the count is unknown and reported as 0.
-      this.ftsSegments = this.ftsOptimizedAt > 0 ? 1 : 0
-      return
-    }
     try {
-      const row = this.db.prepare('SELECT COUNT(DISTINCT (id >> 32)) AS n FROM docs_data WHERE id > 10').get() as { n?: number } | undefined
-      this.ftsSegments = Number(row?.n ?? 0)
+      const row = this.db.prepare('SELECT block FROM docs_data WHERE id = ?').get(FTS5_STRUCTURE_ROWID) as { block?: unknown } | undefined
+      const segments = ftsStructureSegments(row?.block)
+      this.ftsSegments = segments ?? 0
     } catch {
       this.ftsSegments = 0
     }
@@ -873,20 +1048,39 @@ export class ContentIndex {
     this.lastRefreshMode = 'full'
     this.open(true)
     this.totalBytes = 0
+    // The freshly recreated database is empty: drop the previous pass's
+    // published totals so status() never reports old counts for a rebuild in
+    // progress (0.21.1). addDoc()/countIndexed() publish the live numbers.
+    this.state.files = 0
+    this.state.sessions = 0
+    this.state.messages = 0
     this.engineGeneration = null
     this.candidateFiles = null
     this.beginBatch()
-    await this.indexSessions(generation)
-    if (generation !== this.generation) return
-    this.needsSessionBackfill = false
-    await this.indexFiles(generation)
-    if (generation !== this.generation) return
-    // A full build indexed symbols for every file; no backfill is pending.
-    this.needsSymbolBackfill = false
-    this.commitBatch()
-    // Symbols are inserted without their indexes during the pass; create them
-    // now that the table is complete (P0-13).
-    this.ensureSymbolIndexes()
+    // 0.21.0: a fresh build disables FTS5 automatic merges. The insert pass
+    // commits a batch every {@link BATCH_OPS} operations; with automerge=4 each
+    // commit can rewrite several segments, which is pure churn when a single
+    // bounded merge at the end produces the same result. The setting is restored
+    // before the build ends (the finally below) — and a crash is safe because the
+    // database has `complete = 0` written, so the next boot rebuilds it anyway.
+    this.setFtsAutomerge(FTS_AUTOMERGE_DISABLED)
+    try {
+      await this.indexSessions(generation)
+      if (generation !== this.generation) return
+      this.needsSessionBackfill = false
+      await this.indexFiles(generation)
+      if (generation !== this.generation) return
+      // A full build indexed symbols for every file; no backfill is pending.
+      this.needsSymbolBackfill = false
+      this.commitBatch()
+      // Symbols are inserted without their indexes during the pass. Embedders
+      // that keep the build synchronous create them here; the live plugin runs
+      // idle maintenance instead, so the one-time CREATE INDEX no longer extends
+      // the wall clock of a 160k-file build (0.21.0).
+      if (this.options.optimizeInIdle !== true) this.ensureSymbolIndexes()
+    } finally {
+      this.setFtsAutomerge(FTS_AUTOMERGE_DEFAULT)
+    }
     // 0.20.2: the merge is chunked either way. With optimizeInIdle the plugin
     // finishes the build first and merges in the background, so a 4 GB index
     // never extends the build wall clock visible to the host.
@@ -969,6 +1163,10 @@ export class ContentIndex {
       this.beginBatch()
       await this.refreshFiles(generation)
       if (generation !== this.generation) return
+      // A full sweep is allowed a much larger budget than one live refresh
+      // (0.21.0). Give the session phase its own 8 s window instead of letting
+      // an already-exhausted incremental clock skip every session forever.
+      this.refreshStartedAt = Date.now()
       await this.refreshSessions(generation)
       if (generation !== this.generation) return
       if (this.refreshBudgetHit) this.addWarning('content-refresh-budget')
@@ -1047,10 +1245,18 @@ export class ContentIndex {
     }
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = OFF')
+    // 0.21.0: the content database is a multi-GB, write-heavy index (a 160k-file
+    // build inserts >1 GB of FTS bodies). A 64 MiB page cache keeps the dirty
+    // pages of one 4,000-operation batch resident so commits/merges do not keep
+    // re-reading them; temp_store=MEMORY keeps the FTS merge sorter out of a
+    // temp file. WAL stays on (readers never block the single writer).
+    try { this.db.exec('PRAGMA cache_size = -65536') } catch { /* older SQLite: keep the default */ }
+    try { this.db.exec('PRAGMA temp_store = MEMORY') } catch { /* older SQLite: keep the default */ }
     if (fresh && oldFileRemained) {
       // Fallback for the rare recreate failure above: still start from empty.
       this.db.exec('DROP TABLE IF EXISTS docs')
       this.db.exec('DROP TABLE IF EXISTS docs_meta')
+      this.db.exec('DROP TABLE IF EXISTS paths')
       this.db.exec('DROP TABLE IF EXISTS sources')
       this.db.exec('DROP TABLE IF EXISTS symbols')
       this.db.exec('DROP TABLE IF EXISTS refs')
@@ -1060,13 +1266,24 @@ export class ContentIndex {
       body, kind UNINDEXED, path UNINDEXED, title UNINDEXED,
       session_id UNINDEXED, message_id UNINDEXED, tokenize = 'trigram'
     )`)
-    this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, doc_key TEXT UNIQUE, path TEXT, mtime INTEGER, kind TEXT, node_key TEXT)')
-    this.ensureDocsMetaFormatColumn()
-    this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER)')
-    if (this.ensureSourcesCwdColumn()) this.needsSessionBackfill = true
-    this.ensureSessionColumns()
+    // Schema v4: one row per distinct stored path spelling. Symbols and
+    // docs_meta reference it by id instead of repeating the path text.
+    this.db.exec('CREATE TABLE IF NOT EXISTS paths (id INTEGER PRIMARY KEY, path TEXT NOT NULL)')
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS paths_path ON paths(path)')
+    this.db.exec('CREATE TABLE IF NOT EXISTS docs_meta (rowid INTEGER PRIMARY KEY, path_id INTEGER NOT NULL, mtime INTEGER, kind_id INTEGER NOT NULL, node_key TEXT, format TEXT, session_key TEXT)')
+    // 0.20.2 P0-4: eviction victims are ordered by mtime; without this index
+    // every victim query sorted the whole docs_meta table (266 s of a 13 min
+    // build). Additive, so an existing database picks it up on the next open.
+    this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_mtime ON docs_meta(mtime, rowid)')
+    this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_path_id ON docs_meta(path_id)')
+    // One file document per path, one session document per session key. The
+    // partial indexes only cover their own kind, so session documents may share
+    // their session log path and file rows keep the path identity.
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS docs_meta_file_path ON docs_meta(path_id) WHERE kind_id = 0')
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS docs_meta_session_key ON docs_meta(session_key) WHERE kind_id = 1')
+    this.db.exec('CREATE TABLE IF NOT EXISTS sources (path TEXT PRIMARY KEY, mtime INTEGER, cwd TEXT, byte_len INTEGER, last_line INTEGER, title TEXT, capped INTEGER)')
+    this.db.exec('CREATE TABLE IF NOT EXISTS symbols (path_id INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, line INTEGER NOT NULL, language INTEGER, scope TEXT)')
     if (this.ensureRefsTables()) this.needsSessionBackfill = true
-    if (this.ensureSymbolsTables()) this.needsSymbolBackfill = true
     if (fresh) {
       // A full build inserts every symbol; its indexes are created afterwards so
       // the insert pass does not pay index maintenance per row. There is also
@@ -1079,11 +1296,6 @@ export class ContentIndex {
     } else {
       this.ensureSymbolIndexes()
     }
-    this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_path ON docs_meta(path)')
-    // 0.20.2 P0-4: eviction victims are ordered by mtime; without this index
-    // every victim query sorted the whole docs_meta table (266 s of a 13 min
-    // build). Additive, so an existing database picks it up on the next open.
-    this.db.exec('CREATE INDEX IF NOT EXISTS docs_meta_mtime ON docs_meta(mtime, rowid)')
     if (fresh) {
       this.db.exec('DROP TABLE IF EXISTS content_meta')
     }
@@ -1092,6 +1304,7 @@ export class ContentIndex {
       this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('total_bytes', 0)")
       this.db.exec("INSERT OR REPLACE INTO content_meta (key, value) VALUES ('complete', 0)")
       this.fileDocs = 0
+      this.sessionDocs = 0
       this.oversizedDocs = 0
       this.countersLoaded = true
       this.candidateFiles = null
@@ -1099,7 +1312,19 @@ export class ContentIndex {
       this.ftsOptimizedAt = 0
       this.ftsSegments = 0
       this.optimizeWarnings = 0
+      this.lastVacuumBytes = 0
+      this.lastVacuumAt = 0
+      // Warning history is cumulative for the state directory (0.21.1). The
+      // in-memory counters can hold a quarantine warning counted before this
+      // database existed; persist them into the new content_meta so finish()
+      // can drop the resolved code from state.warnings without losing the
+      // record AI readers get through diagnostics().warningCounts.
+      const carriedWarnings = new Map(this.warningCounts)
       this.warningCounts.clear()
+      for (const [warning, count] of carriedWarnings) {
+        this.warningCounts.set(warning, count)
+        try { this.writeFlag('warn:' + warning, count) } catch { /* counters are additive */ }
+      }
       this.sniffRejects.clear()
       this.engineGeneration = null
     }
@@ -1121,7 +1346,7 @@ export class ContentIndex {
       const storedFiles = this.readFlag('file_count')
       const storedOversized = this.readFlag('oversized_count')
       const storedCap = this.readFlag('oversized_cap')
-      if (storedFiles === undefined) this.fileDocs = Number((this.db.prepare("SELECT COUNT(*) AS n FROM docs_meta WHERE kind = 'file'").get() as { n: number }).n)
+      if (storedFiles === undefined) this.fileDocs = Number((this.db.prepare('SELECT COUNT(*) AS n FROM docs_meta WHERE kind_id = 0').get() as { n: number }).n)
       else this.fileDocs = storedFiles
       const cap = this.options.maxFileBytes
       if (storedOversized === undefined || storedCap === undefined || storedCap !== cap) {
@@ -1140,6 +1365,8 @@ export class ContentIndex {
         this.warningCounts.set(row.key.slice(5), Number(row.value ?? 0))
       }
       this.engineGeneration = this.readFlag('engine_generation') ?? null
+      this.lastVacuumBytes = this.readFlag('last_vacuum_bytes') ?? 0
+      this.lastVacuumAt = this.readFlag('last_vacuum_at') ?? 0
       this.countersLoaded = true
     } catch {
       // A pre-0.20 database may lack the additive columns/keys; recount lazily.
@@ -1187,6 +1414,11 @@ export class ContentIndex {
    * - `corrupt`: zero bytes, unreadable, or not a SQLite database.
    * - `incompatible`: has our tables but a different schema version/shape.
    * - `ok`: safe to reuse.
+   *
+   * The shape probe covers the v4 path normalization: a database that kept the
+   * old `docs_meta.doc_key/path/kind` columns (or lost `paths`) can never be
+   * read by the v4 SQL, so it must take the same rebuild path as an old
+   * `user_version` instead of failing halfway through a refresh.
    */
   private classifyDatabase(path: string): 'ok' | 'foreign' | 'corrupt' | 'incompatible' {
     let size = 0
@@ -1205,6 +1437,7 @@ export class ContentIndex {
       if (!names.has('docs') || !names.has('docs_meta') || !names.has('sources') || !names.has('content_meta')) return 'incompatible'
       const version = (probe.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined)?.user_version ?? 0
       if (Number(version) !== SCHEMA_VERSION) return 'incompatible'
+      if (!hasV4Shape(probe)) return 'incompatible'
       return 'ok'
     } catch {
       return 'corrupt'
@@ -1422,13 +1655,19 @@ export class ContentIndex {
   /** Remove all session documents, keeping file documents and their bytes. */
   private clearSessions(): void {
     const row = this.db!.prepare(`SELECT COALESCE(SUM(length(d.body)), 0) AS n
-      FROM docs_meta m LEFT JOIN docs d ON d.rowid = m.rowid WHERE m.kind = 'session'`).get() as { n?: number } | undefined
-    this.db!.exec("DELETE FROM docs WHERE rowid IN (SELECT rowid FROM docs_meta WHERE kind = 'session')")
-    this.db!.exec("DELETE FROM docs_meta WHERE kind = 'session'")
+      FROM docs_meta m LEFT JOIN docs d ON d.rowid = m.rowid WHERE m.kind_id = 1`).get() as { n?: number } | undefined
+    // Session paths may be referenced only by the session rows being dropped;
+    // release them after the delete so the paths dictionary stays tight.
+    const droppedPaths = (this.db!.prepare('SELECT DISTINCT path_id AS pathId FROM docs_meta WHERE kind_id = 1')
+      .all() as Array<{ pathId?: number }>).map(item => Number(item.pathId ?? 0)).filter(pathId => pathId > 0)
+    this.db!.exec('DELETE FROM docs WHERE rowid IN (SELECT rowid FROM docs_meta WHERE kind_id = 1)')
+    this.db!.exec('DELETE FROM docs_meta WHERE kind_id = 1')
     this.db!.exec('DELETE FROM sources')
     this.db!.exec('DELETE FROM refs')
     this.db!.exec('DELETE FROM refs_meta')
+    for (const pathId of droppedPaths) this.releasePathId(pathId)
     this.totalBytes = Math.max(0, this.totalBytes - Number(row?.n ?? 0))
+    this.sessionDocs = 0
     this.batchTick()
   }
 
@@ -1530,7 +1769,15 @@ export class ContentIndex {
 
   /** Count one entry that produced a stored row. */
   private countIndexed(amount = 1): void {
-    if (this.progress !== null) this.progress.indexed += amount
+    const progress = this.progress
+    if (progress === null) return
+    progress.indexed += amount
+    // A full rebuild publishes the live session count too (0.21.1): during the
+    // sessions phase progress.indexed is the number of indexed session logs,
+    // which is exactly what status().sessions reports once the build finishes.
+    if (this.state.building && this.lastRefreshMode === 'full' && progress.phase === 'sessions') {
+      this.state.sessions = progress.indexed
+    }
   }
 
   /** Total engine entries, used as the files-phase progress denominator. */
@@ -1546,6 +1793,18 @@ export class ContentIndex {
     } catch {
       return undefined
     }
+  }
+
+  /**
+   * Set the FTS5 `automerge` configuration option on this connection (0.21.0).
+   * A fresh build writes 0 so per-batch commits never merge segments, then
+   * restores {@link FTS_AUTOMERGE_DEFAULT} before the single bounded merge.
+   */
+  private setFtsAutomerge(value: number): void {
+    if (this.db === null) return
+    try {
+      this.db.exec("INSERT INTO docs(docs, rank) VALUES('automerge', " + String(value) + ')')
+    } catch { /* a failed open leaves no docs table; the setting is advisory */ }
   }
 
   /**
@@ -1601,15 +1860,23 @@ export class ContentIndex {
     await new Promise<void>(resolve => { setTimeout(resolve, 0) })
   }
 
-  /** Schedule the post-build FTS merge as an idle task (P0-2 optimizeInIdle). */
-  private scheduleIdleOptimize(generation: number): void {
-    if (this.idleOptimizeRunning) return
-    this.idleOptimizeRunning = true
-    const timer = setTimeout(() => { void this.runIdleOptimize(generation) }, FTS_IDLE_OPTIMIZE_DELAY_MS)
+  /**
+   * Schedule idle maintenance after a build/refresh reports done (0.21.0):
+   * create deferred symbol indexes, re-merge a segmented FTS index, then hand
+   * freed pages back to the filesystem. One task at a time; a request that
+   * arrives while it runs is queued and runs right after it.
+   */
+  private scheduleIdleMaintenance(generation: number): void {
+    if (this.idleMaintenanceRunning) {
+      this.idleMaintenanceQueued = true
+      return
+    }
+    this.idleMaintenanceRunning = true
+    const timer = setTimeout(() => { void this.runIdleMaintenance(generation) }, FTS_IDLE_OPTIMIZE_DELAY_MS)
     timer.unref()
   }
 
-  private async runIdleOptimize(generation: number): Promise<void> {
+  private async runIdleMaintenance(generation: number): Promise<void> {
     let reschedule = false
     try {
       if (generation !== this.generation) {
@@ -1619,20 +1886,94 @@ export class ContentIndex {
         reschedule = !this.state.building
         return
       }
+      await this.performIdleMaintenance(generation)
+    } catch { /* opportunistic maintenance: the next pass retries */ } finally {
+      this.idleMaintenanceRunning = false
+      if (this.idleMaintenanceQueued) {
+        this.idleMaintenanceQueued = false
+        this.scheduleIdleMaintenance(this.generation)
+      } else if (reschedule) {
+        this.scheduleIdleMaintenance(this.generation)
+      }
+    }
+  }
+
+  /** The idle maintenance steps themselves; each yields and re-checks state. */
+  private async performIdleMaintenance(generation: number): Promise<void> {
+    if (this.db === null || this.state.building) return
+    // A full build inserts every symbol row without its indexes; creating them
+    // here keeps the one-time ~3 s CREATE INDEX off the build wall clock.
+    if (this.symbolIndexesPending) {
+      this.ensureSymbolIndexes()
+      await this.yieldForMerge()
+    }
+    if (this.ftsSegments > 1 || this.idleOptimizeNeeded) {
       const converged = await this.optimizeFts(generation, true)
       // An interrupted merge (a refresh/rebuild started) is retried after that
       // pass finishes, so a periodic live refresh cannot starve the flag.
       this.idleOptimizeNeeded = !converged
-    } catch { /* optimizeFts already records its failure */ } finally {
-      this.idleOptimizeRunning = false
-      if (reschedule) this.scheduleIdleOptimize(this.generation)
+      if (!converged) return
+      await this.vacuumFreePages(generation)
+      return
     }
+    if (this.freelistBytes > 0) await this.vacuumFreePages(generation)
+  }
+
+  /**
+   * Hand free pages back to the filesystem in bounded shards (0.21.0 idle
+   * maintenance). `incremental_vacuum` is synchronous, so it runs
+   * {@link IDLE_VACUUM_PAGES} pages at a time and yields between shards; a build
+   * that starts meanwhile aborts the vacuum (the next idle pass retries). The WAL
+   * is folded back afterwards so the shrink is visible on disk.
+   */
+  private async vacuumFreePages(generation: number): Promise<void> {
+    if (this.db === null) return
+    const startFree = this.pageUsage().freelist
+    if (startFree <= 0) return
+    let rounds = 0
+    try {
+      for (;;) {
+        if (generation !== this.generation) return
+        if (this.state.building) return
+        const usage = this.pageUsage()
+        if (usage.freelist <= 0) break
+        const take = Math.min(IDLE_VACUUM_PAGES, usage.freelist)
+        this.db.exec('PRAGMA incremental_vacuum(' + String(take) + ')')
+        if (++rounds > IDLE_VACUUM_MAX_ROUNDS) break
+        await this.yieldForMerge()
+      }
+      try { this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)') } catch { /* a reader may hold the WAL */ }
+      this.measureDatabase()
+      // Bytes actually returned to the filesystem: free-list bytes before minus
+      // after (the file size alone is unreliable while the WAL still holds the
+      // merge's pages).
+      const afterFree = this.pageUsage().freelist
+      this.lastVacuumBytes = Math.max(0, startFree - afterFree)
+      this.lastVacuumAt = Date.now()
+      try {
+        this.writeFlag('last_vacuum_bytes', this.lastVacuumBytes)
+        this.writeFlag('last_vacuum_at', this.lastVacuumAt)
+      } catch { /* diagnostics only; a failed flag write keeps the in-memory value */ }
+    } catch { /* opportunistic: the next idle pass retries the remaining shards */ }
   }
 
   /** Wall-clock budget check for one incremental refresh (P0-3). */
   private refreshBudgetExceeded(): boolean {
     if (this.refreshStartedAt === 0) return false
     if (Date.now() - this.refreshStartedAt <= INCREMENTAL_REFRESH_BUDGET_MS) return false
+    this.refreshBudgetHit = true
+    return true
+  }
+
+  /**
+   * Wall-clock budget check for one full file sweep (0.21.0). The sweep has its
+   * own much larger budget: it is the only pass that reconciles deletions, and
+   * aborting it on the 8 s incremental budget left a permanent partial-sweep
+   * long tail on a 160k-file index.
+   */
+  private sweepBudgetExceeded(): boolean {
+    if (this.sweepStartedAt === 0) return false
+    if (Date.now() - this.sweepStartedAt < this.fullSweepBudgetMs()) return false
     this.refreshBudgetHit = true
     return true
   }
@@ -1688,12 +2029,24 @@ export class ContentIndex {
 
   private finish(): void {
     this.commitBatch()
-    if (this.symbolIndexesPending) this.ensureSymbolIndexes()
+    // Embedders that do not run idle maintenance must create the deferred
+    // symbol indexes here; the live plugin defers them to the idle task below.
+    if (this.symbolIndexesPending && this.options.optimizeInIdle !== true) this.ensureSymbolIndexes()
     this.clearProgress()
-    const counts = this.db!.prepare("SELECT kind, COUNT(*) AS n FROM docs_meta GROUP BY kind").all() as Array<{ kind: string; n: number }>
-    this.state.files = Number(counts.find(row => row.kind === 'file')?.n ?? 0)
-    this.state.messages = Number(counts.find(row => row.kind === 'session')?.n ?? 0)
+    // A successful full rebuild replaced the database: warnings about the
+    // pre-build database state are resolved now and must not outlive it
+    // (0.21.1). The cumulative counts stay in warningCounts/content_meta, so
+    // the quarantine/budget history is still observable through diagnostics.
+    // The budget check below re-adds content-db-over-budget when it still
+    // applies to the rebuilt database.
+    if (this.lastRefreshMode === 'full') {
+      this.state.warnings = this.state.warnings.filter(warning => !WARNINGS_RESOLVED_BY_REBUILD.has(warning))
+    }
+    const counts = this.db!.prepare('SELECT kind_id AS kindId, COUNT(*) AS n FROM docs_meta GROUP BY kind_id').all() as Array<{ kindId: number; n: number }>
+    this.state.files = Number(counts.find(row => Number(row.kindId) === DOC_KIND_FILE)?.n ?? 0)
+    this.state.messages = Number(counts.find(row => Number(row.kindId) === DOC_KIND_SESSION)?.n ?? 0)
     this.state.sessions = Number((this.db!.prepare('SELECT COUNT(*) AS n FROM sources').get() as { n: number }).n)
+    this.sessionDocs = this.state.messages
     this.state.building = false
     this.state.updatedAt = Date.now()
     this.lastRefreshMs = this.buildStartedAt > 0 ? Date.now() - this.buildStartedAt : 0
@@ -1722,9 +2075,17 @@ export class ContentIndex {
       // most once per six hours instead of on every refresh.
       try { this.writeFlag('db_budget_rebuilt_at', Date.now()) } catch { /* flag only gates rebuilds */ }
     }
-    // Retry an idle merge that a refresh interrupted (P0-2). finish() runs with
-    // building=false, so the scheduled task starts after this pass is done.
-    if (this.options.optimizeInIdle === true && this.idleOptimizeNeeded) this.scheduleIdleOptimize(this.generation)
+    // 0.21.0 idle maintenance. finish() runs with building=false, so the
+    // delayed task can start: it creates deferred symbol indexes, re-merges a
+    // segmented FTS index, then hands free pages back via incremental_vacuum.
+    // A fresh build always queues the merge (idleOptimizeNeeded); an incremental
+    // refresh queues one when the exact segment count says the index is split,
+    // when a previous merge was interrupted, or when the free list grew large.
+    const idleNeeded = this.symbolIndexesPending
+      || this.ftsSegments > 1
+      || this.idleOptimizeNeeded
+      || this.freelistBytes > IDLE_VACUUM_MIN_BYTES
+    if (idleNeeded) this.scheduleIdleMaintenance(this.generation)
   }
 
   /**
@@ -1760,30 +2121,46 @@ export class ContentIndex {
     // Replacing an existing document frees its old body first: an unchanged
     // file rewritten at refresh time must not be rejected because its stale
     // copy still occupies the budget.
-    const previous = fresh ? 0 : this.storedBytes(row.key)
+    const previous = fresh ? 0 : this.storedBytes(row)
     if (cap > 0 && this.totalBytes - previous + row.body.length > cap) {
       if (fresh || this.options.evict !== true) {
         this.state.truncated = true
         return false
       }
-      if (!await this.evictForBudget(cap, previous, row.body.length, row.key)) {
+      if (!await this.evictForBudget(cap, previous, row.body.length, row)) {
         this.state.truncated = true
         return false
       }
     }
     if (!fresh) this.deleteDoc(row.key)
-    const meta = this.db!.prepare('INSERT INTO docs_meta (doc_key, path, mtime, kind, node_key, format) VALUES (?, ?, ?, ?, ?, ?)').run(row.key, row.path, row.mtime, row.kind, row.nodeKey, row.format ?? null)
+    // The path dictionary row is created only once the body is admitted, so a
+    // budget-rejected candidate never leaves an orphan path behind.
+    const pathId = this.pathId(row.path)
+    if (pathId === null) return false
+    const kindId = docKindId(row.kind)
+    const sessionKey = row.kind === 'session' ? row.key : null
+    const meta = this.db!
+      .prepare('INSERT INTO docs_meta (path_id, mtime, kind_id, node_key, format, session_key) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(pathId, row.mtime, kindId, row.nodeKey, row.format ?? null, sessionKey)
     const rowid = meta.lastInsertRowid
     this.db!.prepare('INSERT INTO docs (rowid, body, kind, path, title, session_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(rowid, row.body, row.kind, row.path, row.title, row.sessionId, row.messageId)
     this.totalBytes += row.body.length
     if (row.kind === 'file') {
       this.fileDocs++
       if (this.options.maxFileBytes > 0 && row.body.length > this.options.maxFileBytes) this.oversizedDocs++
+      // Publish the live count while a full rebuild writes rows (0.21.1): status()
+      // must not keep saying files=0 (or the previous database's totals) while
+      // progress.indexed already reports tens of thousands. Incremental
+      // refreshes keep their committed totals until finish() recounts.
+      if (this.state.building && this.lastRefreshMode === 'full') this.state.files = this.fileDocs
+    } else {
+      this.sessionDocs++
+      if (this.state.building && this.lastRefreshMode === 'full') this.state.messages = this.sessionDocs
     }
     // Symbols follow the body: a file rejected by the body budget stays out of
     // the outline too, so every repo-map entry is also a searchable document.
-    if (row.symbols !== undefined) this.writeSymbols(row.path, row.symbols)
-    this.batchTick()
+    if (row.symbols !== undefined) this.writeSymbols(pathId, row.symbols)
+    this.batchTick(row.body.length)
     return true
   }
 
@@ -1796,61 +2173,96 @@ export class ContentIndex {
    * Returns false when eviction is disabled or even an empty table cannot fit
    * the incoming body; the caller then reports truncation.
    */
-  private async evictForBudget(cap: number, previous: number, incoming: number, incomingKey: string): Promise<boolean> {
+  private async evictForBudget(cap: number, previous: number, incoming: number, row: DocRow): Promise<boolean> {
     if (this.options.evict !== true) return false
     // Leave a small headroom so the next document does not immediately evict
     // again; the reserve is a fraction of the budget, never of one document.
     const reserve = Math.max(1, Math.ceil(cap * EVICT_HEADROOM_RATIO))
     const target = Math.max(0, cap - reserve)
-    const victims = this.db!.prepare('SELECT m.rowid AS rowid, m.doc_key AS docKey, m.path AS path, m.kind AS kind, length(d.body) AS n '
+    const kindId = docKindId(row.kind)
+    // The victim query must never evict the stale copy of the document being
+    // replaced: its body is subtracted from the budget as `previous` and it is
+    // deleted right after eviction. A never-indexed incoming path resolves to
+    // null/-1, so the NOT(...) clause then excludes nothing.
+    const victimSelect = 'SELECT m.rowid AS rowid, m.path_id AS pathId, m.kind_id AS kindId, length(d.body) AS n '
       + 'FROM docs_meta m JOIN docs d ON d.rowid = m.rowid '
-      + 'WHERE m.doc_key != ? ORDER BY m.mtime ASC, m.rowid ASC LIMIT 64')
-    const evictedPaths: string[] = []
+    const victims = kindId === DOC_KIND_FILE
+      ? this.db!.prepare(victimSelect + 'WHERE NOT (m.kind_id = 0 AND m.path_id = ?) ORDER BY m.mtime ASC, m.rowid ASC LIMIT 64')
+      : this.db!.prepare(victimSelect + 'WHERE NOT (m.kind_id = 1 AND m.session_key = ?) ORDER BY m.mtime ASC, m.rowid ASC LIMIT 64')
+    const incomingKey: number | string = kindId === DOC_KIND_FILE ? (this.existingPathId(row.path) ?? -1) : row.key
+    const evictedFileIds: number[] = []
     let guard = 0
     let removed = 0
     while (this.totalBytes - previous + incoming > target && guard++ < 1_000) {
-      const rows = victims.all(incomingKey) as Array<{ rowid?: number; docKey?: string; path?: string; kind?: string; n?: number }>
+      const rows = victims.all(incomingKey) as Array<{ rowid?: number; pathId?: number; kindId?: number; n?: number }>
       if (rows.length === 0) break
-      for (const row of rows) {
-        const path = String(row.path ?? '')
-        const kind = String(row.kind ?? '')
-        this.removeDocRow(Number(row.rowid ?? 0), kind, path, Number(row.n ?? 0), true)
-        if (kind === 'file' && path !== '') evictedPaths.push(path)
+      for (const victim of rows) {
+        const victimKind = Number(victim.kindId ?? DOC_KIND_FILE)
+        const victimPathId = Number(victim.pathId ?? 0)
+        this.removeDocRow(Number(victim.rowid ?? 0), victimKind, victimPathId, Number(victim.n ?? 0), true)
+        if (victimKind === DOC_KIND_FILE && victimPathId > 0) evictedFileIds.push(victimPathId)
         this.evictedDocs++
         removed++
         if ((removed & 15) === 0) await this.refreshBreathe(removed)
         if (this.totalBytes - previous + incoming <= target) break
       }
     }
-    this.deleteSymbolsBulk(evictedPaths)
+    this.deleteSymbolsByIds(evictedFileIds)
     return this.totalBytes - previous + incoming <= cap
   }
 
   /** Delete one stored document row and adjust every derived counter. */
-  private removeDocRow(rowid: number, kind: string, path: string, bodyBytes: number, skipSymbols = false): void {
+  private removeDocRow(rowid: number, kindId: number, pathId: number, bodyBytes: number, skipSymbols = false): void {
     if (rowid === 0) return
     this.db!.prepare('DELETE FROM docs WHERE rowid = ?').run(rowid)
     this.db!.prepare('DELETE FROM docs_meta WHERE rowid = ?').run(rowid)
     this.totalBytes = Math.max(0, this.totalBytes - bodyBytes)
-    if (kind === 'file') {
+    if (kindId === DOC_KIND_FILE) {
       this.fileDocs = Math.max(0, this.fileDocs - 1)
       if (this.oversizedDocs > 0 && this.options.maxFileBytes > 0 && bodyBytes > this.options.maxFileBytes) this.oversizedDocs--
-      if (!skipSymbols && path !== '') this.deleteSymbols(path)
+      // A bulk caller (eviction/sweep) deletes symbol rows in one batch first
+      // and releases the path then; deleting symbols per row here would turn
+      // the batched delete back into a scan per file.
+      if (!skipSymbols) this.deleteSymbolsById(pathId)
+    } else {
+      this.sessionDocs = Math.max(0, this.sessionDocs - 1)
+      this.releasePathId(pathId)
     }
   }
 
-  /** Body bytes stored for one document key (0 when it is not indexed). */
-  private storedBytes(key: string): number {
-    const row = this.db!.prepare(`SELECT COALESCE(length(d.body), 0) AS n
-      FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.doc_key = ?`).get(key) as { n?: number } | undefined
-    return Number(row?.n ?? 0)
+  /** Body bytes stored for one file path (0 when it is not indexed). */
+  private storedFileBytes(path: string): number {
+    if (this.db === null || path === '') return 0
+    try {
+      const row = this.db!.prepare(`SELECT COALESCE(length(d.body), 0) AS n
+        FROM docs_meta m JOIN docs d ON d.rowid = m.rowid JOIN paths p ON p.id = m.path_id
+        WHERE m.kind_id = 0 AND p.path = ?`).get(path) as { n?: number } | undefined
+      return Number(row?.n ?? 0)
+    } catch { return 0 }
+  }
+
+  /** Body bytes stored for one document being replaced (0 when not indexed). */
+  private storedBytes(row: DocRow): number {
+    if (row.kind === 'file') return this.storedFileBytes(row.path)
+    try {
+      const found = this.db!.prepare(`SELECT COALESCE(length(d.body), 0) AS n
+        FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.kind_id = 1 AND m.session_key = ?`).get(row.key) as { n?: number } | undefined
+      return Number(found?.n ?? 0)
+    } catch { return 0 }
   }
 
   private deleteDoc(key: string, skipSymbols = false): void {
-    const row = this.db!.prepare('SELECT m.rowid AS rowid, m.kind AS kind, m.path AS path, length(d.body) AS n '
-      + 'FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.doc_key = ?').get(key) as { rowid?: number; kind?: string; path?: string; n?: number } | undefined
+    if (this.db === null) return
+    const path = docKeyPath(key)
+    const row = path !== null
+      ? this.db!.prepare('SELECT m.rowid AS rowid, m.path_id AS pathId, m.kind_id AS kindId, length(d.body) AS n '
+          + 'FROM docs_meta m JOIN docs d ON d.rowid = m.rowid JOIN paths p ON p.id = m.path_id '
+          + 'WHERE m.kind_id = 0 AND p.path = ?').get(path) as { rowid?: number; pathId?: number; kindId?: number; n?: number } | undefined
+      : this.db!.prepare('SELECT m.rowid AS rowid, m.path_id AS pathId, m.kind_id AS kindId, length(d.body) AS n '
+          + 'FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.kind_id = 1 AND m.session_key = ?')
+          .get(key) as { rowid?: number; pathId?: number; kindId?: number; n?: number } | undefined
     if (row === undefined) return
-    this.removeDocRow(Number(row.rowid ?? 0), String(row.kind ?? ''), String(row.path ?? ''), Number(row.n ?? 0), skipSymbols)
+    this.removeDocRow(Number(row.rowid ?? 0), Number(row.kindId ?? DOC_KIND_FILE), Number(row.pathId ?? 0), Number(row.n ?? 0), skipSymbols)
     this.batchTick()
   }
 
@@ -1865,11 +2277,17 @@ export class ContentIndex {
     try {
       this.db!.prepare('DELETE FROM refs_meta WHERE path = ?').run(path)
     } catch { /* ignore */ }
-    const rows = this.db!.prepare('SELECT m.rowid AS rowid, m.kind AS kind, length(d.body) AS n '
-      + 'FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.path = ?').all(path) as Array<{ rowid?: number; kind?: string; n?: number }>
-    for (const row of rows) {
-      this.removeDocRow(Number(row.rowid ?? 0), String(row.kind ?? ''), path, Number(row.n ?? 0), skipSymbols)
+    const pathId = this.existingPathId(path)
+    if (pathId === null) {
+      this.batchTick()
+      return
     }
+    const rows = this.db!.prepare('SELECT m.rowid AS rowid, m.kind_id AS kindId, length(d.body) AS n '
+      + 'FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE m.path_id = ?').all(pathId) as Array<{ rowid?: number; kindId?: number; n?: number }>
+    for (const row of rows) {
+      this.removeDocRow(Number(row.rowid ?? 0), Number(row.kindId ?? DOC_KIND_FILE), pathId, Number(row.n ?? 0), skipSymbols)
+    }
+    this.releasePathId(pathId)
     this.batchTick()
   }
 
@@ -1904,10 +2322,14 @@ export class ContentIndex {
     return typeof generation === 'number' && Number.isFinite(generation) && generation >= stored
   }
 
-  /** Stored mtime for one file document key, undefined when not indexed. */
-  private storedMtime(key: string): number | undefined {
-    const row = this.db!.prepare('SELECT mtime FROM docs_meta WHERE doc_key = ?').get(key) as { mtime?: number } | undefined
-    return row?.mtime === undefined ? undefined : Number(row.mtime)
+  /** Stored mtime for one file path, undefined when it is not indexed. */
+  private storedFileMtime(path: string): number | undefined {
+    if (this.db === null || path === '') return undefined
+    try {
+      const row = this.db.prepare('SELECT m.mtime AS mtime FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE m.kind_id = 0 AND p.path = ?')
+        .get(path) as { mtime?: number } | undefined
+      return row?.mtime === undefined ? undefined : Number(row.mtime)
+    } catch { return undefined }
   }
 
   /**
@@ -2174,14 +2596,13 @@ export class ContentIndex {
         this.scanEntry(entry.path)
         if (entry.dir || entry.size <= 0 || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
         if (!this.entryIsIndexable(entry.path, entry.name, entry.size, entry.mtime)) continue
-        const key = 'file:' + entry.path
-        const existing = this.storedMtime(key)
+        const existing = this.storedFileMtime(entry.path)
         if (existing === entry.mtime) continue
         if (existing === undefined && this.options.maxFiles > 0 && this.fileDocs >= this.options.maxFiles) {
           this.state.truncated = true
           continue
         }
-        if (this.options.evict !== true && this.wouldExceed(entry.size, key)) {
+        if (this.options.evict !== true && this.wouldExceed(entry.size, entry.path)) {
           deferred.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
           continue
         }
@@ -2212,7 +2633,7 @@ export class ContentIndex {
     for (const entry of deferred) {
       if (generation !== this.generation) return
       if (this.refreshBudgetExceeded()) { this.addWarning('content-refresh-budget'); return }
-      if (this.options.evict !== true && this.wouldExceed(entry.size, 'file:' + entry.path)) { this.state.truncated = true; continue }
+      if (this.options.evict !== true && this.wouldExceed(entry.size, entry.path)) { this.state.truncated = true; continue }
       const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
       if (row === null) continue
       if (!await this.addDoc(row)) { this.state.truncated = true; continue }
@@ -2237,8 +2658,12 @@ export class ContentIndex {
    */
   private async fullFileSweep(generation: number): Promise<void> {
     const sweepStartedAt = Date.now()
+    // The sweep owns its own (much larger) wall-clock budget, see
+    // sweepBudgetExceeded(); the incremental 8 s clock no longer applies here.
+    this.sweepStartedAt = sweepStartedAt
     const meta = new Map<string, number>()
-    for (const row of this.db!.prepare("SELECT doc_key, mtime FROM docs_meta WHERE kind = 'file'").all() as Array<{ doc_key: string; mtime: number }>) meta.set(row.doc_key, row.mtime)
+    for (const row of this.db!.prepare("SELECT p.path AS path, m.mtime AS mtime FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE m.kind_id = 0")
+      .all() as Array<{ path: string; mtime: number }>) meta.set(row.path, row.mtime)
     const seen = new Set<string>()
     const deferred: FileCandidate[] = []
     let after = 0
@@ -2250,46 +2675,77 @@ export class ContentIndex {
     let candidates = 0
     let capped = false
     let complete = true
+    // One candidate classification shared by every entry: only entries a full
+    // build would also count reach candidates, which is what makes the sweep's
+    // coverage denominator comparable with the full build's (0.21.0).
+    const considerCandidate = (entry: FileCandidate, batch: FileCandidate[]): void => {
+      candidates++
+      if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) {
+        // Keep walking (cheap, no reads) so deletions are still detected and
+        // the coverage denominator stays exact.
+        capped = true
+        return
+      }
+      seen.add(entry.path)
+      if (meta.get(entry.path) === entry.mtime) {
+        // Unchanged and already stored: it still occupies one of the slots.
+        indexed++
+        this.countIndexed()
+        return
+      }
+      // With eviction enabled the budget check is advisory: addDoc evicts the
+      // oldest documents to fit instead of deferring the new one.
+      if (this.options.evict !== true && this.wouldExceed(entry.size, entry.path)) {
+        deferred.push(entry)
+        return
+      }
+      // Read first, replace only on success. A transient read failure must keep
+      // the document indexed by the previous refresh, not delete it.
+      batch.push(entry)
+    }
     const total = await this.engineEntries()
     if (generation !== this.generation) return
     this.beginPhase('files', total)
     for (;;) {
       if (generation !== this.generation) return
       if (this.engineRescanning()) throw new Error('engine re-scan started during content build')
-      if (this.refreshBudgetExceeded()) { complete = false; break }
+      if (this.sweepBudgetExceeded()) { complete = false; break }
       const page = await this.dumpPage(after, DUMP_PAGE)
       this.observeGeneration(page)
       const batch: FileCandidate[] = []
+      const sniffQueue: FileCandidate[] = []
       for (const entry of page.entries) {
         if ((++scanned & 0xff) === 0) await this.breathe()
         if (generation !== this.generation) return
         this.scanEntry(entry.path)
         if (entry.dir || entry.size <= 0 || contentSkipPath(entry.path, this.options.excludes ?? [])) continue
         if (!this.entryIsIndexable(entry.path, entry.name, entry.size, entry.mtime)) continue
-        candidates++
-        if (this.options.maxFiles > 0 && indexed >= this.options.maxFiles) {
-          // Keep walking (cheap, no reads) so deletions are still detected and
-          // the coverage denominator stays exact.
-          capped = true
+        // An extensionless unknown file needs the same 4 KiB sniff the full
+        // build runs before planning: a binary blob must not inflate the
+        // denominator (0.21.0 coverage fix). Unchanged stored files are known
+        // text already, so they skip the extra read.
+        const needsSniff = extname(entry.name) === ''
+          && !isKnownExtensionlessTextName(entry.name)
+          && this.options.textSniff === true
+          && meta.get(entry.path) !== entry.mtime
+        if (needsSniff) {
+          sniffQueue.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
           continue
         }
-        const key = 'file:' + entry.path
-        seen.add(key)
-        if (meta.get(key) === entry.mtime) {
-          // Unchanged and already stored: it still occupies one of the slots.
-          indexed++
-          this.countIndexed()
-          continue
+        considerCandidate({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size }, batch)
+      }
+      if (sniffQueue.length > 0) {
+        const rejected = await this.sniffSweepCandidates(sniffQueue, generation)
+        if (generation !== this.generation) return
+        for (const item of sniffQueue) {
+          if (rejected.has(item.path)) {
+            // Still present in the engine, but not a text candidate: keep its
+            // path out of the denominator while preserving deletion detection.
+            seen.add(item.path)
+            continue
+          }
+          considerCandidate(item, batch)
         }
-        // With eviction enabled the budget check is advisory: addDoc evicts the
-        // oldest documents to fit instead of deferring the new one.
-        if (this.options.evict !== true && this.wouldExceed(entry.size, key)) {
-          deferred.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
-          continue
-        }
-        // Read first, replace only on success. A transient read failure must
-        // keep the document indexed by the previous refresh, not delete it.
-        batch.push({ path: entry.path, name: entry.name, mtime: entry.mtime, size: entry.size })
       }
       const parallel = Math.max(1, Math.min(this.parallelPrefetchCount(), batch.length))
       for (let start = 0; start < batch.length; start += parallel) {
@@ -2323,26 +2779,28 @@ export class ContentIndex {
     // files are retried; otherwise a stale large entry would block new ones.
     const disappeared: string[] = []
     let deleted = 0
-    for (const key of meta.keys()) {
-      if (seen.has(key)) continue
-      this.deleteDoc(key, true)
-      const deletedPath = docKeyPath(key)
-      if (deletedPath !== null) disappeared.push(deletedPath)
+    for (const path of meta.keys()) {
+      if (seen.has(path)) continue
+      if (this.sweepBudgetExceeded()) { complete = false; break }
+      this.deleteDoc('file:' + path, true)
+      disappeared.push(path)
       deleted++
       if ((deleted & 63) === 0) await this.refreshBreathe(deleted)
     }
     this.deleteSymbolsBulk(disappeared)
     for (const entry of deferred) {
       if (generation !== this.generation) return
-      if (this.refreshBudgetExceeded()) { complete = false; break }
-      if (this.options.evict !== true && this.wouldExceed(entry.size, 'file:' + entry.path)) { this.state.truncated = true; continue }
+      if (this.sweepBudgetExceeded()) { complete = false; break }
+      if (this.options.evict !== true && this.wouldExceed(entry.size, entry.path)) { this.state.truncated = true; continue }
       const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
       if (row === null) continue
       if (!await this.addDoc(row)) { this.state.truncated = true; continue }
       this.countIndexed()
       await this.refreshBreathe()
     }
-    this.candidateFiles = candidates
+    // A partial sweep must not overwrite the exact denominator from the last
+    // complete build/sweep.
+    if (complete) this.candidateFiles = candidates
     if (complete && this.engineGeneration !== null) {
       this.writeFlag('engine_sweep_at', Date.now())
       this.writeFlag('engine_floor_at', sweepStartedAt - SWEEP_MTIME_MARGIN_MS)
@@ -2351,11 +2809,43 @@ export class ContentIndex {
     if (!complete) this.addWarning('content-refresh-budget')
   }
 
+  /**
+   * 4 KiB text sniff for sweep-only candidates (extensionless, unknown name,
+   * not stored yet). Mirrors the full build's up-front sniff: a read failure
+   * counts as a rejection so a vanished or binary file never becomes part of
+   * the coverage denominator. Rejections are cached per mtime in sniffRejects.
+   */
+  private async sniffSweepCandidates(queue: readonly FileCandidate[], generation: number): Promise<Set<string>> {
+    const rejected = new Set<string>()
+    const parallel = this.parallelPrefetchCount()
+    for (let start = 0; start < queue.length; start += parallel) {
+      if (generation !== this.generation) return rejected
+      const batch = queue.slice(start, start + parallel)
+      const verdicts = await Promise.all(batch.map(async candidate => {
+        try {
+          const head = await readFileRegion(candidate.path, 0, TEXT_SNIFF_BYTES)
+          return looksLikeText(head)
+        } catch {
+          return false
+        }
+      }))
+      for (let index = 0; index < batch.length; index++) {
+        const candidate = batch[index]
+        if (candidate === undefined || verdicts[index] === true) continue
+        rejected.add(candidate.path)
+        if (this.sniffRejects.size > 50_000) this.sniffRejects.clear()
+        this.sniffRejects.set(candidate.path, candidate.mtime)
+      }
+      await this.breathe()
+    }
+    return rejected
+  }
+
   /** Would storing a file of this size overflow the configured body budget? */
-  private wouldExceed(size: number, docKey?: string): boolean {
+  private wouldExceed(size: number, path?: string): boolean {
     const cap = this.options.maxTotalBytes ?? 0
     if (cap <= 0) return false
-    const previous = docKey === undefined ? 0 : this.storedBytes(docKey)
+    const previous = path === undefined ? 0 : this.storedFileBytes(path)
     return this.totalBytes - previous + Math.min(size, this.options.maxFileBytes) > cap
   }
 
@@ -2675,7 +3165,7 @@ export class ContentIndex {
           capped: Number(row.capped ?? 0),
         })
       }
-    } catch { /* a pre-0.20 schema is upgraded by ensureSessionColumns before this */ }
+    } catch { /* schema v4 creates the full sources shape; keep the map empty on damage */ }
     return known
   }
 
@@ -3033,95 +3523,72 @@ export class ContentIndex {
     } catch { /* refs are additive evidence; never fail a content build for them */ }
   }
 
-  /** Add the additive `sources.cwd` column without bumping the schema version. */
-  private ensureSourcesCwdColumn(): boolean {
-    if (this.db === null) return false
+  /** Stored id of one path spelling, or null when it was never indexed. */
+  private existingPathId(path: string): number | null {
+    if (this.db === null || path === '') return null
     try {
-      const columns = this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name?: string }>
-      if (columns.some(column => column.name === 'cwd')) return false
-      this.db.exec('ALTER TABLE sources ADD COLUMN cwd TEXT')
-      return true
-    } catch {
-      // An older/foreign database keeps path-only behavior.
-      return false
-    }
+      const row = this.db.prepare('SELECT id FROM paths WHERE path = ?').get(path) as { id?: number } | undefined
+      return row?.id === undefined ? null : Number(row.id)
+    } catch { return null }
   }
 
-  /** Add the additive docs_meta.format column without bumping the schema version. */
-  private ensureDocsMetaFormatColumn(): boolean {
-    if (this.db === null) return false
+  /**
+   * Stored id of one path spelling, inserting the spelling on first use.
+   * @returns the row id, or null when the path is empty or the database failed.
+   */
+  private pathId(path: string): number | null {
+    if (this.db === null || path === '') return null
     try {
-      const columns = this.db.prepare('PRAGMA table_info(docs_meta)').all() as Array<{ name?: string }>
-      if (columns.some(column => column.name === 'format')) return false
-      this.db.exec('ALTER TABLE docs_meta ADD COLUMN format TEXT')
-      return true
-    } catch {
-      // An older/foreign database keeps format-less hits.
-      return false
-    }
+      // 0.21.0: do NOT use `ON CONFLICT ... DO UPDATE ... RETURNING id` here.
+      // Interleaving a RETURNING upsert between FTS5 inserts makes SQLite flush
+      // the FTS5 pending hash per statement, so every document became its own
+      // segment (measured: 20,000 docs -> 20 segments and ~650-990 ms, vs
+      // 6 segments and ~310-540 ms with the insert/select pair below). A fresh
+      // build inserts almost every path, so lastInsertRowid answers the id
+      // without a second query; a conflict only happens for session documents
+      // that share a log path or a re-read file.
+      const inserted = this.db.prepare('INSERT INTO paths (path) VALUES (?) ON CONFLICT(path) DO NOTHING').run(path)
+      if (Number(inserted.changes) === 1) return Number(inserted.lastInsertRowid)
+      const row = this.db.prepare('SELECT id FROM paths WHERE path = ?').get(path) as { id?: number } | undefined
+      return row?.id === undefined ? null : Number(row.id)
+    } catch { return null }
   }
 
-  /** Create the additive symbols table; true when it was missing. */
-  private ensureSymbolsTables(): boolean {
-    if (this.db === null) return false
+  /**
+   * Drop one path row once neither docs_meta nor symbols reference it any
+   * more. Best effort: a leaked row only costs the path text, never a lookup,
+   * and a full rebuild starts from an empty table anyway.
+   */
+  private releasePathId(pathId: number | null): void {
+    if (this.db === null || pathId === null) return
     try {
-      const names = new Set(
-        (this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('symbols')").all() as Array<{ name?: string }>)
-          .map(row => row.name)
-          .filter((name): name is string => typeof name === 'string'),
-      )
-      const created = !names.has('symbols')
-      this.db.exec('CREATE TABLE IF NOT EXISTS symbols (path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL, language TEXT, scope TEXT)')
-      return created
-    } catch {
-      return false
-    }
+      this.db.prepare('DELETE FROM paths WHERE id = ? AND NOT EXISTS (SELECT 1 FROM docs_meta WHERE path_id = ?) AND NOT EXISTS (SELECT 1 FROM symbols WHERE path_id = ?)')
+        .run(pathId, pathId, pathId)
+    } catch { /* additive cleanup only */ }
   }
 
   /**
    * Create the symbols indexes after a full insert pass (or when an existing
    * database is missing them, e.g. a build interrupted before this step).
+   * Schema v4 indexes the normalized path id, so lookups by path never scan
+   * the wide symbol table for a path string.
    */
   private ensureSymbolIndexes(): void {
     if (this.db === null) return
     try {
-      this.db.exec('CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path)')
+      this.db.exec('CREATE INDEX IF NOT EXISTS symbols_path ON symbols(path_id, line)')
       this.db.exec('CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name)')
       this.symbolIndexesPending = false
       if (this.symbolsBulk) {
         // Apply the deletions deferred during the fresh insert pass now that
         // symbols_path exists (normally empty; a budget-limited build is the
-        // only producer). Batched by path IN (0.20.2 P0-4).
+        // only producer). Batched by path id (0.20.2 P0-4).
         const pending = [...this.symbolsBulkPurge]
         this.symbolsBulkPurge.clear()
         this.symbolsBulk = false
-        this.deleteSymbolsBulk(pending)
+        this.deleteSymbolsByIds(pending)
       }
     } catch { /* additive data layer: a failed index only slows lookups */ }
-  }
-
-  /**
-   * Add the additive session-log columns used by streaming/tail refreshes
-   * (sources.byte_len, last_line, title, capped) without bumping the schema
-   * version. Rows from an older database keep NULL and are re-read in full.
-   */
-  private ensureSessionColumns(): void {
-    if (this.db === null) return
-    try {
-      const columns = new Set((this.db.prepare('PRAGMA table_info(sources)').all() as Array<{ name?: string }>)
-        .map(column => column.name)
-        .filter((name): name is string => typeof name === 'string'))
-      const additive: Array<[string, string]> = [
-        ['byte_len', 'INTEGER'],
-        ['last_line', 'INTEGER'],
-        ['title', 'TEXT'],
-        ['capped', 'INTEGER'],
-      ]
-      for (const [name, type] of additive) {
-        if (columns.has(name)) continue
-        this.db.exec(`ALTER TABLE sources ADD COLUMN ${name} ${type}`)
-      }
-    } catch { /* an older/foreign database keeps the path/mtime behavior */ }
   }
 
   /** Open a build transaction; nested calls are ignored. */
@@ -3131,14 +3598,19 @@ export class ContentIndex {
       this.db.exec('BEGIN')
       this.inBatch = true
       this.batchOps = 0
+      this.batchBodyBytes = 0
     } catch { this.inBatch = false }
   }
 
-  /** Count one queued write; commit and start a new transaction at the limit. */
-  private batchTick(): void {
+  /**
+   * Count one queued write (and, for documents, its body length); commit and
+   * start a new transaction when either batch limit is reached.
+   */
+  private batchTick(bodyBytes = 0): void {
     if (!this.inBatch) return
     this.batchOps++
-    if (this.batchOps < BATCH_OPS) return
+    this.batchBodyBytes += bodyBytes
+    if (this.batchOps < BATCH_OPS && this.batchBodyBytes < BATCH_BODY_BYTES) return
     this.commitBatch()
     this.beginBatch()
   }
@@ -3148,6 +3620,7 @@ export class ContentIndex {
     if (!this.inBatch || this.db === null) return
     this.inBatch = false
     this.batchOps = 0
+    this.batchBodyBytes = 0
     try { this.db.exec('COMMIT') } catch { try { this.db.exec('ROLLBACK') } catch { /* already rolled back */ } }
   }
 
@@ -3156,6 +3629,7 @@ export class ContentIndex {
     if (!this.inBatch) return
     this.inBatch = false
     this.batchOps = 0
+    this.batchBodyBytes = 0
     const db = this.db
     if (db === null) return
     try { db.exec('ROLLBACK') } catch { /* the handle may already be closed */ }
@@ -3171,6 +3645,14 @@ export class ContentIndex {
   private fullSweepIntervalMs(): number {
     const configured = this.options.fullSweepIntervalMs
     return configured !== undefined && configured > 0 ? configured : DEFAULT_FULL_SWEEP_INTERVAL_MS
+  }
+
+  /** Full-sweep wall-clock budget; the test override may be 0 (abort at once). */
+  private fullSweepBudgetMs(): number {
+    const configured = this.options.fullSweepBudgetMs
+    return configured !== undefined && Number.isFinite(configured) && configured >= 0
+      ? Math.trunc(configured)
+      : FULL_SWEEP_BUDGET_MS
   }
 
   /** Effective session-log read cap; 0 means unlimited. */
@@ -3229,48 +3711,72 @@ export class ContentIndex {
   /** Extract and store symbols for one file while its text is in hand. */
   private writeFileSymbols(path: string, text: string, byteLength: number): void {
     const symbols = this.collectFileSymbols(path, text, byteLength)
-    if (symbols !== undefined) this.writeSymbols(path, symbols)
+    if (symbols === undefined) return
+    const pathId = this.pathId(path)
+    if (pathId !== null) this.writeSymbols(pathId, symbols)
   }
 
   /** Replace every stored symbol of one file (additive table; failures ignored). */
-  private writeSymbols(path: string, symbols: readonly CodeSymbol[]): void {
+  private writeSymbols(pathId: number, symbols: readonly CodeSymbol[]): void {
     if (this.db === null) return
     try {
-      if (!this.symbolsBulk) this.db.prepare('DELETE FROM symbols WHERE path = ?').run(path)
+      if (!this.symbolsBulk) this.db.prepare('DELETE FROM symbols WHERE path_id = ?').run(pathId)
       if (symbols.length === 0) return
-      const insert = this.db.prepare('INSERT INTO symbols (path, name, kind, line, language, scope) VALUES (?, ?, ?, ?, ?, ?)')
-      for (const symbol of symbols) insert.run(path, symbol.name, symbol.kind, symbol.line, symbol.language, symbol.scope ?? null)
+      const insert = this.db.prepare('INSERT INTO symbols (path_id, name, kind, line, language, scope) VALUES (?, ?, ?, ?, ?, ?)')
+      for (const symbol of symbols) {
+        const kind = encodeSymbolKind(symbol.kind)
+        if (kind < 0) continue
+        insert.run(pathId, symbol.name, kind, symbol.line, encodeSymbolLanguage(symbol.language), symbol.scope ?? null)
+      }
     } catch { /* symbols are additive evidence; never fail a content build for them */ }
   }
 
-  /** Remove every stored symbol of one deleted file. */
-  private deleteSymbols(path: string): void {
-    if (this.db === null || path === '') return
-    if (this.symbolsBulk) { this.symbolsBulkPurge.add(path); return }
-    try { this.db.prepare('DELETE FROM symbols WHERE path = ?').run(path) } catch { /* additive table only */ }
+  /** Remove every stored symbol of one deleted file and release its path row. */
+  private deleteSymbolsById(pathId: number): void {
+    if (this.db === null) return
+    if (this.symbolsBulk) { this.symbolsBulkPurge.add(pathId); return }
+    try {
+      this.db.prepare('DELETE FROM symbols WHERE path_id = ?').run(pathId)
+      this.releasePathId(pathId)
+    } catch { /* additive table only */ }
   }
 
   /**
-   * Remove the symbol rows of many deleted files with a bounded path IN list
-   * (0.20.2 P0-4). One DELETE per ~131 files instead of one full-scan DELETE
-   * per file: the old per-file loop dominated the eviction path of a
+   * Remove the symbol rows of many deleted files with a bounded path-id IN
+   * list (0.20.2 P0-4). One DELETE per ~131 files instead of one full-scan
+   * DELETE per file: the old per-file loop dominated the eviction path of a
    * saturated build.
    */
-  private deleteSymbolsBulk(paths: readonly string[]): void {
-    if (this.db === null || paths.length === 0) return
-    const unique = [...new Set(paths.filter(path => path !== ''))]
+  private deleteSymbolsByIds(pathIds: readonly number[]): void {
+    if (this.db === null || pathIds.length === 0) return
+    const unique = [...new Set(pathIds.filter(pathId => pathId > 0))]
     if (unique.length === 0) return
     if (this.symbolsBulk) {
-      for (const path of unique) this.symbolsBulkPurge.add(path)
+      for (const pathId of unique) this.symbolsBulkPurge.add(pathId)
       return
     }
     const chunk = 100
     try {
       for (let start = 0; start < unique.length; start += chunk) {
         const batch = unique.slice(start, start + chunk)
-        this.db.prepare('DELETE FROM symbols WHERE path IN (' + batch.map(() => '?').join(', ') + ')').run(...batch)
+        this.db.prepare('DELETE FROM symbols WHERE path_id IN (' + batch.map(() => '?').join(', ') + ')').run(...batch)
+        for (const pathId of batch) this.releasePathId(pathId)
       }
     } catch { /* additive table only */ }
+  }
+
+  /**
+   * Remove the symbol rows of many deleted files given their path spellings.
+   * Eviction collects stored paths; the normalized table needs their ids.
+   */
+  private deleteSymbolsBulk(paths: readonly string[]): void {
+    if (this.db === null || paths.length === 0) return
+    const ids: number[] = []
+    for (const path of new Set(paths)) {
+      const pathId = this.existingPathId(path)
+      if (pathId !== null) ids.push(pathId)
+    }
+    this.deleteSymbolsByIds(ids)
   }
 
   /** Drop every stored symbol after symbol indexing is turned off. */
@@ -3280,10 +3786,10 @@ export class ContentIndex {
   }
 
   /**
-   * Apply the symbol-index toggle and run the one-time fill when this database
-   * predates the additive table (or symbols were off when it was last built).
-   * Called on every incremental path, including the branches that end early,
-   * so a finish() can never record symbols=1 without the fill having run.
+   * Apply the symbol-index toggle and run the one-time fill when symbols were
+   * off when the database was last built (or the per-file cap changed). Called
+   * on every incremental path, including the branches that end early, so a
+   * finish() can never record symbols=1 without the fill having run.
    */
   private async syncSymbols(generation: number): Promise<void> {
     const wantSymbols = this.indexSymbolsEnabled() ? 1 : 0
@@ -3309,16 +3815,16 @@ export class ContentIndex {
 
   /**
    * One-time fill of the symbol table from the bodies already stored in the
-   * database: a database that predates the additive table (or one whose symbol
-   * rules changed) never has to walk the disk again. Bodies are paged so a
-   * 1 GB corpus is never loaded at once.
+   * database: a database whose symbol rules changed (cap, generated-code
+   * exclusion) or that has symbol indexing toggled on never has to walk the
+   * disk again. Bodies are paged so a 1 GB corpus is never loaded at once.
    */
   private async backfillSymbols(generation: number): Promise<void> {
     if (this.db === null || !this.indexSymbolsEnabled()) return
     const byteLimit = this.symbolMaxBytes()
     let total = 0
     try {
-      total = Number((this.db.prepare("SELECT COUNT(*) AS n FROM docs_meta WHERE kind = 'file'").get() as { n: number }).n)
+      total = Number((this.db.prepare('SELECT COUNT(*) AS n FROM docs_meta WHERE kind_id = 0').get() as { n: number }).n)
     } catch { return }
     this.beginPhase('files', total)
     this.beginBatch()
@@ -3327,9 +3833,9 @@ export class ContentIndex {
       if (generation !== this.generation) return
       let rows: Array<{ rowid?: number; path?: string; body?: string; chars?: number }>
       try {
-        rows = this.db.prepare(`SELECT m.rowid AS rowid, m.path AS path, d.body AS body, length(d.body) AS chars
-          FROM docs_meta m JOIN docs d ON d.rowid = m.rowid
-          WHERE m.kind = 'file' AND m.rowid > ? ORDER BY m.rowid LIMIT 25`).all(after) as typeof rows
+        rows = this.db.prepare(`SELECT m.rowid AS rowid, p.path AS path, d.body AS body, length(d.body) AS chars
+          FROM docs_meta m JOIN docs d ON d.rowid = m.rowid JOIN paths p ON p.id = m.path_id
+          WHERE m.kind_id = 0 AND m.rowid > ? ORDER BY m.rowid LIMIT 25`).all(after) as typeof rows
       } catch { return }
       if (rows.length === 0) break
       for (const row of rows) {
@@ -3401,8 +3907,8 @@ export class ContentIndex {
   docFormat(path: string): string | undefined {
     if (this.db === null || path === '') return undefined
     try {
-      const match = this.pathMatch('path', path)
-      const row = this.db.prepare('SELECT format FROM docs_meta WHERE ' + match.sql + ' AND format IS NOT NULL LIMIT 1').get(...match.values) as { format?: string | null } | undefined
+      const match = this.pathMatch('p.path', path)
+      const row = this.db.prepare('SELECT m.format AS format FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE m.kind_id = 0 AND ' + match.sql + ' AND m.format IS NOT NULL LIMIT 1').get(...match.values) as { format?: string | null } | undefined
       return typeof row?.format === 'string' && row.format !== '' ? row.format : undefined
     } catch { return undefined }
   }
@@ -3416,8 +3922,8 @@ export class ContentIndex {
   outline(path: string): CodeSymbol[] {
     if (this.db === null || path === '') return []
     try {
-      const match = this.pathMatch('path', path)
-      const rows = this.db.prepare('SELECT DISTINCT name, kind, line, language, scope FROM symbols WHERE ' + match.sql + ' ORDER BY line, name').all(...match.values) as SymbolRow[]
+      const match = this.pathMatch('p.path', path)
+      const rows = this.db.prepare('SELECT DISTINCT s.name AS name, s.kind AS kind, s.line AS line, s.language AS language, s.scope AS scope FROM symbols s JOIN paths p ON p.id = s.path_id WHERE ' + match.sql + ' ORDER BY s.line, s.name').all(...match.values) as SymbolRow[]
       return toSymbols(rows)
     } catch { return [] }
   }
@@ -3459,11 +3965,13 @@ export class ContentIndex {
       }
       // Exact and prefix matches use the name index: both are O(log n) and
       // cover the common cases (an agent usually names a symbol exactly).
-      collect(this.db.prepare('SELECT path, name, kind, line, language, scope FROM symbols WHERE name = ? ORDER BY path, line LIMIT ?')
+      const symbolSelect = 'SELECT p.path AS path, s.name AS name, s.kind AS kind, s.line AS line, s.language AS language, s.scope AS scope '
+        + 'FROM symbols s JOIN paths p ON p.id = s.path_id '
+      collect(this.db.prepare(symbolSelect + 'WHERE s.name = ? ORDER BY p.path, s.line LIMIT ?')
         .all(query, bounded) as Array<SymbolRow & { path?: string }>)
       if (matches.length < bounded) {
         const upper = query + '\uFFFF'
-        collect(this.db.prepare('SELECT path, name, kind, line, language, scope FROM symbols WHERE name > ? AND name < ? ORDER BY name, path, line LIMIT ?')
+        collect(this.db.prepare(symbolSelect + 'WHERE s.name > ? AND s.name < ? ORDER BY s.name, p.path, s.line LIMIT ?')
           .all(query, upper, bounded - matches.length) as Array<SymbolRow & { path?: string }>)
       }
       if (matches.length < bounded) {
@@ -3482,7 +3990,7 @@ export class ContentIndex {
         }
         if (rowids.length > 0) {
           const placeholders = rowids.map(() => '?').join(', ')
-          const rows = this.db.prepare('SELECT path, name, kind, line, language, scope FROM symbols WHERE rowid IN (' + placeholders + ')')
+          const rows = this.db.prepare(symbolSelect + 'WHERE s.rowid IN (' + placeholders + ')')
             .all(...rowids) as Array<SymbolRow & { path?: string }>
           rows.sort((left, right) => {
             const nameOrder = String(left.name ?? '').localeCompare(String(right.name ?? ''))
@@ -3529,7 +4037,8 @@ export class ContentIndex {
       const placeholders = batch.map(() => '?').join(', ')
       let rows: Array<SymbolRow & { path?: string }>
       try {
-        rows = this.db.prepare('SELECT path, name, kind, line, language, scope FROM symbols WHERE path IN (' + placeholders + ') ORDER BY path, line')
+        rows = this.db.prepare('SELECT p.path AS path, s.name AS name, s.kind AS kind, s.line AS line, s.language AS language, s.scope AS scope '
+          + 'FROM symbols s JOIN paths p ON p.id = s.path_id WHERE p.path IN (' + placeholders + ') ORDER BY p.path, s.line')
           .all(...batch.map(candidate => candidate.path)) as Array<SymbolRow & { path?: string }>
       } catch { break }
       for (const row of rows) {
@@ -3538,7 +4047,7 @@ export class ContentIndex {
         rowsFetched++
         charsRead += path.length + 24
           + (typeof row.name === 'string' ? row.name.length : 0)
-          + (typeof row.kind === 'string' ? row.kind.length : 0)
+          + (typeof row.kind === 'number' ? 8 : 0)
           + (typeof row.scope === 'string' ? row.scope.length : 0)
         if (rowsFetched > REPO_MAP_ROW_LIMIT || charsRead > REPO_MAP_CHAR_LIMIT) break
         const symbol = toSymbols([row])[0]
@@ -3591,8 +4100,15 @@ export class ContentIndex {
 
   /**
    * Symbol count per file path, restricted to the requested roots, ranked in
-   * SQL and cut to the repo-map candidate limit. Runs as one index-only
-   * aggregate per root spelling instead of loading every symbol row.
+   * SQL and cut to the repo-map candidate limit.
+   *
+   * Two plans keep this close to the v3 covering-index scan (which stored the
+   * path text in the symbol row): a narrow root probes the (path_id, line)
+   * index once per matching path, while a wide root (a whole workspace root or
+   * the entire index) streams the GROUP BY path_id aggregate in index order —
+   * no temp b-tree — and filters the joined path after it. Measured on 183 k
+   * symbols: whole-index root 29 ms (probe) vs 8 ms (aggregate); a 2.5 % root
+   * is 0.8 ms (probe) vs 5.6 ms (aggregate), hence the width threshold.
    */
   private symbolPathCounts(spellings: readonly string[]): Array<{ path: string; n: number }> {
     if (this.db === null) return []
@@ -3604,22 +4120,45 @@ export class ContentIndex {
       const previous = counts.get(row.path)
       if (previous === undefined || n > previous) counts.set(row.path, n)
     }
+    // Streaming aggregate: the subquery walks symbols in path_id order, so the
+    // grouping needs no sort; only the candidate page is ordered.
+    const aggregate = (lower: string | null, upper: string | null): void => {
+      const sql = 'SELECT p.path AS path, c.n AS n FROM (SELECT path_id, COUNT(*) AS n FROM symbols GROUP BY path_id) c '
+        + 'JOIN paths p ON p.id = c.path_id '
+      const rows = lower === null || upper === null
+        ? this.db!.prepare(sql + 'ORDER BY c.n DESC, p.path ASC LIMIT ?').all(REPO_MAP_CANDIDATE_LIMIT)
+        : this.db!.prepare(sql + 'WHERE p.path >= ? AND p.path < ? ORDER BY c.n DESC, p.path ASC LIMIT ?').all(lower, upper, REPO_MAP_CANDIDATE_LIMIT)
+      for (const row of rows as Array<{ path?: string; n?: number }>) record(row)
+    }
     if (spellings.length === 0) {
-      const rows = this.db.prepare('SELECT path, COUNT(*) AS n FROM symbols GROUP BY path ORDER BY n DESC, path ASC LIMIT ?')
-        .all(REPO_MAP_CANDIDATE_LIMIT) as Array<{ path?: string; n?: number }>
-      for (const row of rows) record(row)
-    } else {
-      // A path belongs to a root when it is the root itself or starts with the
-      // root followed by the platform separator; the second range excludes a
-      // sibling directory whose name merely shares the prefix ("/a" vs "/ab").
-      const range = this.db.prepare('SELECT path, COUNT(*) AS n FROM symbols WHERE path >= ? AND path < ? GROUP BY path ORDER BY n DESC LIMIT ?')
-      const equals = this.db.prepare('SELECT path, COUNT(*) AS n FROM symbols WHERE path = ? GROUP BY path LIMIT ?')
-      for (const spelling of spellings) {
-        const separator = WINDOWS_PATHS ? '\\' : '/'
-        const lower = spelling.endsWith(separator) ? spelling : spelling + separator
-        for (const row of range.all(lower, lower + '\uFFFF', REPO_MAP_CANDIDATE_LIMIT) as Array<{ path?: string; n?: number }>) record(row)
-        for (const row of equals.all(spelling, 1) as Array<{ path?: string; n?: number }>) record(row)
+      aggregate(null, null)
+      return [...counts.entries()].map(([path, n]) => ({ path, n }))
+    }
+    // A path belongs to a root when it is the root itself or starts with the
+    // root followed by the platform separator; the number range excludes a
+    // sibling directory whose name merely shares the prefix ("/a" vs "/ab").
+    const separator = WINDOWS_PATHS ? '\\' : '/'
+    const ranges = spellings.map(spelling => {
+      const lower = spelling.endsWith(separator) ? spelling : spelling + separator
+      return { spelling, lower, upper: lower + '\uFFFF' }
+    })
+    const totalPaths = Number((this.db.prepare('SELECT COUNT(*) AS n FROM paths').get() as { n?: number } | undefined)?.n ?? 0)
+    const wideThreshold = Math.max(1_000, Math.ceil(totalPaths * 0.1))
+    const range = this.db.prepare('SELECT p.path AS path, COUNT(*) AS n FROM symbols s JOIN paths p ON p.id = s.path_id WHERE p.path >= ? AND p.path < ? GROUP BY s.path_id ORDER BY n DESC LIMIT ?')
+    const equals = this.db.prepare('SELECT p.path AS path, COUNT(*) AS n FROM symbols s JOIN paths p ON p.id = s.path_id WHERE p.path = ? GROUP BY s.path_id LIMIT ?')
+    for (const item of ranges) {
+      let subtreePaths = 0
+      try {
+        subtreePaths = Number((this.db.prepare('SELECT COUNT(*) AS n FROM paths WHERE path >= ? AND path < ?')
+          .get(item.lower, item.upper) as { n?: number } | undefined)?.n ?? 0)
+      } catch { subtreePaths = 0 }
+      if (subtreePaths >= wideThreshold) {
+        aggregate(item.lower, item.upper)
+        for (const row of equals.all(item.spelling, 1) as Array<{ path?: string; n?: number }>) record(row)
+        continue
       }
+      for (const row of range.all(item.lower, item.upper, REPO_MAP_CANDIDATE_LIMIT) as Array<{ path?: string; n?: number }>) record(row)
+      for (const row of equals.all(item.spelling, 1) as Array<{ path?: string; n?: number }>) record(row)
     }
     return [...counts.entries()].map(([path, n]) => ({ path, n }))
   }
@@ -3665,7 +4204,8 @@ export class ContentIndex {
       for (let start = 0; start < spellings.length; start += chunk) {
         const batch = spellings.slice(start, start + chunk)
         const placeholders = batch.map(() => '?').join(', ')
-        const rows = this.db.prepare("SELECT path, mtime FROM docs_meta WHERE kind = 'file' AND path IN (" + placeholders + ')')
+        const rows = this.db.prepare('SELECT p.path AS path, m.mtime AS mtime FROM docs_meta m JOIN paths p ON p.id = m.path_id '
+          + 'WHERE m.kind_id = 0 AND p.path IN (' + placeholders + ')')
           .all(...batch) as Array<{ path?: string; mtime?: number }>
         for (const row of rows) {
           if (typeof row.path !== 'string' || row.path === '' || typeof row.mtime !== 'number') continue
@@ -3712,7 +4252,8 @@ export class ContentIndex {
     }
     try {
       const placeholders = spellings.map(() => '?').join(', ')
-      const rows = this.db.prepare('SELECT path, format FROM docs_meta WHERE path IN (' + placeholders + ') AND format IS NOT NULL').all(...spellings) as Array<{ path?: string; format?: string | null }>
+      const rows = this.db.prepare('SELECT p.path AS path, m.format AS format FROM docs_meta m JOIN paths p ON p.id = m.path_id '
+        + 'WHERE m.kind_id = 0 AND p.path IN (' + placeholders + ') AND m.format IS NOT NULL').all(...spellings) as Array<{ path?: string; format?: string | null }>
       for (const row of rows) {
         if (typeof row.path !== 'string' || row.path === '' || typeof row.format !== 'string' || row.format === '') continue
         formats.set(row.path, row.format)
@@ -3781,11 +4322,11 @@ export class ContentIndex {
     try {
       let row: { mtime?: number } | undefined
       if (kind === 'file') {
-        const match = this.pathMatch('path', path)
-        row = this.db.prepare('SELECT mtime FROM docs_meta WHERE kind = ? AND ' + match.sql + ' LIMIT 1').get(kind, ...match.values) as { mtime?: number } | undefined
+        const match = this.pathMatch('p.path', path)
+        row = this.db.prepare('SELECT m.mtime AS mtime FROM docs_meta m JOIN paths p ON p.id = m.path_id WHERE m.kind_id = 0 AND ' + match.sql + ' LIMIT 1').get(...match.values) as { mtime?: number } | undefined
       } else {
         row = this.db.prepare(`SELECT m.mtime AS mtime FROM docs_meta m JOIN docs d ON d.rowid = m.rowid
-            WHERE m.kind = 'session' AND d.session_id = ? AND d.message_id = ? LIMIT 1`).get(basename(dirname(path)), messageKey) as { mtime?: number } | undefined
+            WHERE m.kind_id = 1 AND d.session_id = ? AND d.message_id = ? LIMIT 1`).get(basename(dirname(path)), messageKey) as { mtime?: number } | undefined
       }
       return row?.mtime === undefined ? undefined : Number(row.mtime)
     } catch {
@@ -4324,6 +4865,42 @@ function scanZstdFrames(buffer: Buffer): ZstdFrameScan {
   return { frames }
 }
 
+/**
+ * Read one unsigned SQLite varint (FTS5 structure records only ever carry
+ * small level/segment counts, so a 32-bit result is enough).
+ * @returns the value and the offset just past it, or null on a truncated blob.
+ */
+function readFtsVarint(data: Uint8Array, start: number): { value: number; next: number } | null {
+  let value = 0
+  let shift = 0
+  for (let offset = start; offset < data.length && shift < 32; shift += 7) {
+    const byte = data[offset++]!
+    value |= (byte & 0x7f) << shift
+    if ((byte & 0x80) === 0) return { value, next: offset }
+  }
+  return null
+}
+
+/**
+ * Exact FTS5 segment count from the serialized structure record, or 0 when the
+ * table has no structure record yet, or null when the blob does not decode.
+ * Layout (SQLite fts5_index.c): 4-byte configuration cookie, an optional
+ * 4-byte V2 marker for contentless_delete tables, then varint nLevel and
+ * varint nSegment. The row id (10) and this prefix are stable across SQLite
+ * releases; a future change only degrades diagnostics/merge gating, never
+ * query correctness.
+ */
+function ftsStructureSegments(block: unknown): number | null {
+  if (!(block instanceof Uint8Array)) return 0
+  let offset = 4
+  if (block.length >= 8 && block[4] === 0xff && block[5] === 0x00 && block[6] === 0x00 && block[7] === 0x01) offset = 8
+  const level = readFtsVarint(block, offset)
+  if (level === null) return null
+  const segments = readFtsVarint(block, level.next)
+  if (segments === null) return null
+  return segments.value
+}
+
 /** Read one byte range of a file without loading the rest of it. */
 async function readFileRegion(path: string, start: number, end: number): Promise<Buffer> {
   if (end <= start) return Buffer.alloc(0)
@@ -4505,12 +5082,12 @@ function markRefMeta(previous: string | null): string {
   return JSON.stringify({ missing: true, missingAt: Date.now() })
 }
 
-/** One raw symbol row as stored in the additive symbols table. */
+/** One raw symbol row as stored in the v4 symbols table (integer codes). */
 interface SymbolRow {
   name?: string
-  kind?: string
+  kind?: number
   line?: number
-  language?: string
+  language?: number | null
   scope?: string | null
 }
 
@@ -4518,8 +5095,10 @@ interface SymbolRow {
 function toSymbols(rows: readonly SymbolRow[]): CodeSymbol[] {
   const symbols: CodeSymbol[] = []
   for (const row of rows) {
-    if (typeof row.name !== 'string' || row.name === '' || typeof row.kind !== 'string' || typeof row.line !== 'number') continue
-    const symbol: CodeSymbol = { name: row.name, kind: row.kind as CodeSymbol['kind'], line: row.line, language: typeof row.language === 'string' ? row.language : '' }
+    if (typeof row.name !== 'string' || row.name === '' || typeof row.line !== 'number') continue
+    const kind = decodeSymbolKind(row.kind)
+    if (kind === undefined) continue
+    const symbol: CodeSymbol = { name: row.name, kind, line: row.line, language: decodeSymbolLanguage(row.language) }
     if (typeof row.scope === 'string' && row.scope !== '') symbol.scope = row.scope
     symbols.push(symbol)
   }
@@ -4532,6 +5111,37 @@ function docKeyPath(key: string): string | null {
 }
 
 const WINDOWS_PATHS = process.platform === 'win32'
+
+/** Whether one table has every required column (schema probes only). */
+function tableHasColumn(db: DatabaseSync, table: string, required: readonly string[]): boolean {
+  try {
+    const columns = new Set(
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>)
+        .map(column => column.name)
+        .filter((name): name is string => typeof name === 'string'),
+    )
+    return required.every(name => columns.has(name))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether an already-versioned database has the exact v4 path-normalized
+ * shape. Version alone is not enough: a v3 database whose `user_version` was
+ * bumped (or a v4 file damaged by a partial migration/drop) would otherwise
+ * fail halfway through the first write. A shape mismatch rebuilds, never
+ * migrates.
+ */
+function hasV4Shape(db: DatabaseSync): boolean {
+  return tableHasColumn(db, 'paths', ['id', 'path'])
+    && tableHasColumn(db, 'docs_meta', ['rowid', 'path_id', 'mtime', 'kind_id', 'node_key', 'format', 'session_key'])
+    && tableHasColumn(db, 'symbols', ['path_id', 'name', 'kind', 'line', 'language', 'scope'])
+    // The v3 spellings must be gone: their presence means an unmigrated file.
+    && !tableHasColumn(db, 'docs_meta', ['doc_key'])
+    && !tableHasColumn(db, 'docs_meta', ['path'])
+    && !tableHasColumn(db, 'docs_meta', ['kind'])
+}
 
 /**
  * Canonical real path so every comparison uses one spelling: a symlinked

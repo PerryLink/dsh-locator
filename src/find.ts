@@ -11,7 +11,26 @@ import type { ContentCount, ContentSearchOptions } from './content-search.ts'
 import { encodeSessionRef, fileRef, freshnessFor, sha256File, type RefFreshness, type RefPermissions, type RefProvenance } from './refs.ts'
 import { withinRoots } from './reveal.ts'
 import type { LocatorRuntime } from './runtime.ts'
-import { applyOutputBudget, rerankHits, type Scope } from './scope.ts'
+import {
+  applyOutputBudget,
+  DEFAULT_OUTPUT_BUDGET_CHARS,
+  ERROR_INFO_SCHEMA,
+  errorInfoOf,
+  evidenceLimitOf,
+  evidenceVisible,
+  fetchNamePage,
+  outputBudgetOf,
+  pageAdvance,
+  pageSize,
+  rerankHits,
+  selectPage,
+  TRUNCATION_SCHEMA,
+  WARNING_HINTS_SCHEMA,
+  warningHintsOf,
+  type HitDetail,
+  type Scope,
+} from './scope.ts'
+import { isSlowFilesystemPath } from './combined.ts'
 
 const HIT = {
   type: 'object',
@@ -133,16 +152,16 @@ export const CONTENT_STATE_SCHEMA = {
   },
 } as const
 
-/** One content hit after evidence metadata and freshness labeling. */
+/** One content hit after evidence metadata (evidence is absent on surplus/compact rows). */
 export type EnrichedContentHit = ContentHit & {
   ref: string
   hash?: string
   seq?: number
   eventRef?: string
-  provenance: RefProvenance
-  freshness: RefFreshness
-  permissions: RefPermissions
-  refStatus: RefFreshness['state']
+  provenance?: RefProvenance
+  freshness?: RefFreshness
+  permissions?: RefPermissions
+  refStatus?: RefFreshness['state']
 }
 
 /** Files bigger than this are never re-read just to add context lines. */
@@ -150,23 +169,58 @@ const CONTEXT_MAX_FILE_BYTES = 4 * 1024 * 1024
 /** Upper bound for the contextLines argument; keeps one hit a few KB at most. */
 export const CONTEXT_MAX_LINES = 10
 
+/** Options for enrichContentHits; every field is additive. */
+export interface EnrichContentHitsOptions {
+  /** full (default) attaches evidence; compact attaches only the cheap identity/ref fields. */
+  detail?: HitDetail
+  /** Evidence-bearing rows in full mode (default 10). */
+  evidenceLimit?: number
+  /** Compute a sha256 hash per file hit (default false; slow/network mounts are skipped). */
+  includeHash?: boolean
+  /** Query scope: file-hit visibility is workspace only for workspace-scoped body searches. */
+  scope?: 'workspace' | 'all'
+  /** Test seam: hash implementation (defaults to refs.sha256File). */
+  hashFile?: (path: string, maxBytes?: number) => Promise<string | null>
+  /** Test seam: slow/network filesystem classifier (defaults to combined.isSlowFilesystemPath). */
+  isSlowPath?: (path: string) => boolean
+}
+
 /**
- * Attach citable evidence metadata to content hits. Hashing is capped per file
- * so a tool call cannot read a huge artifact just to label a hit.
+ * Attach citable evidence metadata to content hits.
+ *
+ * Hashing is off by default and skipped on slow/network filesystems, so a tool
+ * call no longer reads every hit file. In full mode only the first
+ * evidenceLimit rows pay for stat/hash (later rows keep a path-only ref);
+ * compact mode never pays for evidence at all.
+ * @param hits - raw content hits.
+ * @param content - content store providing indexed mtimes and session-event refs.
+ * @param callerCwd - caller workspace, when the embedder has an Agent session.
+ * @param options - detail/evidenceLimit/includeHash plus test seams.
+ * @returns hits ready for the tool output.
  */
 export async function enrichContentHits(
   hits: readonly ContentHit[],
   content: ContentIndex,
   callerCwd: string | undefined,
+  options: EnrichContentHitsOptions = {},
 ): Promise<EnrichedContentHit[]> {
-  const visibility = callerCwd === undefined ? 'roots' : 'workspace'
+  const detail: HitDetail = options.detail === 'compact' ? 'compact' : 'full'
+  const evidenceLimit = evidenceLimitOf(detail, options.evidenceLimit)
+  const includeHash = options.includeHash === true
+  const scope = options.scope ?? 'workspace'
+  const visibility = scope === 'all' || callerCwd === undefined ? 'roots' as const : 'workspace' as const
+  const hashFile = options.hashFile ?? sha256File
+  const slowPath = options.isSlowPath ?? isSlowFilesystemPath
+  const wantsEvidence = (index: number): boolean => evidenceVisible(index, detail, evidenceLimit)
   // One query per involved session attaches the event seq/ref that the same
   // content build stored for each indexed message. Older/embedder fakes may not
   // implement the lookup; those hits simply keep their canonical session ref.
   const eventRefsBySession = new Map<string, Map<string, { seq: number; ref: string }>>()
   if (typeof content.sessionEventRefs === 'function') {
     const idsBySession = new Map<string, string[]>()
-    for (const hit of hits) {
+    for (let index = 0; index < hits.length; index++) {
+      const hit = hits[index]!
+      if (!wantsEvidence(index)) continue
       if (hit.kind !== 'session' || hit.sessionId === undefined || hit.messageId === undefined) continue
       const ids = idsBySession.get(hit.sessionId)
       if (ids === undefined) idsBySession.set(hit.sessionId, [hit.messageId])
@@ -176,9 +230,12 @@ export async function enrichContentHits(
       eventRefsBySession.set(sessionId, content.sessionEventRefs(sessionId, messageIds))
     }
   }
-  return await Promise.all(hits.map(async hit => {
+  return await Promise.all(hits.map(async (hit, index) => {
     const observedAt = Date.now()
+    const withEvidence = wantsEvidence(index)
     if (hit.kind === 'session' && hit.sessionId !== undefined) {
+      const ref = encodeSessionRef(hit.sessionId)
+      if (!withEvidence) return { ...hit, ref }
       // The output schema declares indexedAt as an integer; derived/SQLite ages
       // can be fractional, so truncate here like ref-tools.ts does.
       const indexedAtRaw = content.indexedMtime('session', hit.path, hit.messageId)
@@ -190,26 +247,36 @@ export async function enrichContentHits(
       return {
         ...hit,
         ...(event === undefined ? {} : { seq: event.seq, eventRef: event.ref }),
-        ref: encodeSessionRef(hit.sessionId),
+        ref,
         provenance: { origin: 'index' as const, sessionId: hit.sessionId, ...(hit.messageId === undefined ? {} : { messageId: hit.messageId }), ...(indexedAt === undefined ? {} : { indexedAt }) },
         freshness,
         permissions: { read: 'allowed' as const, visibility: 'session' as const, reason: 'session messages are scoped to the caller workspace' },
         refStatus: freshness.state,
       }
     }
+    const line = typeof hit.line === 'number' && hit.line > 0 ? hit.line : undefined
+    if (!withEvidence) {
+      // Surplus/compact rows keep only their citable identity ref: no stat and
+      // no hash, so a long page cannot turn into one read per hit.
+      const refInput: { path: string; line?: number } = { path: hit.path }
+      if (line !== undefined) refInput.line = line
+      return { ...hit, ref: fileRef(refInput) }
+    }
     const indexedAtRaw = content.indexedMtime('file', hit.path)
     const indexedAt = indexedAtRaw === undefined ? undefined : Math.trunc(indexedAtRaw)
     let currentMtime: number | undefined
     let size: number | undefined
     try { const info = await stat(hit.path); currentMtime = info.mtimeMs; size = info.size } catch { currentMtime = undefined }
-    const hash = currentMtime === undefined ? null : await sha256File(hit.path, 2 * 1024 * 1024)
+    const hash = includeHash && currentMtime !== undefined && !slowPath(hit.path)
+      ? await hashFile(hit.path, 2 * 1024 * 1024)
+      : null
     const refInput: { path: string; mtime?: number; size?: number; sha256?: string; line?: number } = { path: hit.path }
     if (currentMtime !== undefined) refInput.mtime = currentMtime
     if (size !== undefined) refInput.size = size
     if (hash !== null) refInput.sha256 = hash
     // Carry the hit line into the ref so locator_cite detail mode can quote the
     // exact matched source line instead of the file head.
-    if (typeof hit.line === 'number' && hit.line > 0) refInput.line = hit.line
+    if (line !== undefined) refInput.line = line
     const freshness = freshnessFor(indexedAt, currentMtime, observedAt)
     return {
       ...hit,
@@ -244,6 +311,12 @@ export interface ContentRequest {
   pathPrefix?: string
   /** File documents only: used by the public HTTP API, which has no caller session identity. */
   filesOnly?: boolean
+  /** Hit detail: compact skips evidence enrichment entirely (default full). */
+  detail?: HitDetail
+  /** Evidence-bearing rows in full mode (default 10). */
+  evidenceLimit?: number
+  /** Compute a sha256 per file hit (default false; slow/network filesystems are skipped). */
+  includeHash?: boolean
 }
 
 /**
@@ -314,6 +387,8 @@ export type ContentRequestResult =
       scopeFallback?: string
       /** True when a 2-code-point query was answered by the bounded fallback. */
       shortQueryFallback?: boolean
+      /** True when a workspace-scoped first page came back empty: pass scope "all" to widen. */
+      workspaceEmpty?: boolean
     }
   | {
       ok: false
@@ -423,11 +498,33 @@ export async function runContentSearchRequest(
   if (result.error !== undefined) {
     return { ok: false, error: result.error, warnings: result.warnings, hits: [], state, scope }
   }
-  const hits = await enrichContentHits(result.hits, content, callerCwd)
+  // File-hit visibility mirrors where the rows actually came from: a workspace
+  // cwd inside the roots is workspace-scoped, every other case searched all
+  // roots (cwd outside the index or an explicit scope "all").
+  const enrichmentScope: 'workspace' | 'all' = scope === 'workspace' && cwdIsIndexed ? 'workspace' : 'all'
+  const hits = await enrichContentHits(result.hits, content, callerCwd, {
+    detail: request.detail ?? 'full',
+    // Embedders that predate the evidence budget (locator_explore) keep the
+    // historical all-rows enrichment; the tools pass an explicit limit.
+    evidenceLimit: request.evidenceLimit === undefined ? Number.POSITIVE_INFINITY : request.evidenceLimit,
+    includeHash: request.includeHash === true,
+    scope: enrichmentScope,
+  })
   const fallbackNote = scopeFallback
     ?? (scope === 'workspace' && callerSessionId !== undefined && !cwdIsIndexed
       ? 'cwd-not-indexed; files searched across configured roots'
       : undefined)
+  // A workspace page that is empty because the caller narrowed to a cwd with no
+  // body matches must say so: the caller can pass scope "all" to widen. This
+  // deliberately does not widen behind the caller's back (the content page is
+  // already cwd-filtered, so there is nothing to refill from).
+  const workspaceEmpty = scope === 'workspace'
+    && cwdIsIndexed
+    && cwdNarrowed
+    && requestedSessionId === undefined
+    && offset === 0
+    && scopeFallback === undefined
+    && result.hits.length === 0
   return {
     ok: true,
     hits,
@@ -437,6 +534,7 @@ export async function runContentSearchRequest(
     scope,
     ...(fallbackNote === undefined ? {} : { scopeFallback: fallbackNote }),
     ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
+    ...(workspaceEmpty ? { workspaceEmpty: true } : {}),
   }
 }
 
@@ -509,15 +607,19 @@ export function makeFindTool(
       '',
       'Content is substring search over an FTS5 trigram index: every term must be at least 3 characters. A 2-character query (ai, js, 索引) falls back to a bounded substring scan when the plugin enables contentShortQueryFallback (default on) and returns a shortQueryFallback marker; otherwise it is rejected with content-query-too-short instead of scanning the whole corpus. Text files are capped by contentMaxFileBytes; session logs are decompressed from $DSH_HOME/sessions.',
       '',
-      'By default it searches the caller workspace: the current session for session hits and files under the caller cwd when that cwd is inside an indexed root. If the cwd is outside every indexed root, file hits cover the indexed roots (there is no workspace subset to restrict to); pass scope "all" to search every indexed file (session hits still stay limited to the caller workspace unless the operator enables cross-workspace session reads). Every hit carries a citable ref plus provenance, hash, freshness metadata and a short refStatus.',
+      'By default it searches the caller workspace: the current session for session hits and files under the caller cwd when that cwd is inside an indexed root. If the cwd is outside every indexed root, file hits cover the indexed roots (there is no workspace subset to restrict to); pass scope "all" to search every indexed file (session hits still stay limited to the caller workspace unless the operator enables cross-workspace session reads). Every returned row carries a citable ref; the first evidenceLimit rows (default 10) also carry provenance, freshness and permissions, and hashing is opt-in via includeHash.',
     ].join('\n'),
     parameters: {
       query: { type: 'string', required: true, description: 'Words or a phrase to find in file/session content (or a name query in mode names).' },
       mode: { type: 'string', enum: ['names', 'content', 'count'], description: 'content (default) searches bodies; names searches the file-name index; count only returns the match count.' },
-      limit: { type: 'integer', description: 'Maximum hits (default 30) for content mode / names mode; clamped to the configured maximum.' },
+      limit: { type: 'integer', description: 'Maximum hits (default 8) for content mode / names mode; the final page is always sliced to this size.' },
       headLimit: { type: 'integer', description: 'Explicit page-size cap (alias of limit, min of both is used).' },
-      offset: { type: 'integer', description: 'Skip this many ranked hits (pagination). Use nextOffset from the previous page.' },
+      offset: { type: 'integer', description: 'Skip this many ranked hits (pagination). Use nextOffset from the previous page; pages never skip a hit the budget deferred.' },
       contextLines: { type: 'integer', description: 'Lines of surrounding file content to include with file hits (0-10, default 0).' },
+      budgetChars: { type: 'integer', description: 'Soft cap on the serialized result size in characters (default 8000; 0 disables the budget and its trimming).' },
+      detail: { type: 'string', enum: ['full', 'compact'], description: 'full (default) keeps ref/provenance/freshness/permissions evidence; compact keeps only kind/path/name/title/snippet/line/score/ref and drops hash/provenance/freshness/permissions/refStatus.' },
+      evidenceLimit: { type: 'integer', description: 'Evidence-bearing rows in full mode (default 10, at most 50); later rows keep the cheap fields and their ref.' },
+      includeHash: { type: 'boolean', description: 'Compute a sha256 hash per file hit (default false; slow/network filesystems are always skipped).' },
       matchMode: { type: 'string', enum: ['normal', 'extended'], description: 'normal: whitespace-separated substring terms. extended: one literal phrase with Notepad++ escapes (\\n, \\r, \\t, \\0, \\xNN, \\\\).' },
       caseSensitive: { type: 'boolean', description: 'Match letter case exactly.' },
       wholeWord: { type: 'boolean', description: 'Only match whole words ([A-Za-z0-9_] boundaries; CJK counts as non-word).' },
@@ -536,11 +638,19 @@ export function makeFindTool(
           query: { type: 'string' },
           mode: { type: 'string', enum: ['names', 'content', 'count'] },
           offset: { type: 'integer' },
-          total: { type: 'integer', description: 'Engine name-index total (mode names).' },
-          totalCount: { type: 'integer', description: 'Total matches when the index knows it (engine total or content count).' },
+          total: { type: 'integer', description: 'Primary match count: names mode is the name-index total across configured roots; content/count modes are the content count when known.' },
+          totalCount: { type: 'integer', description: 'Alias of total: total matches when the index knows them (engine total or content count).' },
+          totalAllRoots: {
+            type: 'integer',
+            description: 'Names mode only: the global match count across every configured root. Present when the cwd/pathPrefix filter narrowed the result, since total is then not a scope count.',
+          },
           indexing: { type: 'boolean', description: 'The name index is still scanning (mode names; results are partial).' },
           nextOffset: { type: 'integer', description: 'Offset of the next page; absent when this page is the last one.' },
           truncated: { type: 'boolean', description: 'More hits exist beyond this result (page, scope or budget).' },
+          hasMore: { type: 'boolean', description: 'True when paging further can still return rows (same as truncated).' },
+          consumed: { type: 'integer', description: 'Raw store rows this page consumed (nextOffset - offset).' },
+          truncation: TRUNCATION_SCHEMA,
+          detail: { type: 'string', enum: ['full', 'compact'], description: 'Present when the caller requested compact (evidence-free) hits.' },
           hits: { type: 'array', items: HIT },
           budget: BUDGET_SCHEMA,
           count: {
@@ -552,7 +662,18 @@ export function makeFindTool(
               limit: { type: 'integer' },
             },
           },
+          contentCount: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'Alias of count: the content count block (value/kind/limit) for content and count modes.',
+            properties: {
+              value: { type: 'integer' },
+              kind: { type: 'string', enum: ['exact', 'bounded', 'unknown'] },
+              limit: { type: 'integer' },
+            },
+          },
           warnings: { type: 'array', items: { type: 'string' } },
+          warningHints: WARNING_HINTS_SCHEMA,
           state: CONTENT_STATE_SCHEMA,
           scope: { type: 'string', enum: ['workspace', 'all'] },
           scopeFallback: { type: 'string' },
@@ -561,29 +682,41 @@ export function makeFindTool(
             description: 'True when a 2-character query was answered by the bounded short-query fallback (the page is approximate).',
           },
           error: { type: 'string' },
+          errorInfo: ERROR_INFO_SCHEMA,
         },
       },
       render: (_args, value) => {
         const v = value as {
           ok: boolean
+          query?: string
           mode?: string
           hits?: Array<{ kind: string; title?: string; name?: string; snippet?: string; path?: string; line?: number; sessionId?: string; messageId?: string; ref?: string; refStatus?: string; freshness?: { state?: string }; context?: string[]; contextStart?: number; permissions?: { read?: string } }>
           offset?: number
+          total?: number
           totalCount?: number
+          totalAllRoots?: number
           nextOffset?: number
           truncated?: boolean
+          hasMore?: boolean
+          consumed?: number
+          truncation?: { reason?: string; dropped?: number; consumed?: number }
+          detail?: string
           budget?: { dropped?: number; limitChars?: number; usedChars?: number }
           scope?: string
           scopeFallback?: string
           shortQueryFallback?: boolean
           count?: { value: number; kind: 'exact' | 'bounded' | 'unknown' }
+          contentCount?: { value: number; kind: 'exact' | 'bounded' | 'unknown' }
           warnings?: string[]
+          warningHints?: Record<string, string>
           error?: string
-          state?: ContentState
+          errorInfo?: { code?: string; hint?: string }
+          state?: ContentState & { progress?: { indexed?: number; scanned?: number; total?: number } }
         }
         if (!v.ok) {
-          const detail = v.warnings !== undefined && v.warnings.length > 0 ? ' (' + [...new Set(v.warnings)].join(', ') + ')' : ''
-          return [{ type: 'text', text: 'locator_find failed: ' + (v.error ?? 'unknown') + detail }]
+          const warnings = v.warnings !== undefined && v.warnings.length > 0 ? ' (' + [...new Set(v.warnings)].join(', ') + ')' : ''
+          const hint = v.errorInfo?.hint === undefined ? '' : ' — ' + v.errorInfo.hint
+          return [{ type: 'text', text: 'locator_find failed: ' + (v.error ?? 'unknown') + warnings + hint }]
         }
         const mode = v.mode ?? 'content'
         const lines = (v.hits ?? []).map((hit, index) => {
@@ -598,51 +731,89 @@ export function makeFindTool(
             : '\n' + hit.context.map((line, lineIndex) => '   ' + String((hit.contextStart ?? 1) + lineIndex) + ': ' + line).join('\n')
           return String(index + 1) + '. [' + hit.kind + '] ' + label + ' — ' + (hit.snippet ?? '') + '\n   ' + (hit.path ?? '') + (typeof hit.line === 'number' ? ' (line ' + String(hit.line) + ')' : '') + ref + evidence + readDenied + context
         })
-        const count = v.count === undefined
+        const contentCount = v.contentCount ?? v.count
+        const count = contentCount === undefined
           ? ''
-          : v.count.kind === 'bounded'
-            ? ', count ≥ ' + String(v.count.value)
-            : v.count.kind === 'exact'
-              ? ', count ' + String(v.count.value)
-              : ''
+          : contentCount.kind === 'unknown'
+            ? ', count unavailable'
+            : contentCount.kind === 'bounded'
+              ? ', count ≥ ' + String(contentCount.value)
+              : ', count ' + String(contentCount.value)
         const warnings = [...new Set([...(v.warnings ?? []), ...(v.state?.warnings ?? [])])]
+        const progress = v.state?.progress
+        const buildingNote = v.state?.building === true
+          ? ' (index still building' + (typeof progress?.indexed === 'number' ? ' — ' + String(progress.indexed) + ' entries indexed so far' : '') + ')'
+          : ''
         const notes = [
-          v.state?.building ? ' (index still building)' : '',
+          buildingNote,
           v.state?.truncated === true ? ' (content budget reached: raise contentMaxTotalBytes or trim contentExcludes; later files are not searchable)' : '',
           v.shortQueryFallback === true ? ' (short-query fallback: this page is approximate)' : '',
           warnings.length > 0 ? ' (warnings: ' + warnings.join(', ') + ')' : '',
         ].join('')
+        const hintEntries = Object.entries(v.warningHints ?? {})
+        const hintNote = hintEntries.length === 0 ? '' : '\n(hints: ' + hintEntries.map(([code, hint]) => code + ' — ' + hint).join(' | ') + ')'
         const scopeNote = v.scope === undefined ? '' : ' (scope: ' + v.scope + (v.scopeFallback === undefined ? '' : '; ' + v.scopeFallback) + ')'
-        const pageNote = v.truncated === true || v.nextOffset !== undefined
-          ? '\n(truncated' + (v.nextOffset === undefined ? '' : '; nextOffset ' + String(v.nextOffset)) + (v.budget?.dropped === undefined || v.budget.dropped === 0 ? '' : '; ' + String(v.budget.dropped) + ' hit(s) over the ' + String(v.budget.limitChars ?? 0) + '-char budget') + ')'
+        const globalNote = v.totalAllRoots === undefined ? '' : ' (total is across all configured roots, not just the workspace)'
+        const truncReason = v.truncation?.reason === undefined ? '' : '; reason: ' + v.truncation.reason
+        const pageNote = v.truncated === true || v.hasMore === true || v.nextOffset !== undefined
+          ? '\n(truncated' + truncReason + (v.nextOffset === undefined ? '' : '; nextOffset ' + String(v.nextOffset)) + (v.budget?.dropped === undefined || v.budget.dropped === 0 ? '' : '; ' + String(v.budget.dropped) + ' hit(s) over the ' + String(v.budget.limitChars ?? 0) + '-char budget') + ')'
           : ''
         const modeNote = mode === 'content' ? '' : ' (mode: ' + mode + ')'
-        return [{ type: 'text', text: String(v.hits?.length ?? 0) + ' content hit(s)' + count + modeNote + scopeNote + notes + pageNote + '\n' + lines.join('\n') }]
+        const detailNote = v.detail === 'compact' ? ' (compact: evidence fields omitted)' : ''
+        const header = mode === 'count'
+          ? 'locator_find (count) ' + JSON.stringify(v.query ?? '') + ': content' + (count === '' ? ' count unavailable' : count)
+          : String(v.hits?.length ?? 0) + ' content hit(s)' + count
+        return [{ type: 'text', text: header + modeNote + globalNote + scopeNote + notes + detailNote + pageNote + hintNote + '\n' + lines.join('\n') }]
       },
     },
+    // Body search only reads the content store and the two indexes; sibling
+    // read-only calls may join one parallel group.
+    isConcurrencySafe: () => true,
     async execute(args, exec) {
       ensure?.()
       const query = args.query.trim()
       const state = content.status()
-      if (query === '') return { ok: false as const, query, error: 'query is empty', state }
+      if (query === '') {
+        return { ok: false as const, query, error: 'query is empty', errorInfo: errorInfoOf('query-empty', 'query is empty'), state }
+      }
       const mode = parseFindMode(args.mode)
-      const requestedLimit = args.headLimit ?? args.limit ?? 30
-      const limit = Math.max(1, Math.min(modeLimit, Math.trunc(requestedLimit)))
+      const limit = pageSize(args.limit, args.headLimit, modeLimit, 8)
       const offset = Math.max(0, Math.trunc(args.offset ?? 0))
       const scope: 'workspace' | 'all' = args.scope === 'all' ? 'all' : 'workspace'
       const caller: CallerIdentity = {
         ...(exec?.agent?.session?.id === undefined ? {} : { sessionId: exec.agent.session.id }),
         ...(exec?.agent?.session?.header?.cwd === undefined ? {} : { cwd: exec.agent.session.header.cwd }),
       }
-      const budgetChars = options.budgetChars ?? 8_000
+      const limitChars = outputBudgetOf(args.budgetChars, options.budgetChars ?? DEFAULT_OUTPUT_BUDGET_CHARS)
       const scopeRules = options.scope
       const contextLines = Math.max(0, Math.min(CONTEXT_MAX_LINES, Math.trunc(args.contextLines ?? 0)))
-      if (mode === 'names') return await runNamesMode(query, limit, offset, args, caller, options.rt, scopeRules, budgetChars, contextLines)
+      const detail: HitDetail = args.detail === 'compact' ? 'compact' : 'full'
+      const evidenceLimit = evidenceLimitOf(detail, args.evidenceLimit)
+      const includeHash = args.includeHash === true
+      if (mode === 'names') {
+        return await runNamesMode({
+          query,
+          limit,
+          offset,
+          scope,
+          detail,
+          evidenceLimit,
+          limitChars,
+          contextLines,
+          args,
+          caller,
+          rt: options.rt,
+          scopeRules,
+        })
+      }
       const request: ContentRequest = {
         query,
         limit,
         offset,
         scope,
+        detail,
+        evidenceLimit,
+        ...(includeHash ? { includeHash: true } : {}),
         ...(typeof args.sessionId === 'string' && args.sessionId.trim() !== '' ? { sessionId: args.sessionId } : {}),
         ...(args.matchMode === undefined ? {} : { matchMode: args.matchMode }),
         ...(args.caseSensitive === undefined ? {} : { caseSensitive: args.caseSensitive }),
@@ -653,10 +824,27 @@ export function makeFindTool(
       }
       const result = await runContentSearchRequest(content, mode === 'count' ? { ...request, count: request.count ?? 'exact', limit: 1, offset: 0 } : request, roots, allowCrossWorkspaceSessions, caller, contentScopeOptionsOf(options.rt))
       if (!result.ok) {
-        return { ok: false as const, query, offset, mode, error: result.error, warnings: result.warnings, hits: [], state: result.state }
+        const hints = warningHintsOf(result.warnings)
+        return {
+          ok: false as const,
+          query,
+          offset,
+          mode,
+          error: result.error,
+          errorInfo: errorInfoOf(result.error),
+          warnings: result.warnings,
+          ...(hints === undefined ? {} : { warningHints: hints }),
+          hits: [],
+          state: result.state,
+        }
       }
       if (mode === 'count') {
-        const total = result.count.kind === 'unknown' ? undefined : result.count.value
+        const known = result.count.kind !== 'unknown'
+        const warnings = [...result.warnings]
+        if (result.count.kind === 'bounded') warnings.push('bounded-count')
+        if (result.shortQueryFallback === true) warnings.push('query-degraded')
+        const uniqueWarnings = [...new Set(warnings)]
+        const hints = warningHintsOf(uniqueWarnings)
         return {
           ok: true as const,
           query,
@@ -664,45 +852,69 @@ export function makeFindTool(
           offset: 0,
           hits: [],
           count: result.count,
-          ...(total === undefined ? {} : { totalCount: total }),
+          contentCount: result.count,
+          ...(known ? { total: result.count.value, totalCount: result.count.value } : {}),
           truncated: result.count.kind === 'bounded',
-          warnings: result.warnings,
+          hasMore: false,
+          consumed: 0,
+          budget: { limitChars, usedChars: 0, truncated: false, dropped: 0 },
+          warnings: uniqueWarnings,
+          ...(hints === undefined ? {} : { warningHints: hints }),
           state: result.state,
           scope,
           ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
           ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
+          ...(detail === 'compact' ? { detail } : {}),
         }
       }
       const warnings = [...result.warnings]
-      let filtered = result.hits
-      let scopeDropped = 0
-      if (scopeRules !== undefined) {
-        const scoped = scopeRules.filterContent(result.hits)
-        filtered = scoped.hits
-        scopeDropped = scoped.dropped
-        if (scoped.dropped > 0) warnings.push('scope-filtered:' + String(scoped.dropped))
-      }
-      // Optional external rerank hook: never fatal, only reorders.
-      if (options.rerankCommand !== undefined && options.rerankCommand.trim() !== '' && filtered.length > 1) {
-        const reranked = await rerankHits(options.rerankCommand, query, filtered)
-        filtered = reranked.hits
+      const keepVisible = (hit: { path: string }): boolean => scopeRules === undefined
+        ? true
+        : scopeRules.isSearchable(hit.path) && scopeRules.isIndexable(hit.path) && scopeRules.isReadable(hit.path)
+      // Select the page without the budget first: the optional rerank hook and
+      // context lines both change the payload, so the budget is applied once at
+      // the end and the raw positions stay aligned with the returned rows.
+      const selected = selectPage(result.hits, limit, 0, keepVisible)
+      let items = selected.items
+      let keptIndices = [...selected.keptIndices]
+      const dropped = [...selected.dropped]
+      const scopeDropped = selected.dropped.filter(drop => drop.reason === 'scope').length
+      if (scopeDropped > 0) warnings.push('scope-filtered:' + String(scopeDropped))
+      if (options.rerankCommand !== undefined && options.rerankCommand.trim() !== '' && items.length > 1) {
+        const positionByItem = new Map<unknown, number>()
+        items.forEach((item, index) => positionByItem.set(item, keptIndices[index]!))
+        const reranked = await rerankHits(options.rerankCommand, query, items)
+        items = reranked.hits
+        keptIndices = items.map(item => positionByItem.get(item) ?? 0)
         warnings.push(...reranked.warnings)
       }
       if (contextLines > 0) {
-        filtered = await Promise.all(filtered.map(async hit => {
+        items = await Promise.all(items.map(async hit => {
           if (hit.kind !== 'file' || hit.line === undefined) return hit
           const context = await readContextLines(hit.path, hit.line, contextLines)
           return context === undefined ? hit : { ...hit, context: context.lines, contextStart: context.start }
-        })) as typeof filtered
+        }))
       }
-      const budgeted = applyOutputBudget(filtered, budgetChars)
-      const total = result.count.kind === 'unknown' ? undefined : result.count.value
-      const pageFull = result.hits.length >= limit
-      const truncated = pageFull || budgeted.budget.truncated || budgeted.budget.dropped > 0
-      // A lossy page (scope/budget dropped rows) advances past the whole
-      // consumed content page so a later page cannot duplicate kept hits.
-      const lossy = scopeDropped > 0 || budgeted.budget.dropped > 0
-      const nextOffset = truncated ? offset + (lossy ? result.hits.length : budgeted.items.length) : undefined
+      const budgeted = applyOutputBudget(items, limitChars)
+      for (let index = budgeted.items.length; index < keptIndices.length; index++) {
+        dropped.push({ index: keptIndices[index]!, reason: 'budget' })
+      }
+      keptIndices = keptIndices.slice(0, budgeted.items.length)
+      // selectPage works on page-relative positions; the cursor math is in
+      // absolute store offsets.
+      const advance = pageAdvance({
+        offset,
+        fetchedRows: result.hits.length,
+        keptIndices: keptIndices.map(index => offset + index),
+        dropped: dropped.map(drop => ({ index: offset + drop.index, reason: drop.reason })),
+        more: result.hits.length >= limit || selected.unscanned > 0,
+      })
+      if (result.shortQueryFallback === true) warnings.push('query-degraded')
+      if (result.count.kind === 'bounded') warnings.push('bounded-count')
+      if (result.workspaceEmpty === true) warnings.push('workspace-empty')
+      const uniqueWarnings = [...new Set(warnings)]
+      const hints = warningHintsOf(uniqueWarnings)
+      const totalKnown = result.count.kind === 'unknown' ? undefined : result.count.value
       return {
         ok: true as const,
         query,
@@ -710,53 +922,107 @@ export function makeFindTool(
         offset,
         hits: budgeted.items,
         count: result.count,
-        ...(total === undefined ? {} : { totalCount: total }),
-        ...(nextOffset === undefined ? {} : { nextOffset }),
-        truncated,
+        contentCount: result.count,
+        ...(totalKnown === undefined ? {} : { total: totalKnown, totalCount: totalKnown }),
+        ...(advance.nextOffset === undefined ? {} : { nextOffset: advance.nextOffset }),
+        truncated: advance.truncated,
+        hasMore: advance.hasMore,
+        consumed: advance.consumed,
+        ...(advance.truncation === undefined ? {} : { truncation: advance.truncation }),
         budget: budgeted.budget,
-        warnings: [...new Set(warnings)],
+        warnings: uniqueWarnings,
+        ...(hints === undefined ? {} : { warningHints: hints }),
         state: result.state,
         scope,
         ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
         ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
+        ...(detail === 'compact' ? { detail } : {}),
       }
     },
   })
 }
 
 /** One name-index page rendered in the locator_find hit shape. */
-async function runNamesMode(
-  query: string,
-  limit: number,
-  offset: number,
-  args: { sort?: 'name' | 'path' | 'size' | 'mtime' | 'ext'; desc?: boolean; regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; filesOnly?: boolean; dirsOnly?: boolean },
-  caller: CallerIdentity,
-  rt: LocatorRuntime | undefined,
-  scopeRules: Scope | undefined,
-  budgetChars: number,
-  contextLines: number,
-) {
-  if (rt === undefined) return { ok: false as const, query, offset, mode: 'names' as const, error: 'name-index-unavailable' }
+interface FindNamesOptions {
+  query: string
+  limit: number
+  offset: number
+  scope: 'workspace' | 'all'
+  detail: HitDetail
+  evidenceLimit: number
+  limitChars: number
+  contextLines: number
+  args: { sort?: 'name' | 'path' | 'size' | 'mtime' | 'ext'; desc?: boolean; regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; filesOnly?: boolean; dirsOnly?: boolean; pathPrefix?: string }
+  caller: CallerIdentity
+  rt: LocatorRuntime | undefined
+  scopeRules: Scope | undefined
+}
+
+async function runNamesMode(options: FindNamesOptions) {
+  const { query, limit, offset, scope, rt } = options
+  if (rt === undefined) {
+    return { ok: false as const, query, offset, mode: 'names' as const, error: 'name-index-unavailable', errorInfo: errorInfoOf('name-index-unavailable') }
+  }
+  const callerCwd = options.caller.cwd
+  const pathPrefix = typeof options.args.pathPrefix === 'string' && options.args.pathPrefix.trim() !== ''
+    ? options.args.pathPrefix.trim()
+    : undefined
+  // The names mode must honour the same workspace/pathPfx narrowing as content
+  // mode instead of silently searching every configured root. An explicit
+  // pathPrefix wins (and is validated) exactly like the content request.
+  if (pathPrefix !== undefined && !rt.roots.some(root => withinRoots(pathPrefix, [root]))) {
+    return {
+      ok: false as const,
+      query,
+      offset,
+      mode: 'names' as const,
+      error: 'content-path-denied',
+      errorInfo: errorInfoOf('content-path-denied'),
+      warnings: ['path-outside-roots'],
+    }
+  }
+  const prefixBoundary = pathPrefix === undefined ? undefined : pathPrefix.replace(/\\/g, '/').replace(/\/+$/, '') + '/'
+  const insidePrefix = (path: string): boolean => prefixBoundary === undefined
+    ? true
+    : path.replace(/\\/g, '/') === prefixBoundary.slice(0, -1) || path.replace(/\\/g, '/').startsWith(prefixBoundary)
   try {
     rt.start()
-    const result = await rt.search({
-      query,
-      limit,
-      offset,
-      sort: args.sort ?? 'name',
-      desc: args.desc ?? false,
-      regex: args.regex ?? false,
-      caseSensitive: args.caseSensitive ?? false,
-      wholeWord: args.wholeWord ?? false,
-      filesOnly: args.filesOnly ?? false,
-      dirsOnly: args.dirsOnly ?? false,
-    })
+    const cwdIsIndexed = callerCwd !== undefined && rt.roots.some(root => withinRoots(callerCwd, [root]))
+    const narrowToCwd = scope === 'workspace' && cwdIsIndexed && pathPrefix === undefined
+    const narrowToPrefix = pathPrefix !== undefined
+    const narrowing = narrowToCwd || narrowToPrefix
+    const fetchSize = narrowing ? Math.min(rt.config.maxResults, Math.max(limit * 5, 50)) : limit
+    const window = await fetchNamePage(
+      async page => await rt.search({
+        query,
+        limit: page.limit,
+        offset: page.offset,
+        sort: options.args.sort ?? 'name',
+        desc: options.args.desc ?? false,
+        regex: options.args.regex ?? false,
+        caseSensitive: options.args.caseSensitive ?? false,
+        wholeWord: options.args.wholeWord ?? false,
+        filesOnly: options.args.filesOnly ?? false,
+        dirsOnly: options.args.dirsOnly ?? false,
+      }),
+      {
+        offset,
+        limit,
+        fetchSize,
+        maxRows: narrowing ? 250 : limit,
+        keep: hit => {
+          if (narrowToCwd && !withinRoots(hit.path, [callerCwd as string])) return 'narrow'
+          if (narrowToPrefix && !insidePrefix(hit.path)) return 'narrow'
+          if (options.scopeRules !== undefined && !options.scopeRules.isSearchable(hit.path)) return 'scope'
+          return 'keep'
+        },
+      },
+    )
     const observedAt = Date.now()
-    const cwdIsIndexed = caller.cwd !== undefined && rt.roots.some(root => withinRoots(caller.cwd as string, [root]))
-    const visibility = cwdIsIndexed ? 'workspace' as const : 'roots' as const
-    const mapped = result.hits.map(hit => {
-      const readable = scopeRules?.readability(hit.path) ?? { read: 'allowed' as const, reason: 'name hits come from the configured index roots' }
-      return {
+    const visibility = scope === 'all' || !cwdIsIndexed ? 'roots' as const : 'workspace' as const
+    const mapped = window.items.map((hit, index) => {
+      const readable = options.scopeRules?.readability(hit.path) ?? { read: 'allowed' as const, reason: 'name hits come from the configured index roots' }
+      const base = {
         kind: hit.dir ? 'dir' as const : 'file' as const,
         path: hit.path,
         name: hit.name,
@@ -764,34 +1030,61 @@ async function runNamesMode(
         mtime: hit.mtime,
         dir: hit.dir,
         ...(hit.dir || readable.read !== 'allowed' ? {} : { ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }),
+      }
+      if (!evidenceVisible(index, options.detail, options.evidenceLimit)) return base
+      return {
+        ...base,
         freshness: { state: 'unknown' as const, observedAt, mtime: hit.mtime },
         refStatus: 'unknown' as const,
         permissions: { read: readable.read, visibility, reason: readable.reason },
       }
     })
-    const scoped = scopeRules === undefined ? { hits: mapped, dropped: 0 } : scopeRules.filterSearchable(mapped)
-    const budgeted = applyOutputBudget(scoped.hits, budgetChars)
-    const truncated = result.truncated || scoped.dropped > 0 || budgeted.budget.dropped > 0
-    const warnings: string[] = contextLines > 0 ? ['context-lines-ignored-in-names-mode'] : []
-    if (scoped.dropped > 0) warnings.push('scope-filtered:' + String(scoped.dropped))
-    const lossy = scoped.dropped > 0 || budgeted.budget.dropped > 0
-    const nextPage = truncated ? offset + (lossy ? mapped.length : budgeted.items.length) : undefined
+    // Budget the mapped payload and recompute the cursor from raw positions so
+    // evidence bytes cannot overrun the budget or skip a deferred row.
+    const budgeted = applyOutputBudget(mapped, options.limitChars)
+    const dropped = [...window.dropped]
+    for (let index = budgeted.items.length; index < mapped.length; index++) {
+      dropped.push({ index: window.indices[index]!, reason: 'budget' })
+    }
+    const advance = pageAdvance({
+      offset,
+      fetchedRows: window.rawConsumed,
+      keptIndices: window.indices.slice(0, budgeted.items.length),
+      dropped,
+      more: window.more,
+    })
+    const hits = budgeted.items
+    const warnings: string[] = options.contextLines > 0 ? ['context-lines-ignored-in-names-mode'] : []
+    if (window.scopeDropped > 0) warnings.push('scope-filtered:' + String(window.scopeDropped))
+    if (narrowing && window.items.length === 0 && offset === 0) warnings.push('workspace-empty')
+    const uniqueWarnings = [...new Set(warnings)]
+    const hintCodes = narrowing ? [...uniqueWarnings, 'total-is-global'] : uniqueWarnings
+    const hints = warningHintsOf(hintCodes)
     return {
       ok: true as const,
       query,
       mode: 'names' as const,
-      offset: result.offset,
-      hits: budgeted.items,
-      total: result.total,
-      totalCount: result.total,
-      ...(nextPage === undefined ? {} : { nextOffset: nextPage }),
-      truncated,
+      offset,
+      hits,
+      total: window.total,
+      totalCount: window.total,
+      ...(narrowing ? { totalAllRoots: window.total } : {}),
+      ...(advance.nextOffset === undefined ? {} : { nextOffset: advance.nextOffset }),
+      truncated: advance.truncated,
+      hasMore: advance.hasMore,
+      consumed: advance.consumed,
+      ...(advance.truncation === undefined ? {} : { truncation: advance.truncation }),
       budget: budgeted.budget,
-      warnings,
-      ...(caller.cwd === undefined ? {} : { scope: 'workspace' as const }),
-      indexing: result.indexing === true,
+      ...(uniqueWarnings.length === 0 ? {} : { warnings: uniqueWarnings }),
+      ...(hints === undefined ? {} : { warningHints: hints }),
+      scope,
+      ...(scope === 'workspace' && !cwdIsIndexed ? { scopeFallback: 'cwd-not-indexed; searched every configured root' } : {}),
+      indexing: window.indexing === true,
+      tookMs: window.tookMs,
+      ...(options.detail === 'compact' ? { detail: 'compact' as const } : {}),
     }
   } catch (error) {
-    return { ok: false as const, query, offset, mode: 'names' as const, error: error instanceof Error ? error.message : String(error) }
+    const message = error instanceof Error ? error.message : String(error)
+    return { ok: false as const, query, offset, mode: 'names' as const, error: message, errorInfo: errorInfoOf('engine-error', message) }
   }
 }

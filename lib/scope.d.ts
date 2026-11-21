@@ -255,4 +255,261 @@ export declare function runOcrCommand(command: string, request: OcrRequest, opti
     ok: false;
     error: string;
 }>;
+/** Parse and clamp the shared page-size arguments (min of limit/headLimit wins). */
+export declare function pageSize(limit: number | undefined, headLimit: number | undefined, max: number, fallback?: number): number;
+/** Effective soft output budget: the caller argument overrides the configured default; 0 disables. */
+export declare function outputBudgetOf(requested: number | undefined, fallback: number): number;
+/** Row-level detail requested by the caller; full keeps the evidence fields. */
+export type HitDetail = 'full' | 'compact';
+/** Default evidence-bearing rows: the rest of a long page keeps only the cheap fields. */
+export declare const DEFAULT_EVIDENCE_LIMIT = 10;
+/** Hard cap for a caller-provided evidenceLimit. */
+export declare const MAX_EVIDENCE_LIMIT = 50;
+/** Resolve the effective evidenceLimit (compact mode never carries evidence). */
+export declare function evidenceLimitOf(detail: HitDetail, requested: number | undefined, fallback?: number): number;
+/** Whether the hit at this page position still carries evidence fields. */
+export declare function evidenceVisible(index: number, detail: HitDetail, evidenceLimit: number): boolean;
+/** Drop the evidence-only fields from one hit; compact mode and surplus evidence rows. */
+export declare function stripHitEvidence<T extends Record<string, unknown>>(hit: T): T;
+/** Stable machine-readable error codes (additive errorInfo.code values). */
+export declare const ERROR_CODES: {
+    readonly invalidArguments: "invalid-arguments";
+    readonly queryEmpty: "query-empty";
+    readonly queryInvalid: "query-invalid";
+    readonly contentIndexUnavailable: "content-index-unavailable";
+    readonly nameIndexUnavailable: "name-index-unavailable";
+    readonly contentIndexBuilding: "content-index-building";
+    readonly contentIndexError: "content-index-error";
+    readonly contentPathDenied: "content-path-denied";
+    readonly contentScopeDenied: "content-scope-denied";
+    readonly sessionNotAuthorized: "session-not-authorized";
+    readonly queryTooShort: "content-query-too-short";
+    readonly queryTooLong: "content-query-too-long";
+    readonly queryTooManyTerms: "content-query-too-many-terms";
+    readonly queryCancelled: "content-search-cancelled";
+    readonly engineError: "engine-error";
+    readonly indexError: "index-error";
+    readonly contentBuildRunning: "content-build-running";
+    readonly requestFailed: "request-failed";
+    readonly requestAborted: "request-aborted";
+    readonly invalidJson: "invalid-json";
+    readonly bodyTooLarge: "body-too-large";
+    readonly unsupportedMediaType: "unsupported-media-type";
+    readonly methodNotAllowed: "method-not-allowed";
+};
+/** Union of the stable error codes this plugin emits. */
+export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
+/** Structured error detail carried next to the legacy error string. */
+export interface ErrorInfo {
+    /** Stable machine-readable code (see ERROR_CODES). */
+    code: string;
+    /** Human-readable message (mirrors the legacy error string). */
+    message: string;
+    /** True when the same call may succeed on retry. */
+    retryable?: boolean;
+    /** One actionable sentence for the caller. */
+    hint?: string;
+}
+/** Build the additive structured error block for one failed call. */
+export declare function errorInfoOf(code: string, message?: string, overrides?: {
+    retryable?: boolean;
+    hint?: string;
+}): ErrorInfo;
+/** Hint per warning code; keeps the legacy string warnings while adding the actionable sentence. */
+export declare const WARNING_HINTS: Readonly<Record<string, string>>;
+/** Look up hints for the warning codes present in one result. */
+export declare function warningHintsOf(codes: Iterable<string>): Record<string, string> | undefined;
+/** Declared errorInfo block for output schemas. */
+export declare const ERROR_INFO_SCHEMA: {
+    readonly type: "object";
+    readonly additionalProperties: false;
+    readonly properties: {
+        readonly code: {
+            readonly type: "string";
+            readonly required: true;
+            readonly description: "Stable machine-readable error code.";
+        };
+        readonly message: {
+            readonly type: "string";
+            readonly required: true;
+            readonly description: "Human-readable message (same as the legacy error string).";
+        };
+        readonly retryable: {
+            readonly type: "boolean";
+            readonly description: "True when the same call may succeed on retry.";
+        };
+        readonly hint: {
+            readonly type: "string";
+            readonly description: "One actionable sentence for the caller.";
+        };
+    };
+};
+/** Declared warningHints block for output schemas (warning code -> hint). */
+export declare const WARNING_HINTS_SCHEMA: {
+    readonly type: "object";
+    readonly additionalProperties: true;
+    readonly description: "One actionable hint per warning code present in warnings (code -> hint).";
+};
+/** Why a page was truncated: more rows, the output budget, or the scope filter. */
+export interface PageTruncation {
+    /** Primary reason this page stopped before the caller asked it to. */
+    reason: 'page' | 'budget' | 'scope' | 'maxRefs';
+    /** Raw rows dropped or deferred by this page (scope + budget). */
+    dropped: number;
+    /** Raw store rows consumed by this page (nextOffset - offset). */
+    consumed: number;
+}
+/** Paging arithmetic for one page: next cursor, hasMore and the truncation block. */
+export interface PageAdvance {
+    /** Offset of the next page; absent when this page exhausted the result set. */
+    nextOffset?: number;
+    /** True when paging further can still return rows. */
+    hasMore: boolean;
+    /** Raw store rows consumed by this page. */
+    consumed: number;
+    /** True when more rows exist beyond what was returned (same as hasMore). */
+    truncated: boolean;
+    /** Present only when the page was truncated. */
+    truncation?: PageTruncation;
+}
+/** One raw row removed from a page, with the reason it is not returned. */
+export interface PageDrop {
+    /** Position of the row in the store's original ordering. */
+    index: number;
+    /** scope: can never be returned under the current scope; budget: valid but deferred. */
+    reason: 'scope' | 'budget';
+}
+/** Inputs for pageAdvance. */
+export interface PageAdvanceInput {
+    /** Requested offset of the page. */
+    offset: number;
+    /** Raw rows the store returned for this page. */
+    fetchedRows: number;
+    /** Original store positions of the rows actually returned, ascending. */
+    keptIndices: readonly number[];
+    /** Rows removed by the scope rules, the workspace narrowing or the budget. */
+    dropped: readonly PageDrop[];
+    /** True when rows exist beyond the fetched window, or valid fetched rows were left unscanned. */
+    more: boolean;
+}
+/** Declared truncation block for output schemas. */
+export declare const TRUNCATION_SCHEMA: {
+    readonly type: "object";
+    readonly additionalProperties: false;
+    readonly properties: {
+        readonly reason: {
+            readonly type: "string";
+            readonly enum: readonly ["page", "budget", "scope", "maxRefs"];
+            readonly description: "Primary reason this page was truncated.";
+        };
+        readonly dropped: {
+            readonly type: "integer";
+            readonly description: "Raw rows dropped or deferred by this page (scope + budget).";
+        };
+        readonly consumed: {
+            readonly type: "integer";
+            readonly description: "Raw store rows this page consumed (nextOffset - offset).";
+        };
+    };
+};
+/**
+ * Compute the next cursor for one page so consecutive pages never lose a hit
+ * and never duplicate one.
+ *
+ * The cursor lands after the last returned row. Rows the scope removed
+ * immediately after it are skipped (they can never be returned in this scope);
+ * a budget-dropped row stops the skip because it is a valid hit the next page
+ * must still deliver. When valid rows remain unscanned (more), the cursor
+ * points at the first of them.
+ * @param input - page offset, rows returned/dropped and whether more rows exist.
+ * @returns the page advance contract (nextOffset/hasMore/consumed/truncation).
+ */
+export declare function pageAdvance(input: PageAdvanceInput): PageAdvance;
+/** One page selected from a raw store page. */
+export interface SelectedPage<T> {
+    /** Rows actually returned (scope-filtered, limit-sliced and budget-trimmed). */
+    items: T[];
+    /** Original store positions of items, ascending. */
+    keptIndices: number[];
+    /** Rows removed by the scope filter or deferred by the output budget. */
+    dropped: PageDrop[];
+    /** Budget report for the returned rows. */
+    budget: OutputBudget;
+    /** Valid rows beyond the limit that were not scanned (paging still has more). */
+    unscanned: number;
+}
+/**
+ * Select one final page from a raw store page: drop rows outside the scope,
+ * slice to the page size, then trim to the JSON output budget.
+ * @param raw - raw store rows in result order.
+ * @param limit - maximum rows this page may return (final slice).
+ * @param limitChars - soft JSON budget; 0/negative disables it.
+ * @param keep - scope predicate: false rows can never be returned.
+ * @returns the kept rows, their raw positions, drop details and the budget report.
+ */
+export declare function selectPage<T>(raw: readonly T[], limit: number, limitChars: number, keep: (item: T) => boolean): SelectedPage<T>;
+/** Which role one raw name-index hit plays in a workspace page. */
+export type NameKeepDecision = 'keep' | 'narrow' | 'scope';
+/** Structural name hit accepted by fetchNamePage. */
+export interface NamePageHit {
+    path: string;
+}
+/** Structural name page accepted by fetchNamePage. */
+export interface NamePageResult<H extends NamePageHit> {
+    total: number;
+    truncated?: boolean;
+    indexing?: boolean;
+    tookNs?: number;
+    hits: H[];
+}
+/** Options for fetchNamePage. */
+export interface NamePageOptions<H extends NamePageHit> {
+    /** Requested raw offset (pagination). */
+    offset: number;
+    /** Maximum hits this page may return (final slice). */
+    limit: number;
+    /** Classify one hit: keep it, drop it for workspace narrowing, or drop it for a scope rule. */
+    keep: (hit: H) => NameKeepDecision;
+    /** First window size (the caller sizes this from limit and maxResults). */
+    fetchSize: number;
+    /** Upper bound of raw rows fetched by one tool call (default 250). */
+    maxRows?: number;
+    /** Follow-up window size once the first window did not fill the page (default max(100, 2*fetchSize)). */
+    followSize?: number;
+}
+/** One workspace page filled from one or more name-index windows. */
+export interface NamePageSelection<H extends NamePageHit> {
+    /** Hits kept by the scope/narrowing predicates, sliced to the page limit. */
+    items: H[];
+    /** Original store positions of items, ascending (paging/cursor math). */
+    indices: number[];
+    total: number;
+    indexing?: boolean;
+    /** Wall-clock cost of the windows fetched for this page, in ms. */
+    tookMs: number;
+    /** Hits dropped by the workspace/pathPrefix narrowing (not by scope rules). */
+    narrowed: number;
+    /** Hits dropped by the configured scope rules. */
+    scopeDropped: number;
+    /** True when the store reports more rows beyond this page. */
+    more: boolean;
+    /** Raw store rows fetched while filling this page. */
+    rawConsumed: number;
+    /** Raw rows removed by the scope rules/narrowing (positions in the store order). */
+    dropped: PageDrop[];
+}
+/**
+ * Fetch one workspace page from the name index, filling the page past rows the
+ * cwd/pathPrefix narrowing drops. A page that cannot be filled within the row
+ * bound returns what it found; the caller applies the output budget to its
+ * mapped rows and computes the cursor with pageAdvance, so the budget measures
+ * the payload actually returned.
+ * @param fetch - one name-index query (usually the runtime's search).
+ * @param options - offset/limit, keep classifier and window sizing.
+ * @returns the filled page plus the raw positions/drop details the cursor needs.
+ */
+export declare function fetchNamePage<H extends NamePageHit>(fetch: (args: {
+    limit: number;
+    offset: number;
+}) => Promise<NamePageResult<H>>, options: NamePageOptions<H>): Promise<NamePageSelection<H>>;
 //# sourceMappingURL=scope.d.ts.map

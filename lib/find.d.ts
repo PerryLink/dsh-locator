@@ -6,7 +6,7 @@ import type { ContentHit, ContentIndex, ContentState } from './content.ts';
 import type { ContentCount } from './content-search.ts';
 import { type RefFreshness, type RefPermissions, type RefProvenance } from './refs.ts';
 import type { LocatorRuntime } from './runtime.ts';
-import { type Scope } from './scope.ts';
+import { type HitDetail, type Scope } from './scope.ts';
 /** The additive locator_find hit schema, shared with locator_search mode content. */
 export declare const CONTENT_HIT_SCHEMA: {
     readonly type: "object";
@@ -263,24 +263,48 @@ export declare const CONTENT_STATE_SCHEMA: {
         };
     };
 };
-/** One content hit after evidence metadata and freshness labeling. */
+/** One content hit after evidence metadata (evidence is absent on surplus/compact rows). */
 export type EnrichedContentHit = ContentHit & {
     ref: string;
     hash?: string;
     seq?: number;
     eventRef?: string;
-    provenance: RefProvenance;
-    freshness: RefFreshness;
-    permissions: RefPermissions;
-    refStatus: RefFreshness['state'];
+    provenance?: RefProvenance;
+    freshness?: RefFreshness;
+    permissions?: RefPermissions;
+    refStatus?: RefFreshness['state'];
 };
 /** Upper bound for the contextLines argument; keeps one hit a few KB at most. */
 export declare const CONTEXT_MAX_LINES = 10;
+/** Options for enrichContentHits; every field is additive. */
+export interface EnrichContentHitsOptions {
+    /** full (default) attaches evidence; compact attaches only the cheap identity/ref fields. */
+    detail?: HitDetail;
+    /** Evidence-bearing rows in full mode (default 10). */
+    evidenceLimit?: number;
+    /** Compute a sha256 hash per file hit (default false; slow/network mounts are skipped). */
+    includeHash?: boolean;
+    /** Query scope: file-hit visibility is workspace only for workspace-scoped body searches. */
+    scope?: 'workspace' | 'all';
+    /** Test seam: hash implementation (defaults to refs.sha256File). */
+    hashFile?: (path: string, maxBytes?: number) => Promise<string | null>;
+    /** Test seam: slow/network filesystem classifier (defaults to combined.isSlowFilesystemPath). */
+    isSlowPath?: (path: string) => boolean;
+}
 /**
- * Attach citable evidence metadata to content hits. Hashing is capped per file
- * so a tool call cannot read a huge artifact just to label a hit.
+ * Attach citable evidence metadata to content hits.
+ *
+ * Hashing is off by default and skipped on slow/network filesystems, so a tool
+ * call no longer reads every hit file. In full mode only the first
+ * evidenceLimit rows pay for stat/hash (later rows keep a path-only ref);
+ * compact mode never pays for evidence at all.
+ * @param hits - raw content hits.
+ * @param content - content store providing indexed mtimes and session-event refs.
+ * @param callerCwd - caller workspace, when the embedder has an Agent session.
+ * @param options - detail/evidenceLimit/includeHash plus test seams.
+ * @returns hits ready for the tool output.
  */
-export declare function enrichContentHits(hits: readonly ContentHit[], content: ContentIndex, callerCwd: string | undefined): Promise<EnrichedContentHit[]>;
+export declare function enrichContentHits(hits: readonly ContentHit[], content: ContentIndex, callerCwd: string | undefined, options?: EnrichContentHitsOptions): Promise<EnrichedContentHit[]>;
 /** Caller identity used by the content workspace/session authorization. */
 export interface CallerIdentity {
     sessionId?: string;
@@ -301,6 +325,12 @@ export interface ContentRequest {
     pathPrefix?: string;
     /** File documents only: used by the public HTTP API, which has no caller session identity. */
     filesOnly?: boolean;
+    /** Hit detail: compact skips evidence enrichment entirely (default full). */
+    detail?: HitDetail;
+    /** Evidence-bearing rows in full mode (default 10). */
+    evidenceLimit?: number;
+    /** Compute a sha256 per file hit (default false; slow/network filesystems are skipped). */
+    includeHash?: boolean;
 }
 /**
  * Plugin-supplied content-scope context for {@link runContentSearchRequest}.
@@ -344,6 +374,8 @@ export type ContentRequestResult = {
     scopeFallback?: string;
     /** True when a 2-code-point query was answered by the bounded fallback. */
     shortQueryFallback?: boolean;
+    /** True when a workspace-scoped first page came back empty: pass scope "all" to widen. */
+    workspaceEmpty?: boolean;
 } | {
     ok: false;
     error: string;

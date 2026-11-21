@@ -103,7 +103,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # 指定版本
-dsh plugin --profile web add dsh-locator@0.20.2
+dsh plugin --profile web add dsh-locator@0.21.1
 
 # GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -153,7 +153,7 @@ dsh plugin --profile web add /绝对路径/dsh-locator-0.7.6.tgz
 
 Everything 风格的查询语法，返回路径、大小、修改时间、扩展名、类型。适合“我记得文件名里有 report”“找上周改过的 PDF”“找 50MB 以上的视频”这类问题。
 
-查询语法见[下方](#查询语法)。排序、分页、`limit`/`offset` 都由宿主引擎完成，151 万条记录的常见查询在几十毫秒内。
+查询语法见[下方](#查询语法)。排序、分页、`limit`/`offset` 都由宿主引擎完成，25.8 万条记录的常见查询在几十毫秒内。
 
 ### 按内容找：`locator_find`
 
@@ -217,6 +217,16 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 | `capability_search` | 在实时 DSH 工具/MCP/skill 注册表里按意图找能力（不是文件搜索）。 |
 | `capability_preflight` | 调用前校验能力是否存在、参数 schema 是否匹配、风险与审批要求。 |
 
+### 给 AI agent 的调用指南
+
+- **工具选择**：名字/路径 → `locator_search`；正文或会话 → `locator_find`；开放式问题 → `locator_explore`；已知符号 → `locator_symbol` / `locator_outline`；引用验证 → `locator_resolve` / `locator_cite`；状态/构建 → `locator_status`。`locator_search`/`locator_find` 的 `mode` 只用于同一入口的 count/names/content 变体，优先用默认 mode。
+- **默认值**：`locator_search` 默认 `limit=10`、`locator_find` 默认 `limit=8`，输出预算 8000 字符；需要更多结果请显式加 `limit` 和/或 `budgetChars`。结果里的 `truncation:{reason,dropped,consumed}`、`hasMore`、`nextOffset` 是分页契约：`nextOffset` 不会跳过被预算丢弃的行，连续翻页不会丢结果。
+- **compact 模式**：agent 一般用 `detail:'compact'`（去掉 hash/provenance/freshness/permissions，保留 ref/line/snippet），需要证据链时再用 `detail:'full'` 或 `evidenceLimit`。
+- **scope**：默认 `workspace`（按调用方 cwd 裁剪）；`total` 可能是全局计数（看 `totalAllRoots`/提示），workspace 首屏为空时会返回 `workspace-empty` + 建议 `scope:'all'`；`locator_find` 的 names 模式也遵守 cwd/pathPrefix。
+- **错误与提示**：失败时看 `errorInfo:{code,retryable,hint}`（旧 `error` 字符串仍保留）；`warnings` 的可操作提示在 `warningHints`。
+- **覆盖边界**：内容索引默认只收文件正文和 session 消息；tool 结果/reasoning 默认不入索引（`contentIndexToolResults`/`contentIndexReasoning` 可开），归档会话默认隐藏；用 `locator_status` 的 `content`/`coverage` 判断是否完整。
+- **CLI/MCP**：`locator-cli`/`locator-mcp` 是真正只读的——它们把索引状态复制到临时目录再启动 engine，不会写 live state；content 搜索默认只返回配置 roots 内文件、默认不含 session（`--allow-sessions` 显式开）。
+- **示例**：先 `locator_find{query:'retry policy', detail:'compact', limit:8}`；拿到 `nextOffset` 再翻页；用 `locator_resolve{ref}` 验证关键引用；需要全仓库范围时显式 `scope:'all'`。
 ### 命令行与 MCP
 
 npm 包同时暴露两个 bin（也可直接 `node scripts/...` 运行）：
@@ -306,7 +316,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `contentIndexSymbols` | `true` | 是否建立代码符号表（`locator_outline`/`locator_symbol`/`locator_repo_map`）。 |
 | `contentSymbolMaxBytes` | `524288` | 符号抽取的单文件上限。 |
 | `contentFullIndex` | `false` | 一键全量：把正文/文件 cap 覆盖为 0（不限制）。 |
-| `notIndexed` | `[]` | 不进正文索引的 glob（名称索引仍覆盖）。 |
+| `notIndexed` | 敏感文件默认项 | 不进正文索引的 glob（名称索引仍覆盖）；默认排除 `_key.*`/`发布令牌*`/`.env*`/`*.pem`/`*.key`/`*.p12`/`*.pfx`/`id_rsa*`/`id_ed25519*`。 |
 | `notSearchable` | `[]` | 不作为搜索结果返回的 glob（仍可读）。 |
 | `notReadable` | `[]` | agent 不可读的 glob（正文命中与证据 ref 都会被拒）。 |
 | `outputBudgetChars` | `8000` | 单个 locator 工具结果的字符预算；0 关闭。 |
@@ -326,7 +336,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 
 **名称索引**（开发机实测，单个 `/home/yy` root；WSL2 ext4 热页缓存）
 
-| 项目 | 0.19.4 | 0.20.2 |
+| 项目 | 0.19.4 | 0.21.1 |
 |---|---|---|
 | 冷扫描（默认排除缓存） | 240 万条目 / 16.4s / 峰值 754MB | **48 万条目 / 1.4s / 164MB**（条目 −80%，快约 12×） |
 | 快照体积 | 207MB | **35MB** |
@@ -340,7 +350,7 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 
 **内容索引**（真实主目录，1GB 预算上限）
 
-| 项目 | 0.19.4 | 0.20.2 |
+| 项目 | 0.19.4 | 0.21.1 |
 |---|---|---|
 | 常见词查询（`the`，30 条） | 73ms exact / 70ms none | **5.3ms / 1.6ms**（13.8× / 43.7×） |
 | 宽查询（`the`）文件占比 | 0%（全为会话） | **100%**（file-first 分组分页 + 轻量重排） |
@@ -348,9 +358,9 @@ case:1  wholeword:1     区分大小写 / 全词匹配
 | `function`（2.7 万命中） | 146ms | **41ms** |
 | 生僻词查询 | 8.8ms | 13ms（绝对差 4ms，无实际影响） |
 | 无变化增量刷新 | 约 12s（dump 150 万条目） | **<0.3s**（engine generation 快路径） |
-| 全量重建 | 约 3.5min（旧版在预算满时提前结束） | **实测 5m44s**（0.20.2：两阶段规划 + 并行预取，26 万候选 / 1.6GB 预算 / 0 淘汰；0.20.1 为 11min） |
-| 内容库体积 | 约 4.1GB（正文预算的 4.1×） | **实测 4.89GB live**（正文 1.49GB；idle merge 后 segments=1） |
-| 覆盖 | 约 9.3 万文件，预算打满后新文件冻结 | **实测 142,492 文件 / 842 会话 / 9,154 消息，coverage 99.9%**（142,613 候选） |
+| 全量重建 | 约 3.5min（旧版在预算满时提前结束） | **实测 5m31s**（0.21.1：两阶段规划 + 并行预取 + schema v4 + /mnt/d 纳入；16.4 万候选 / 2GB 预算 / 0 淘汰） |
+| 内容库体积 | 约 4.1GB（正文预算的 4.1×） | **实测 5.45GB live**（正文 1.74GB，含 /mnt/d；schema v4 + idle vacuum 后 segments=1、freelist≈0） |
+| 覆盖 | 约 9.3 万文件，预算打满后新文件冻结 | **实测 163,791 / 163,951 文件 = 99.9%**，432 会话 / 4,492 消息（含 /mnt/d 工作区） |
 | 宿主延迟 | 内容查询在 worker，不阻塞 | 不变；`/combined` 富化异步，9p 场景不再阻塞事件循环；实测 HTTP `/content` 常见词 **约 3ms** |
 
 **怎么更省**
@@ -451,6 +461,14 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 ## 内存
 
 引擎是单个 Go 进程，遵循 `GOMEMLIMIT`/`GOGC` 和 `memoryLimitMB` 配置；`0`（默认）表示按机器自动推算上限（取内存的 25%，限制在 384–1024 MiB）。0.20 引擎把 150 万条目的快照载入约 186 MB heap，装好 watcher 后稳态约 335 MB RSS（512 MiB 上限）；上一版在同一场景约需 700 MB。两者都不改变快照格式。把内容库页缓存算上，现场部署中 DSH 宿主进程约 700 MB RSS，空闲延迟约 p50 2ms。
+## 0.21.1 更新
+
+- **AI 契约修复**：分页不再跳过被预算丢弃的行（`truncation/hasMore/nextOffset` 修正）、结果严格 `slice(0,limit)`、默认页大小 search 10/find 8、新增 `budgetChars`、`detail:'compact'`/`evidenceLimit`、`errorInfo`/`warningHints`、只读工具并发安全。
+- **scope/count 修正**：workspace 后置过滤补页 + `workspace-empty` 提示、`totalAllRoots`、find names 应用 cwd/pathPrefix、visibility 按真实 scope、count 字段不再互斥。
+- **explore/capability**：explore 按 BM25 升序（最相关在前）+ `matchedQuery/why`；capability 把 rebuild/reindex/export 判为 write/ask，preflight ok=admitted。
+- **CLI/MCP 只读安全**：engine 状态复制到临时目录、content 默认只返回 roots 内文件且隐藏 session；命中带 ref、search/find 有 budget/nextOffset；MCP 提供 outputSchema/isError，单 engine 长生命周期。**不会再写坏 live 索引快照。**
+- **status**：构建中显示实时 files/messages 与 progress；重建成功后清理 `content-db-*` 陈旧 warning（历史在 `warningCounts`）。
+- **迁移**：schema v4（0.21.0 内容/覆盖/schema 工作）首次启动做一次全量内容重建；`locator_find` 默认不再返回 hash（`includeHash` 可选）；CLI/MCP 默认不含 session。589 tests；六引擎 0.21.1。
 
 ## 0.20.2 更新
 
@@ -577,7 +595,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 
 ## 0.11.0 升级注意
 
-- 切换 `contentIndexReasoning` 只重建会话，不再全量重建 185k 文件；调小内容 cap 会在下次启动重建，避免旧数据继续越预算可搜；`locator_find` 支持 `offset`；面板可一键复制当前已加载/过滤结果的路径。
+- 切换 `contentIndexReasoning` 只重建会话，不再全量重建 16.4 万文件；调小内容 cap 会在下次启动重建，避免旧数据继续越预算可搜；`locator_find` 支持 `offset`；面板可一键复制当前已加载/过滤结果的路径。
 
 - 状态/面板会显示 **全量内容** 与 **含思考内容**；客户端语言优先跟随宿主 `<html lang>`（DSH locale），没有时退回浏览器语言。
 
@@ -585,7 +603,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 
 - 可选 **思考内容索引**：`contentIndexReasoning: true` 会把 assistant 的 `reasoning`/`thinking` block 并入同一条会话消息（最终答案在前，8KB 上限内），因此 `locator_find` 能搜思考过程，跳转仍指向消息；默认关闭，切换该开关会强制重建会话索引。
 
-- **全量内容索引**：设置 `contentFullIndex: true`（或把两个 cap 都设为 `0`），即可索引全部符合文本扩展名/单文件上限的文件。实测本机 eligible 约 **185k 文件 / 2.0GB 文本**，FTS 库约 **5.9GB**；首次构建约几分钟，查询约 **0.04–0.7s**。默认仍保留 1GB/200k 上限，避免普通用户磁盘暴涨；面板会显示 `truncated`。
+- **全量内容索引**：设置 `contentFullIndex: true`（或把两个 cap 都设为 `0`），即可索引全部符合文本扩展名/单文件上限的文件。实测本机 eligible 约 **16.4 万文件 / 1.74GB 文本**（含 /mnt/d 工作区），FTS 库约 **5.45GB**；首次构建实测 **331s**，查询约 **0.02–0.4s**。默认保留 1.6GB/20 万上限，避免普通用户磁盘暴涨；面板会显示 `truncated`。
 - `locator_find` 默认仍 workspace：当前会话 + 调用者 cwd；但如果 cwd **不在任何已索引 root 内**，不再把文件命中限制到 cwd（否则必然为空），而是搜索已索引 root 的文件；会话仍只查当前会话。跨范围仍用 `scope:"all"`。
 - 面板新增：**加载更多**（按 offset 分页）、**最近搜索**（localStorage，可清空）、**过滤已加载结果**。
 - 安全：Linux 下拒绝 root 内嵌套 mount point 的目标（bind mount 防逃逸）；`/open` 用 `O_NOFOLLOW` 打开并核对 inode，缩小 TOCTOU 窗口。

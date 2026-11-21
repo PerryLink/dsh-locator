@@ -5,7 +5,7 @@ import { zstdCompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { ContentIndex } from '../src/content.ts'
-import { CONTENT_STATE_SCHEMA, contentPathExcluded, contentScopeOptionsOf, makeFindTool } from '../src/find.ts'
+import { CONTENT_STATE_SCHEMA, contentPathExcluded, contentScopeOptionsOf, enrichContentHits, makeFindTool } from '../src/find.ts'
 import type { ContentSearchOptions } from '../src/content-search.ts'
 import { sessionEventRef } from '../src/refs.ts'
 import type { LocatorRuntime } from '../src/runtime.ts'
@@ -311,8 +311,9 @@ describe('locator_find workspace scope', () => {
         }),
         status: () => ({ building: false, files: 1, sessions: 1, messages: 1, truncated: false, updatedAt: 1, error: '', warnings: [] }),
       })
-      const tool = makeFindTool(fake, undefined, ['/tmp/workspace'])
-      const result = await tool.execute({ query: 'ref evidence' }, {
+    const tool = makeFindTool(fake, undefined, ['/tmp/workspace'])
+      // 0.21.1: hashing every hit is opt-in; the default keeps only the ref.
+      const result = await tool.execute({ query: 'ref evidence', includeHash: true }, {
         agent: { session: { id: 'caller-session', header: { cwd: '/tmp/workspace' } } },
       } as never) as { ok: boolean; hits?: Array<{ ref?: string; freshness?: { state?: string }; permissions?: { visibility?: string }; hash?: string }> }
       expect(result.ok).toBe(true)
@@ -522,5 +523,307 @@ describe('workspace content scope fallback (0.20.2)', () => {
     const tool = makeFindTool(fake, undefined, ['/home/yy'], false, { rt: runtime(['/mnt/d/']) })
     const result = await tool.execute({ query: 'note' }, exec('/mnt/d/elsewhere')) as { scopeFallback?: string }
     expect(result.scopeFallback).toBe('cwd-not-indexed; files searched across configured roots')
+  })
+})
+
+
+/** Paged content store that honours offset/limit like the real one. */
+function pagedContent(hits: Array<Record<string, unknown>>): ContentIndex {
+  return withAuth({
+    status: () => ({ building: false, files: 1, sessions: 0, messages: 0, truncated: false, updatedAt: 1, error: '', warnings: [] }),
+    async search(_query: string, limit: number, options: ContentSearchOptions) {
+      const offset = typeof options.offset === 'number' ? options.offset : 0
+      const page = hits.slice(offset, offset + limit)
+      return { hits: page, count: { value: hits.length, kind: 'exact' as const }, warnings: [] }
+    },
+  })
+}
+
+function findExec(cwd: string) {
+  return { agent: { session: { id: 'caller-session', header: { cwd } } } } as never
+}
+
+describe('locator_find 0.21.1 hashing and evidence budget', () => {
+  it('skips file reads for hashes unless includeHash is set and never hashes slow mounts', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-hash-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'hash body')
+    try {
+      const content = withAuth({ status: () => ({ building: false, files: 1, sessions: 0, messages: 0, truncated: false, updatedAt: 1, error: '', warnings: [] }) })
+      const hit: Record<string, unknown> = { kind: 'file', path: file, title: 'notes.md', snippet: 'hash body', line: 1, score: 1 }
+      let reads = 0
+      const hashFile = async (): Promise<string | null> => {
+        reads += 1
+        return 'a'.repeat(64)
+      }
+      const plain = await enrichContentHits([hit] as never, content, '/tmp/workspace', { hashFile })
+      expect(reads).toBe(0)
+      expect(plain[0]?.hash).toBeUndefined()
+      expect(plain[0]?.ref).toMatch(/^ref:\/\/file\?/)
+      const hashed = await enrichContentHits([hit] as never, content, '/tmp/workspace', { hashFile, includeHash: true })
+      expect(reads).toBe(1)
+      expect(hashed[0]?.hash).toBe('a'.repeat(64))
+      reads = 0
+      const slow = await enrichContentHits([hit] as never, content, '/tmp/workspace', {
+        hashFile,
+        includeHash: true,
+        isSlowPath: () => true,
+      })
+      expect(reads).toBe(0)
+      expect(slow[0]?.hash).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps only the ref by default and hashes on demand through the tool', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-hash-tool-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'hash tool body')
+    try {
+      const content = pagedContent([{ kind: 'file', path: file, title: 'notes.md', snippet: 'hash tool', line: 1, score: 1 }])
+      const tool = makeFindTool(content, undefined, [dir])
+      const plain = await tool.execute({ query: 'hash' }, findExec(dir)) as { hits?: Array<{ hash?: string; ref?: string }> }
+      expect(plain.hits?.[0]?.hash).toBeUndefined()
+      expect(plain.hits?.[0]?.ref).toMatch(/^ref:\/\/file\?/)
+      const hashed = await tool.execute({ query: 'hash', includeHash: true }, findExec(dir)) as { hits?: Array<{ hash?: string }> }
+      expect(hashed.hits?.[0]?.hash).toMatch(/^[0-9a-f]{64}$/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('enriches only the first evidenceLimit rows and keeps refs on the rest', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-evidence-'))
+    try {
+      const hits = Array.from({ length: 12 }, (_, index) => ({
+        kind: 'file',
+        path: join(dir, 'file-' + String(index) + '.md'),
+        title: 'file-' + String(index) + '.md',
+        snippet: 'bulk body',
+        line: 1,
+        score: 1,
+      }))
+      const tool = makeFindTool(pagedContent(hits), undefined, [dir])
+      const value = await tool.execute({ query: 'bulk', limit: 12 }, findExec(dir)) as {
+        hits?: Array<{ ref?: string; provenance?: unknown }>
+      }
+      expect(value.hits).toHaveLength(12)
+      expect(value.hits?.slice(0, 10).every(hit => hit.provenance !== undefined)).toBe(true)
+      expect(value.hits?.slice(10).every(hit => hit.provenance === undefined)).toBe(true)
+      expect(value.hits?.every(hit => hit.ref !== undefined)).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('locator_find 0.21.1 names workspace and paging', () => {
+  function nameRuntime(roots: string[], hits: Array<{ path: string; name: string; size: number; mtime: number; ext: string; dir: boolean }>) {
+    return {
+      roots,
+      config: { maxResults: 100, outputBudgetChars: 8000, excludes: [] },
+      status: { running: true },
+      stateDir: '/tmp/state',
+      binary: '/tmp/indexd',
+      start: () => {},
+      engineStatus: async () => undefined,
+      async search(args: { offset: number; limit: number }) {
+        const page = hits.slice(args.offset, args.offset + args.limit)
+        return { total: hits.length, returned: page.length, offset: args.offset, truncated: hits.length > args.offset + page.length, tookNs: 1_000_000, hits: page }
+      },
+    } as unknown as LocatorRuntime
+  }
+
+  it('applies the caller-workspace filter to names mode and fills the page', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-find-names-ws-'))
+    const cwd = join(root, 'proj')
+    const other = join(root, 'other')
+    mkdirSync(cwd)
+    mkdirSync(other)
+    try {
+      const hits = [
+        ...Array.from({ length: 5 }, (_, index) => ({ path: join(other, 'f-' + String(index) + '.md'), name: 'f-' + String(index) + '.md', size: 10, mtime: 1, ext: 'md', dir: false })),
+        ...Array.from({ length: 5 }, (_, index) => ({ path: join(cwd, 'f-' + String(index) + '.md'), name: 'f-' + String(index) + '.md', size: 10, mtime: 1, ext: 'md', dir: false })),
+      ]
+      const tool = makeFindTool(pagedContent([]), undefined, [root], false, { rt: nameRuntime([root], hits) })
+      const value = await tool.execute({ query: 'f', mode: 'names', limit: 3 }, findExec(cwd)) as {
+        hits?: Array<{ path: string }>
+        nextOffset?: number
+        totalAllRoots?: number
+        scope?: string
+      }
+      expect(value.scope).toBe('workspace')
+      expect(value.hits).toHaveLength(3)
+      expect(value.hits?.every(hit => hit.path.startsWith(cwd + '/'))).toBe(true)
+      expect(value.nextOffset).toBe(8)
+      expect(value.totalAllRoots).toBe(10)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('honours an explicit pathPrefix and denies one outside the roots', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-find-names-prefix-'))
+    const cwd = join(root, 'proj')
+    const other = join(root, 'other')
+    mkdirSync(cwd)
+    mkdirSync(other)
+    try {
+      const hits = [
+        { path: join(cwd, 'a.md'), name: 'a.md', size: 1, mtime: 1, ext: 'md', dir: false },
+        { path: join(other, 'b.md'), name: 'b.md', size: 1, mtime: 1, ext: 'md', dir: false },
+      ]
+      const tool = makeFindTool(pagedContent([]), undefined, [root], false, { rt: nameRuntime([root], hits) })
+      const narrowed = await tool.execute({ query: 'md', mode: 'names', pathPrefix: cwd }, findExec(root)) as { hits?: Array<{ path: string }> }
+      expect(narrowed.hits?.map(hit => hit.path)).toEqual([join(cwd, 'a.md')])
+      const denied = await tool.execute({ query: 'md', mode: 'names', pathPrefix: '/etc' }, findExec(root)) as {
+        ok: boolean
+        error?: string
+        errorInfo?: { code?: string }
+      }
+      expect(denied.ok).toBe(false)
+      expect(denied.error).toBe('content-path-denied')
+      expect(denied.errorInfo?.code).toBe('content-path-denied')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps budget-deferred content rows reachable through nextOffset', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-paging-'))
+    try {
+      const hits = Array.from({ length: 5 }, (_, index) => ({
+        kind: 'file',
+        path: join(dir, 'file-' + String(index) + '.md'),
+        title: 'file-' + String(index) + '.md',
+        snippet: 'x'.repeat(300),
+        line: 1,
+        score: 1,
+      }))
+      const tool = makeFindTool(pagedContent(hits), undefined, [dir])
+      const titles: string[] = []
+      let offset = 0
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await tool.execute({ query: 'x', limit: 2, offset, budgetChars: 700 }, findExec(dir)) as {
+          hits?: Array<{ title?: string }>
+          nextOffset?: number
+          truncation?: { reason?: string }
+        }
+        for (const hit of page.hits ?? []) if (hit.title !== undefined && !titles.includes(hit.title)) titles.push(hit.title)
+        if (page.nextOffset === undefined) break
+        expect(page.truncation?.reason).toBe('budget')
+        offset = page.nextOffset
+      }
+      expect(titles).toEqual(hits.map(hit => hit.title))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('warns when a workspace content page is empty and suggests scope "all"', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-find-ws-empty-'))
+    const cwd = join(root, 'proj')
+    mkdirSync(cwd)
+    try {
+      const content = withAuth({
+        status: () => ({ building: false, files: 0, sessions: 0, messages: 0, truncated: false, updatedAt: 1, error: '', warnings: [] }),
+        async search() {
+          return { hits: [], count: { value: 0, kind: 'exact' as const }, warnings: [] }
+        },
+      })
+      const tool = makeFindTool(content, undefined, [root])
+      const value = await tool.execute({ query: 'nothing' }, findExec(cwd)) as {
+        warnings?: string[]
+        warningHints?: Record<string, string>
+        scopeFallback?: string
+      }
+      expect(value.scopeFallback).toBeUndefined()
+      expect(value.warnings).toContain('workspace-empty')
+      expect(value.warningHints?.['workspace-empty']).toContain('scope:"all"')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('locator_find 0.21.1 count and detail', () => {
+  it('never reports 0 for an unknown content count', async () => {
+    const content = withAuth({
+      status: () => ({ building: false, files: 0, sessions: 0, messages: 0, truncated: false, updatedAt: 1, error: '', warnings: [] }),
+      async search() {
+        return { hits: [], count: { value: 0, kind: 'unknown' as const }, warnings: [] }
+      },
+    })
+    const tool = makeFindTool(content, undefined, [])
+    const value = await tool.execute({ query: 'x', mode: 'count' }, {} as never) as {
+      ok: boolean
+      total?: number
+      totalCount?: number
+      contentCount?: { kind: string }
+      count?: { kind: string }
+    }
+    expect(value.ok).toBe(true)
+    expect(value.total).toBeUndefined()
+    expect(value.totalCount).toBeUndefined()
+    expect(value.contentCount?.kind).toBe('unknown')
+    expect(value.count?.kind).toBe('unknown')
+  })
+
+  it('marks content file hits visibility by the actual scope (roots for scope all)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-visibility-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'visibility body')
+    try {
+      const content = pagedContent([{ kind: 'file', path: file, title: 'notes.md', snippet: 'visibility', line: 1, score: 1 }])
+      const tool = makeFindTool(content, undefined, [dir])
+      const workspace = await tool.execute({ query: 'visibility' }, findExec(dir)) as { hits?: Array<{ permissions?: { visibility?: string } }> }
+      expect(workspace.hits?.[0]?.permissions?.visibility).toBe('workspace')
+      const all = await tool.execute({ query: 'visibility', scope: 'all' }, findExec(dir)) as { hits?: Array<{ permissions?: { visibility?: string } }> }
+      expect(all.hits?.[0]?.permissions?.visibility).toBe('roots')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('strips evidence in compact mode while keeping the citable ref', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locator-find-compact-'))
+    const file = join(dir, 'notes.md')
+    writeFileSync(file, 'compact body')
+    try {
+      const content = pagedContent([{ kind: 'file', path: file, title: 'notes.md', snippet: 'compact', line: 1, score: 1 }])
+      const tool = makeFindTool(content, undefined, [dir])
+      const value = await tool.execute({ query: 'compact', detail: 'compact' }, findExec(dir)) as {
+        detail?: string
+        hits?: Array<{ ref?: string; provenance?: unknown; freshness?: unknown; permissions?: unknown; refStatus?: string; hash?: string }>
+      }
+      expect(value.detail).toBe('compact')
+      expect(value.hits?.[0]?.ref).toMatch(/^ref:\/\/file\?/)
+      expect(value.hits?.[0]?.provenance).toBeUndefined()
+      expect(value.hits?.[0]?.freshness).toBeUndefined()
+      expect(value.hits?.[0]?.permissions).toBeUndefined()
+      expect(value.hits?.[0]?.refStatus).toBeUndefined()
+      expect(value.hits?.[0]?.hash).toBeUndefined()
+      const schema = tool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+      expect(validateJsonSchemaValue(schema, value)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('takes min(limit, headLimit) as the page size', async () => {
+    const content = pagedContent(Array.from({ length: 5 }, (_, index) => ({
+      kind: 'file',
+      path: '/tmp/limit-' + String(index) + '.md',
+      title: 'limit-' + String(index) + '.md',
+      snippet: 'limit body',
+      line: 1,
+      score: 1,
+    })))
+    const tool = makeFindTool(content, undefined, [])
+    const value = await tool.execute({ query: 'limit', limit: 1, headLimit: 50 }, {} as never) as { hits?: unknown[] }
+    expect(value.hits).toHaveLength(1)
+    const value2 = await tool.execute({ query: 'limit', limit: 10, headLimit: 2 }, {} as never) as { hits?: unknown[] }
+    expect(value2.hits).toHaveLength(2)
   })
 })

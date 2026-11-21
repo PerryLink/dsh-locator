@@ -6,6 +6,7 @@ import {
   makeCapabilityTools,
   preflightCapability,
   searchCapabilities,
+  searchCapabilityCards,
   tokenize,
   type CapabilitySources,
 } from '../src/capabilities.ts'
@@ -18,6 +19,14 @@ function sources(overrides: Partial<CapabilitySources> = {}): CapabilitySources 
         { name: 'write_file', description: 'Write a file to disk.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } } },
         { name: 'bash', description: 'Run a shell command.', parameters: { type: 'object', properties: { command: { type: 'string' } } } },
         { name: 'mcp__github__create_issue', description: 'Create an issue on GitHub.', parameters: { type: 'object', properties: {} } },
+        { name: 'locator_rebuild', description: 'Rebuild the local file index from scratch.', parameters: { type: 'object', properties: { roots: { type: 'array' } } } },
+        { name: 'locator_reindex', description: 'Rebuild or refresh the content index.', parameters: { type: 'object', properties: { full: { type: 'boolean' } } } },
+        {
+          name: 'locator_export',
+          description: 'Export the file index as a SQLite database.',
+          parameters: { type: 'object', properties: { path: { type: 'string' }, overwrite: { type: 'boolean' }, allowOutsideStateDir: { type: 'boolean' } } },
+        },
+        { name: 'refresh_cache', description: 'Refresh the cached records and the of and scan.', parameters: { type: 'object', properties: {} } },
       ],
       get: (name: string) => name === 'locator_find' ? {} : undefined,
     },
@@ -114,5 +123,187 @@ describe('capability tools', () => {
     expect(validateJsonSchemaValue(preflightTool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0], preflightValue)).toEqual([])
     const badJson = await preflightTool.execute({ capability: 'tool:locator_find', argsJson: '{oops' }, {} as never)
     expect(badJson).toMatchObject({ ok: false, error: 'invalid-args-json' })
+  })
+})
+describe('capability risk overrides (0.21.1)', () => {
+  it('marks maintenance and export tools write/ask with an override basis', () => {
+    for (const name of ['locator_rebuild', 'locator_reindex', 'locator_export', 'refresh_cache']) {
+      const risk = inferRisk(name, 'maintenance tool')
+      expect(risk.level, name).toBe('write')
+      expect(risk.permission, name).toEqual({ approval: 'ask', sandbox: 'write' })
+      expect(risk.basis, name).toBe('override')
+    }
+    // The explicit table wins over a description that mentions running work.
+    const rebuild = inferRisk('locator_rebuild', 'Runs in the background and may run a scan')
+    expect(rebuild.level).toBe('write')
+    expect(rebuild.basis).toBe('override')
+    expect(rebuild.actions.join(' ')).toContain('rebuild')
+  })
+
+  it('reports dangerous parameters even for an override card', () => {
+    const exported = inferRisk('locator_export', 'Export the file index', {
+      type: 'object',
+      properties: { allowOutsideStateDir: { type: 'boolean' }, overwrite: { type: 'boolean' } },
+    })
+    expect(exported.level).toBe('write')
+    expect(exported.permission.approval).toBe('ask')
+    expect(exported.actions.join(' ')).toContain('outside')
+    expect(exported.actions.join(' ')).toContain('overwrite')
+    const sandboxed = inferRisk('run', 'Run code', { type: 'object', properties: { sandbox_permissions: { type: 'string' } } })
+    expect(sandboxed.actions.join(' ')).toContain('escalated')
+    // A name that reads as read-only is still write/ask when it can leave the
+    // state directory: the parameter itself is the side effect.
+    const outside = inferRisk('copy_database', 'Copy a database', { type: 'object', properties: { allowOutsideStateDir: { type: 'boolean' } } })
+    expect(outside.level).toBe('write')
+    expect(outside.permission.approval).toBe('ask')
+    expect(outside.actions.join(' ')).toContain('outside')
+  })
+
+  it('keeps the basis honest: override, schema, name or mixed', () => {
+    expect(inferRisk('locator_find', 'Search file bodies', { type: 'object', properties: { query: { type: 'string' } } }).basis).toBe('schema')
+    expect(inferRisk('write_file', 'Write a file').basis).toBe('override')
+    expect(inferRisk('bash', 'Run a shell command', { type: 'object', properties: { command: { type: 'string' } } }).basis).toBe('override')
+    expect(inferRisk('offline_helper', 'Offline helper').basis).toBe('name')
+    expect(inferRisk('offline_helper', 'Offline helper', { type: 'object', properties: {} }).basis).toBe('name')
+  })
+
+  it('does not infer read for the cards built into the snapshot', async () => {
+    const snapshot = await buildCapabilitySnapshot(sources())
+    for (const id of ['tool:locator_rebuild', 'tool:locator_reindex', 'tool:locator_export']) {
+      const card = snapshot.cards.find(entry => entry.id === id)
+      expect(card?.risk.level, id).toBe('write')
+      expect(card?.permission.approval, id).toBe('ask')
+      expect(card?.risk.basis, id).toBe('override')
+    }
+  })
+})
+
+describe('capability card tags (0.21.1)', () => {
+  it('removes stopwords, de-duplicates and caps tags at six', async () => {
+    const snapshot = await buildCapabilitySnapshot(sources())
+    const refresh = snapshot.cards.find(card => card.id === 'tool:refresh_cache')
+    expect(refresh?.tags.length).toBeLessThanOrEqual(6)
+    expect(refresh?.tags).toContain('refresh')
+    for (const stopword of ['the', 'of', 'and']) expect(refresh?.tags, stopword).not.toContain(stopword)
+    for (const card of snapshot.cards) {
+      expect(card.tags.length).toBeLessThanOrEqual(6)
+      expect(new Set(card.tags).size).toBe(card.tags.length)
+    }
+  })
+})
+
+describe('capability preflight ok = admitted (0.21.1)', () => {
+  it('reports invalid arguments as ok:false with errorInfo', async () => {
+    const snapshot = await buildCapabilitySnapshot(sources())
+    const invalid = preflightCapability(snapshot, 'tool:locator_find', { query: 1 }, sources())
+    expect(invalid.ok).toBe(false)
+    expect(invalid.admitted).toBe(false)
+    expect(invalid.schema?.valid).toBe(false)
+    expect(invalid.errorInfo).toMatchObject({ code: 'invalid-arguments', retryable: false })
+    expect(invalid.errorInfo?.hint).toBeTruthy()
+  })
+
+  it('reports a hidden capability as ok:false with errorInfo', async () => {
+    const snapshot = await buildCapabilitySnapshot(sources())
+    const hidden = preflightCapability(snapshot, 'tool:write_file', undefined, sources())
+    expect(hidden.ok).toBe(false)
+    expect(hidden.admitted).toBe(false)
+    expect(hidden.next.callable).toBe(false)
+    expect(hidden.errorInfo?.code).toBe('capability-not-visible')
+    expect(hidden.next.suggestion).toContain('not visible')
+  })
+
+  it('keeps the legacy error string and adds errorInfo for unknown cards', () => {
+    const missing = preflightCapability({ builtAt: Date.now(), cards: [], warnings: [] }, 'tool:not-registered')
+    expect(missing.ok).toBe(false)
+    expect(missing.error).toBe('capability-not-found')
+    expect(missing.errorInfo?.code).toBe('capability-not-found')
+  })
+
+  it('still surfaces write/ask risk for a known maintenance card', async () => {
+    const snapshot = await buildCapabilitySnapshot(sources())
+    const ready = sources()
+    const result = preflightCapability(snapshot, 'tool:locator_rebuild', { roots: ['/tmp'] }, ready)
+    expect(result.card?.risk.level).toBe('write')
+    expect(result.requires).toEqual({ approval: 'ask', sandbox: 'write' })
+  })
+
+  it('keeps the tool output schema valid for admitted and rejected calls', async () => {
+    const [searchTool, preflightTool] = makeCapabilityTools(sources())
+    const schema = preflightTool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    const admitted = await preflightTool.execute({ capability: 'tool:locator_find', argsJson: '{"query":"text"}' }, {} as never)
+    expect(validateJsonSchemaValue(schema, admitted)).toEqual([])
+    const rejected = await preflightTool.execute({ capability: 'tool:locator_find', argsJson: '{"query":1}' }, {} as never)
+    expect(rejected).toMatchObject({ ok: false, admitted: false, error: 'invalid-arguments' })
+    expect(validateJsonSchemaValue(schema, rejected)).toEqual([])
+    const invalidJson = await preflightTool.execute({ capability: 'tool:locator_find', argsJson: '{oops' }, {} as never)
+    expect(invalidJson).toMatchObject({ ok: false, error: 'invalid-args-json' })
+    expect(validateJsonSchemaValue(schema, invalidJson)).toEqual([])
+    // Both capability tools are pure read-only adapters.
+    expect(searchTool.isConcurrencySafe?.({ intent: 'x' } as never)).toBe(true)
+    expect(preflightTool.isConcurrencySafe?.({ capability: 'tool:locator_find' } as never)).toBe(true)
+  })
+})
+
+describe('capability search paging (0.21.1)', () => {
+  function manySources(count: number): CapabilitySources {
+    return {
+      tools: {
+        definitions: () => Array.from({ length: count }, (_, index) => ({
+          name: 'alpha_' + String(index),
+          description: 'alpha helper',
+          parameters: { type: 'object', properties: {} },
+        })),
+        get: () => ({}),
+      },
+      skills: { list: async () => [] },
+    }
+  }
+
+  it('returns nextOffset and truncated from the tool', async () => {
+    const [searchTool] = makeCapabilityTools(manySources(7))
+    const page = await searchTool.execute({ intent: 'alpha', limit: 3, offset: 3 }, {} as never)
+    expect(page).toMatchObject({ ok: true, total: 7, returned: 3, nextOffset: 6, truncated: true })
+    const schema = searchTool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0]
+    expect(validateJsonSchemaValue(schema, page)).toEqual([])
+    const last = await searchTool.execute({ intent: 'alpha', limit: 3, offset: 6 }, {} as never) as { nextOffset?: number }
+    expect(last).toMatchObject({ ok: true, total: 7, returned: 1, truncated: false })
+    expect(last.nextOffset).toBeUndefined()
+  })
+
+  it('reports the same paging metadata on the Web payload', async () => {
+    const payload = await searchCapabilityCards(manySources(7), 'alpha', { limit: 2, offset: 1 })
+    expect(payload).toMatchObject({ total: 7, returned: 2, nextOffset: 3, truncated: true })
+    const tail = await searchCapabilityCards(manySources(7), 'alpha', { limit: 5, offset: 5 })
+    expect(tail.truncated).toBe(false)
+    expect(tail.nextOffset).toBeUndefined()
+  })
+})
+
+describe('capability snapshot cache identity (0.21.1)', () => {
+  it('keeps one snapshot per agent/scope identity and reuses it', async () => {
+    const seen: unknown[] = []
+    const scoped: CapabilitySources = {
+      tools: {
+        definitions: (scope?: unknown) => {
+          seen.push(scope)
+          return [{ name: 'alpha_card', description: 'alpha helper', parameters: { type: 'object', properties: {} } }]
+        },
+        get: () => ({}),
+      },
+      skills: { list: async () => [] },
+    }
+    const [searchTool] = makeCapabilityTools(scoped)
+    const agentA = { id: 'agent-a', session: { id: 'session-a', header: { cwd: '/a' } } }
+    const agentB = { id: 'agent-b', session: { id: 'session-b', header: { cwd: '/b' } } }
+    const execFor = (agent: unknown) => ({ signal: new AbortController().signal, agent } as never)
+    await searchTool.execute({ intent: 'alpha' }, execFor(agentA))
+    await searchTool.execute({ intent: 'alpha' }, execFor(agentB))
+    expect(seen).toHaveLength(2)
+    expect(seen[0]).toBe(agentA)
+    expect(seen[1]).toBe(agentB)
+    // Same identity inside the TTL hits the cache instead of rebuilding.
+    await searchTool.execute({ intent: 'alpha' }, execFor(agentA))
+    expect(seen).toHaveLength(2)
   })
 })

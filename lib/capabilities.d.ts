@@ -6,6 +6,7 @@
  * @module dsh-locator/capabilities
  */
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
+import { type ErrorInfo } from './scope.ts';
 /** One capability card. */
 export interface CapabilityCard {
     id: string;
@@ -17,7 +18,7 @@ export interface CapabilityCard {
     risk: {
         level: 'read' | 'write' | 'exec';
         actions: string[];
-        basis: 'schema' | 'name';
+        basis: 'override' | 'mixed' | 'schema' | 'name';
     };
     permission: {
         approval: 'none' | 'ask';
@@ -77,6 +78,7 @@ export declare function searchCapabilities(cards: readonly CapabilityCard[], int
 };
 /** One preflight result. */
 export interface PreflightResult {
+    /** 0.21.1: ok mirrors admitted (false when the call is not authorized/valid). */
     ok: boolean;
     card?: CapabilityCard;
     admitted: boolean;
@@ -93,7 +95,10 @@ export interface PreflightResult {
         callable: boolean;
         suggestion?: string;
     };
+    /** Legacy string code; mirrors errorInfo.code when ok is false. */
     error?: string;
+    /** Structured failure detail (0.21.1, additive). */
+    errorInfo?: ErrorInfo;
     warnings: string[];
 }
 /**
@@ -108,6 +113,10 @@ export interface CapabilitySearchPayload {
     intent: string;
     total: number;
     returned: number;
+    /** Offset of the next page; absent when this page is the last one (0.21.1). */
+    nextOffset?: number;
+    /** True when more ranked cards exist beyond this page (0.21.1). */
+    truncated?: boolean;
     hits: Array<{
         card: Omit<CapabilityCard, 'input'>;
         score: number;

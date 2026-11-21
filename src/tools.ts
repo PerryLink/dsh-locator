@@ -21,7 +21,24 @@ import {
 import { fileRef } from './refs.ts'
 import { engineResourceFields, type EngineStatus, type LocatorRuntime, type SearchHit } from './runtime.ts'
 import { resolveWithinRoots, withinRoots } from './reveal.ts'
-import { applyOutputBudget, Scope, DEFAULT_OUTPUT_BUDGET_CHARS } from './scope.ts'
+import {
+  applyOutputBudget,
+  DEFAULT_OUTPUT_BUDGET_CHARS,
+  ERROR_INFO_SCHEMA,
+  errorInfoOf,
+  evidenceLimitOf,
+  evidenceVisible,
+  fetchNamePage,
+  outputBudgetOf,
+  pageAdvance,
+  pageSize,
+  Scope,
+  selectPage,
+  TRUNCATION_SCHEMA,
+  WARNING_HINTS_SCHEMA,
+  warningHintsOf,
+  type HitDetail,
+} from './scope.ts'
 
 const HIT_SCHEMA = {
   type: 'object',
@@ -68,12 +85,21 @@ const SEARCH_OUTPUT = {
     ok: { type: 'boolean', required: true },
     query: { type: 'string' },
     mode: { type: 'string', enum: ['names', 'content', 'count'] },
-    total: { type: 'integer' },
-    totalCount: { type: 'integer', description: 'Total matches the index knows (engine total or content count).' },
+    total: { type: 'integer', description: 'Primary match count: names mode is the name-index total across every configured root; content/count modes are the content count when known.' },
+    totalCount: { type: 'integer', description: 'Alias of total: total matches when the index knows them (engine total or content count).' },
+    nameCount: { type: 'integer', description: 'Count mode only: name-index matches (global across configured roots), when the name query returned a count.' },
+    totalAllRoots: {
+      type: 'integer',
+      description: 'Names mode only: the global match count across every configured root. Present when scope=workspace narrowed the result, since total is then not a workspace count.',
+    },
     returned: { type: 'integer' },
     offset: { type: 'integer' },
     nextOffset: { type: 'integer', description: 'Offset of the next page; absent when this page is the last one.' },
     truncated: { type: 'boolean' },
+    hasMore: { type: 'boolean', description: 'True when paging further can still return rows (same as truncated).' },
+    consumed: { type: 'integer', description: 'Raw store rows this page consumed (nextOffset - offset).' },
+    truncation: TRUNCATION_SCHEMA,
+    detail: { type: 'string', enum: ['full', 'compact'], description: 'Present when the caller requested compact (evidence-free) hits.' },
     indexing: { type: 'boolean' },
     tookMs: { type: 'number' },
     hits: { type: 'array', items: HIT_SCHEMA },
@@ -89,6 +115,7 @@ const SEARCH_OUTPUT = {
     },
     budget: BUDGET_SCHEMA,
     warnings: { type: 'array', items: { type: 'string' } },
+    warningHints: WARNING_HINTS_SCHEMA,
     state: CONTENT_STATE_SCHEMA,
     scope: { type: 'string', enum: ['workspace', 'all'] },
     scopeFallback: { type: 'string' },
@@ -97,6 +124,7 @@ const SEARCH_OUTPUT = {
       description: 'True when a 2-character query was answered by the bounded short-query fallback (the page is approximate).',
     },
     error: { type: 'string' },
+    errorInfo: ERROR_INFO_SCHEMA,
   },
 } as const
 
@@ -187,6 +215,7 @@ const STATUS_OUTPUT = {
     binary: { type: 'string' },
     warning: { type: 'string' },
     error: { type: 'string' },
+    errorInfo: ERROR_INFO_SCHEMA,
   },
 } as const
 
@@ -197,6 +226,7 @@ const REBUILD_OUTPUT = {
     ok: { type: 'boolean', required: true },
     started: { type: 'boolean' },
     error: { type: 'string' },
+    errorInfo: ERROR_INFO_SCHEMA,
   },
 } as const
 
@@ -301,18 +331,6 @@ function contentHitLines(hits: ReadonlyArray<Record<string, unknown>>): string[]
   })
 }
 
-/**
- * Parse and clamp the shared page-size arguments.
- * @param limit - historical limit argument.
- * @param headLimit - explicit page-size cap (min with limit).
- * @param max - configured maximum.
- */
-export function pageSize(limit: number | undefined, headLimit: number | undefined, max: number): number {
-  const candidates = [limit, headLimit].filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
-  const requested = candidates.length === 0 ? 50 : Math.min(...candidates)
-  return Math.max(1, Math.min(max, Math.trunc(requested)))
-}
-
 const SEARCH_DESCRIPTION = [
   'Search a persistent local file-name index in milliseconds (dsh-locator).',
   '',
@@ -335,10 +353,14 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
     parameters: {
       query: { type: 'string', required: true, description: 'Search expression, Everything-style. Empty text matches everything.' },
       mode: { type: 'string', enum: ['names', 'content', 'count'], description: 'names (default) searches file names; content searches file/session bodies; count only returns match counts.' },
-      limit: { type: 'integer', description: 'Maximum hits to return (default 50, at most ' + String(rt.config.maxResults) + ').' },
+      limit: { type: 'integer', description: 'Maximum hits to return (default 10, at most ' + String(rt.config.maxResults) + '). The final page is always sliced to this size.' },
       headLimit: { type: 'integer', description: 'Explicit page-size cap (min of limit and headLimit is used).' },
-      offset: { type: 'integer', description: 'Skip this many sorted matches (pagination). Use nextOffset from the previous page.' },
+      offset: { type: 'integer', description: 'Skip this many sorted matches (pagination). Use nextOffset from the previous page; pages never skip a hit the budget deferred.' },
       contextLines: { type: 'integer', description: 'Lines of surrounding file content to include with content-mode file hits (0-10, default 0).' },
+      budgetChars: { type: 'integer', description: 'Soft cap on the serialized result size in characters (default 8000; 0 disables the budget and its trimming).' },
+      detail: { type: 'string', enum: ['full', 'compact'], description: 'full (default) keeps ref/freshness/permissions evidence; compact keeps only kind/path/name/title/snippet/line/score/ref and drops hash/provenance/freshness/permissions/refStatus/modified.' },
+      evidenceLimit: { type: 'integer', description: 'Evidence-bearing rows in full mode (default 10, at most 50); later rows keep the cheap fields and their ref.' },
+      includeHash: { type: 'boolean', description: 'Content mode: compute a sha256 hash per file hit (default false; skipped on slow/network filesystems).' },
       sort: { type: 'string', enum: ['name', 'path', 'size', 'mtime', 'ext'], description: 'Sort key (default name).' },
       desc: { type: 'boolean', description: 'Sort descending.' },
       regex: { type: 'boolean', description: 'Treat the whole query as a regular expression over the file name.' },
@@ -346,6 +368,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
       wholeWord: { type: 'boolean', description: 'Require word boundaries around each bare term.' },
       filesOnly: { type: 'boolean', description: 'Return files only.' },
       dirsOnly: { type: 'boolean', description: 'Return directories only.' },
+      countLimit: { type: 'integer', description: 'Count mode: counting cap for the exact content count (default 1000, at most 5000).' },
       scope: {
         type: 'string',
         enum: ['workspace', 'all'],
@@ -361,10 +384,16 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           mode?: string
           total?: number
           totalCount?: number
+          nameCount?: number
+          totalAllRoots?: number
           returned?: number
           offset?: number
           nextOffset?: number
           truncated?: boolean
+          hasMore?: boolean
+          consumed?: number
+          truncation?: { reason?: string; dropped?: number; consumed?: number }
+          detail?: string
           indexing?: boolean
           tookMs?: number
           hits?: Array<SearchHit & { ref?: string; refStatus?: string; freshness?: { state?: string }; permissions?: { read?: string } }>
@@ -372,36 +401,59 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           contentCount?: { value: number; kind: 'exact' | 'bounded' | 'unknown' }
           budget?: { dropped?: number; limitChars?: number }
           warnings?: string[]
+          warningHints?: Record<string, string>
           scope?: string
           scopeFallback?: string
           shortQueryFallback?: boolean
           error?: string
+          errorInfo?: { code?: string; hint?: string }
         }
-        if (!v.ok) return [{ type: 'text', text: 'locator_search failed: ' + (v.error ?? 'unknown error') }]
+        if (!v.ok) {
+          const hint = v.errorInfo?.hint === undefined ? '' : ' — ' + v.errorInfo.hint
+          return [{ type: 'text', text: 'locator_search failed: ' + (v.error ?? 'unknown error') + hint }]
+        }
         const mode = v.mode ?? 'names'
-        const budgetNote = v.truncated === true
-          ? '\n(truncated' + (v.nextOffset === undefined ? '' : '; nextOffset ' + String(v.nextOffset)) + (v.budget?.dropped === undefined || v.budget.dropped === 0 ? '' : '; ' + String(v.budget.dropped) + ' hit(s) over the ' + String(v.budget.limitChars ?? 0) + '-char budget') + ')'
+        const truncReason = v.truncation?.reason === undefined ? '' : '; reason: ' + v.truncation.reason
+        const budgetNote = v.truncated === true || v.hasMore === true
+          ? '\n(truncated' + truncReason + (v.nextOffset === undefined ? '' : '; nextOffset ' + String(v.nextOffset)) + (v.budget?.dropped === undefined || v.budget.dropped === 0 ? '' : '; ' + String(v.budget.dropped) + ' hit(s) over the ' + String(v.budget.limitChars ?? 0) + '-char budget') + ')'
           : ''
         const warnings = v.warnings === undefined || v.warnings.length === 0 ? '' : ' (warnings: ' + [...new Set(v.warnings)].join(', ') + ')'
+        const hintText = v.warningHints === undefined
+          ? ''
+          : '\n(hints: ' + Object.entries(v.warningHints).map(([code, hint]) => code + ' — ' + hint).join(' | ') + ')'
         const shortNote = v.shortQueryFallback === true ? ' (short-query fallback: approximate page)' : ''
+        const detailNote = v.detail === 'compact' ? ' (compact: evidence fields omitted)' : ''
+        const scopeNote = v.scope === undefined ? '' : ' (scope: ' + v.scope + (v.scopeFallback === undefined ? '' : '; ' + v.scopeFallback) + ')'
         if (mode === 'content') {
           const hits = v.contentHits ?? []
-          const count = v.contentCount === undefined ? '' : v.contentCount.kind === 'bounded' ? ', count ≥ ' + String(v.contentCount.value) : v.contentCount.kind === 'exact' ? ', count ' + String(v.contentCount.value) : ''
+          const count = v.contentCount === undefined
+            ? ''
+            : v.contentCount.kind === 'bounded'
+              ? ', count ≥ ' + String(v.contentCount.value)
+              : v.contentCount.kind === 'exact'
+                ? ', count ' + String(v.contentCount.value)
+                : ', count unavailable'
           const lines = contentHitLines(hits)
-          return [{ type: 'text', text: 'locator_search (content) ' + JSON.stringify(v.query ?? '') + ': ' + String(hits.length) + ' hit(s)' + count + ' in ' + (v.tookMs ?? 0).toFixed(1) + ' ms' + warnings + shortNote + budgetNote + '\n' + lines.join('\n') }]
+          return [{ type: 'text', text: 'locator_search (content) ' + JSON.stringify(v.query ?? '') + ': ' + String(hits.length) + ' hit(s)' + count + ' in ' + (v.tookMs ?? 0).toFixed(1) + ' ms' + scopeNote + warnings + detailNote + shortNote + budgetNote + hintText + '\n' + lines.join('\n') }]
         }
         if (mode === 'count') {
-          const content = v.contentCount === undefined ? '' : ', content ' + String(v.contentCount.value) + (v.contentCount.kind === 'bounded' ? '+' : '')
-          return [{ type: 'text', text: 'locator_search (count) ' + JSON.stringify(v.query ?? '') + ': names ' + String(v.totalCount ?? v.total ?? 0) + content + warnings }]
+          const content = v.contentCount === undefined
+            ? ''
+            : v.contentCount.kind === 'unknown'
+              ? ', content count unavailable'
+              : ', content ' + String(v.contentCount.value) + (v.contentCount.kind === 'bounded' ? '+' : '')
+          const names = v.nameCount === undefined ? ', names count unavailable' : ', names ' + String(v.nameCount) + ' (all roots)'
+          return [{ type: 'text', text: 'locator_search (count) ' + JSON.stringify(v.query ?? '') + ': primary ' + String(v.total ?? v.totalCount ?? 0) + names + content + warnings + hintText }]
         }
         const hits = v.hits ?? []
+        const globalNote = v.totalAllRoots === undefined ? '' : ' (total is across all configured roots, not just the workspace)'
         const lines = [
-          'locator_search ' + JSON.stringify(v.query ?? '') + ': ' + String(v.total ?? 0) + ' match(es)' +
-            (v.truncated === true ? ', showing ' + String(v.returned ?? 0) : '') +
+          'locator_search ' + JSON.stringify(v.query ?? '') + ': ' + String(v.total ?? 0) + ' match(es)' + globalNote +
+            (v.truncated === true || v.hasMore === true ? ', showing ' + String(v.returned ?? 0) : '') +
             ' in ' + (v.tookMs ?? 0).toFixed(1) + ' ms' +
             (v.indexing === true ? ' (initial scan still running; results are partial)' : '') +
-            (v.scope === undefined ? '' : ' (scope: ' + v.scope + (v.scopeFallback === undefined ? '' : '; ' + v.scopeFallback) + ')') +
-            warnings,
+            scopeNote +
+            warnings + detailNote,
         ]
         for (const hit of hits) {
           const suffix = hit.dir ? '/' : ''
@@ -410,10 +462,8 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           if (hit.ref !== undefined) lines.push('   ref ' + hit.ref)
           if (hit.permissions?.read === 'denied') lines.push('   read denied by scope rules')
         }
-        if (v.truncated === true && (v.total ?? 0) > (v.returned ?? 0)) {
-          lines.push('(' + String((v.total ?? 0) - (v.returned ?? 0)) + ' more not shown; raise limit/offset or narrow the query)')
-        }
         if (budgetNote !== '') lines.push(budgetNote)
+        if (hintText !== '') lines.push(hintText)
         return [{ type: 'text', text: lines.join('\n') }]
       },
       presentationMeta: (_args, value) => {
@@ -429,6 +479,9 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
         }
       },
     },
+    // locator_search only reads the two indexes; sibling read-only calls may
+    // run in the same parallel group (a lazy content boot is idempotent).
+    isConcurrencySafe: () => true,
     presentResult: (_args, result) => {
       const meta = result.meta
       if (!isPathsMeta(meta)) return undefined
@@ -444,16 +497,29 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
       const mode = parseSearchMode(args.mode)
       const limit = pageSize(args.limit, args.headLimit, rt.config.maxResults)
       const offset = Math.max(0, Math.trunc(args.offset ?? 0))
-      const scope = args.scope === 'all' ? 'all' : 'workspace'
+      const scope: 'workspace' | 'all' = args.scope === 'all' ? 'all' : 'workspace'
       const callerCwd = exec?.agent?.session?.header?.cwd
       const caller: CallerIdentity = {
         ...(exec?.agent?.session?.id === undefined ? {} : { sessionId: exec.agent.session.id }),
         ...(callerCwd === undefined ? {} : { cwd: callerCwd }),
       }
       const contextLines = Math.max(0, Math.min(10, Math.trunc(args.contextLines ?? 0)))
+      const detail: HitDetail = args.detail === 'compact' ? 'compact' : 'full'
+      const evidenceLimit = evidenceLimitOf(detail, args.evidenceLimit)
+      const limitChars = outputBudgetOf(args.budgetChars, budgetChars)
+      const scopeNoteOf = (value: 'workspace' | 'all', cwdIndexed: boolean) => value === 'all' || !cwdIndexed ? 'roots' as const : 'workspace' as const
       if (mode === 'content' || mode === 'count') {
         if (options.content === undefined) {
-          return { ok: false as const, query: args.query, mode, error: 'content-index-unavailable', hits: [], contentHits: [], warnings: [] }
+          return {
+            ok: false as const,
+            query: args.query,
+            mode,
+            error: 'content-index-unavailable',
+            errorInfo: errorInfoOf('content-index-unavailable'),
+            hits: [],
+            contentHits: [],
+            warnings: [],
+          }
         }
         options.ensure?.()
         // 0.20.0 P0-15: report the real wall-clock cost of the content query;
@@ -463,20 +529,38 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
           query: args.query,
           limit: mode === 'count' ? 1 : limit,
           offset: mode === 'count' ? 0 : offset,
-          scope: scope as 'workspace' | 'all',
+          scope,
+          detail,
+          evidenceLimit,
+          ...(args.includeHash === true ? { includeHash: true } : {}),
           ...(args.caseSensitive === undefined ? {} : { caseSensitive: args.caseSensitive }),
           ...(args.wholeWord === undefined ? {} : { wholeWord: args.wholeWord }),
           ...(mode === 'count' ? { count: 'exact' as const } : {}),
+          ...(args.countLimit === undefined ? {} : { countLimit: args.countLimit }),
         }
         try {
           const result = await runContentSearchRequest(options.content, request, rt.roots, false, caller, contentScopeOptionsOf(rt))
           if (!result.ok) {
-            return { ok: false as const, query: args.query, mode, error: result.error, warnings: result.warnings, hits: [], contentHits: [], state: result.state }
+            const errorHints = warningHintsOf(result.warnings)
+            return {
+              ok: false as const,
+              query: args.query,
+              mode,
+              error: result.error,
+              errorInfo: errorInfoOf(result.error),
+              warnings: result.warnings,
+              ...(errorHints === undefined ? {} : { warningHints: errorHints }),
+              hits: [],
+              contentHits: [],
+              state: result.state,
+            }
           }
           if (mode === 'count') {
-            // Count mode also asks the name engine for its total (limit 1 keeps
-            // the page cheap); the content count comes from the query above.
-            let namesTotal = 0
+            // Count mode asks both stores: the content count is the primary
+            // number (the mode's purpose), the name-engine count is additive
+            // and reported separately as nameCount. A failed name count must
+            // never be reported as a zero content count.
+            let namesTotal: number | undefined
             const countWarnings = [...result.warnings]
             try {
               rt.start()
@@ -494,145 +578,221 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
               })
               namesTotal = nameResult.total
             } catch (error) {
+              countWarnings.push('name-count-unavailable')
               countWarnings.push('name-count-failed:' + messageOf(error).slice(0, 120))
             }
+            if (result.count.kind === 'bounded') countWarnings.push('bounded-count')
+            if (result.shortQueryFallback === true) countWarnings.push('query-degraded')
+            const contentKnown = result.count.kind !== 'unknown'
+            const primary = contentKnown ? result.count.value : namesTotal
+            const uniqueWarnings = [...new Set(countWarnings)]
+            const countHints = warningHintsOf(uniqueWarnings)
             return {
               ok: true as const,
               query: args.query,
               mode,
-              total: namesTotal,
-              totalCount: namesTotal,
+              ...(primary === undefined ? {} : { total: primary, totalCount: primary }),
+              ...(namesTotal === undefined ? {} : { nameCount: namesTotal }),
               returned: 0,
               offset: 0,
-              truncated: false,
+              truncated: result.count.kind === 'bounded',
+              hasMore: false,
+              consumed: 0,
               hits: [],
               contentHits: [],
               contentCount: result.count,
-              warnings: [...new Set(countWarnings)],
+              budget: { limitChars, usedChars: 0, truncated: false, dropped: 0 },
+              warnings: uniqueWarnings,
+              ...(countHints === undefined ? {} : { warningHints: countHints }),
               state: result.state,
               scope: result.scope,
               ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
               ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
+              ...(detail === 'compact' ? { detail } : {}),
               tookMs: Date.now() - contentStarted,
             }
           }
           const warnings = [...result.warnings]
-          let filtered = result.hits
-          let scopeDropped = 0
-          if (scopeRules !== undefined) {
-            const scoped = scopeRules.filterContent(result.hits)
-            filtered = scoped.hits
-            scopeDropped = scoped.dropped
-            if (scoped.dropped > 0) warnings.push('scope-filtered:' + String(scoped.dropped))
-          }
+          const keepVisible = (hit: { path: string }): boolean => scopeRules === undefined
+            ? true
+            : scopeRules.isSearchable(hit.path) && scopeRules.isIndexable(hit.path) && scopeRules.isReadable(hit.path)
+          const selected = selectPage(result.hits, limit, limitChars, keepVisible)
+          const scopeDropped = selected.dropped.filter(drop => drop.reason === 'scope').length
+          if (scopeDropped > 0) warnings.push('scope-filtered:' + String(scopeDropped))
+          let items = selected.items
+          let keptIndices = selected.keptIndices
+          const dropped = [...selected.dropped]
+          let budget = selected.budget
           if (contextLines > 0) {
-            filtered = await Promise.all(filtered.map(async hit => {
+            const withContext = await Promise.all(items.map(async hit => {
               if (hit.kind !== 'file' || hit.line === undefined) return hit
               const context = await readContextLines(hit.path, hit.line, contextLines)
               return context === undefined ? hit : { ...hit, context: context.lines, contextStart: context.start }
-            })) as typeof filtered
+            }))
+            // Context lines add bytes after the scope/budget selection, so trim
+            // once more and keep the raw positions in sync with the final rows.
+            const rebudget = applyOutputBudget(withContext, limitChars)
+            for (let index = rebudget.items.length; index < keptIndices.length; index++) {
+              dropped.push({ index: keptIndices[index]!, reason: 'budget' })
+            }
+            keptIndices = keptIndices.slice(0, rebudget.items.length)
+            items = rebudget.items
+            budget = rebudget.budget
           }
-          const budgeted = applyOutputBudget(filtered, budgetChars)
-          const pageFull = result.hits.length >= limit
-          const truncated = pageFull || budgeted.budget.truncated || budgeted.budget.dropped > 0
-          // When scope/budget dropped rows inside this page, advance the cursor
-          // past the whole consumed page instead of the kept prefix: advancing
-          // by the kept count would re-fetch (and duplicate) later kept hits.
-          const lossy = scopeDropped > 0 || budgeted.budget.dropped > 0
-          const nextPage = truncated ? offset + (lossy ? result.hits.length : budgeted.items.length) : undefined
+          // selectPage works on page-relative positions; the cursor math is in
+          // absolute store offsets.
+          const advance = pageAdvance({
+            offset,
+            fetchedRows: result.hits.length,
+            keptIndices: keptIndices.map(index => offset + index),
+            dropped: dropped.map(drop => ({ index: offset + drop.index, reason: drop.reason })),
+            more: result.hits.length >= limit || selected.unscanned > 0,
+          })
+          if (result.shortQueryFallback === true) warnings.push('query-degraded')
+          if (result.count.kind === 'bounded') warnings.push('bounded-count')
+          if (result.workspaceEmpty === true) warnings.push('workspace-empty')
+          const uniqueWarnings = [...new Set(warnings)]
+          const contentHints = warningHintsOf(uniqueWarnings)
+          const totalKnown = result.count.kind === 'unknown' ? undefined : result.count.value
           return {
             ok: true as const,
             query: args.query,
             mode,
-            total: result.count.kind === 'unknown' ? 0 : result.count.value,
-            ...(result.count.kind === 'unknown' ? {} : { totalCount: result.count.value }),
-            returned: budgeted.items.length,
+            ...(totalKnown === undefined ? {} : { total: totalKnown, totalCount: totalKnown }),
+            returned: items.length,
             offset,
-            ...(nextPage === undefined ? {} : { nextOffset: nextPage }),
-            truncated,
+            ...(advance.nextOffset === undefined ? {} : { nextOffset: advance.nextOffset }),
+            truncated: advance.truncated,
+            hasMore: advance.hasMore,
+            consumed: advance.consumed,
+            ...(advance.truncation === undefined ? {} : { truncation: advance.truncation }),
             hits: [],
-            contentHits: budgeted.items,
+            contentHits: items,
             contentCount: result.count,
-            budget: budgeted.budget,
-            warnings: [...new Set(warnings)],
+            budget,
+            warnings: uniqueWarnings,
+            ...(contentHints === undefined ? {} : { warningHints: contentHints }),
             state: result.state,
             scope: result.scope,
             tookMs: Date.now() - contentStarted,
             ...(result.scopeFallback === undefined ? {} : { scopeFallback: result.scopeFallback }),
             ...(result.shortQueryFallback === true ? { shortQueryFallback: true } : {}),
+            ...(detail === 'compact' ? { detail } : {}),
           }
         } catch (error) {
-          return { ok: false as const, query: args.query, mode, error: messageOf(error) }
+          return {
+            ok: false as const,
+            query: args.query,
+            mode,
+            error: messageOf(error),
+            errorInfo: errorInfoOf('content-index-error', messageOf(error)),
+          }
         }
       }
       const cwdIsIndexed = callerCwd !== undefined && rt.roots.some(root => withinRoots(callerCwd, [root]))
       const narrowToCwd = scope === 'workspace' && cwdIsIndexed
-      // Ask for a wider page when the cwd filter will drop rows so the returned
-      // page stays full for the workspace scope.
-      const fetchLimit = narrowToCwd ? Math.min(rt.config.maxResults, limit * 5) : limit
+      const visibility = scopeNoteOf(scope, cwdIsIndexed)
+      // Workspace narrowing happens after the engine page, so the first window is
+      // wider than the page and the filler keeps fetching (bounded) until the
+      // page is full or the row bound is exhausted.
+      const fetchSize = narrowToCwd ? Math.min(rt.config.maxResults, Math.max(limit * 5, 50)) : limit
       try {
         rt.start()
-        const result = await rt.search({
-          query: args.query,
-          limit: fetchLimit,
-          offset: Math.max(0, args.offset ?? 0),
-          sort: args.sort ?? 'name',
-          desc: args.desc ?? false,
-          regex: args.regex ?? false,
-          caseSensitive: args.caseSensitive ?? false,
-          wholeWord: args.wholeWord ?? false,
-          filesOnly: args.filesOnly ?? false,
-          dirsOnly: args.dirsOnly ?? false,
-        })
+        const window = await fetchNamePage(
+          async page => await rt.search({
+            query: args.query,
+            limit: page.limit,
+            offset: page.offset,
+            sort: args.sort ?? 'name',
+            desc: args.desc ?? false,
+            regex: args.regex ?? false,
+            caseSensitive: args.caseSensitive ?? false,
+            wholeWord: args.wholeWord ?? false,
+            filesOnly: args.filesOnly ?? false,
+            dirsOnly: args.dirsOnly ?? false,
+          }),
+          {
+            offset,
+            limit,
+            fetchSize,
+            maxRows: narrowToCwd ? 250 : limit,
+            keep: hit => {
+              if (narrowToCwd && !withinRoots(hit.path, [callerCwd as string])) return 'narrow'
+              if (scopeRules !== undefined && !scopeRules.isSearchable(hit.path)) return 'scope'
+              return 'keep'
+            },
+          },
+        )
         const observedAt = Date.now()
-        const visibility = cwdIsIndexed ? 'workspace' : 'roots'
-        const mapped = result.hits.map(hit => {
+        const mapped = window.items.map((hit, index) => {
           const readable = scopeRules?.readability(hit.path) ?? { read: 'allowed' as const, reason: 'name hits come from the configured index roots' }
-          return {
+          const base = {
             path: hit.path,
             name: hit.name,
             size: hit.size,
             mtime: hit.mtime,
-            modified: new Date(hit.mtime).toISOString(),
             ext: hit.ext,
             dir: hit.dir,
             ...(hit.dir || readable.read !== 'allowed' ? {} : { ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }),
+          }
+          if (!evidenceVisible(index, detail, evidenceLimit)) return base
+          return {
+            ...base,
+            modified: new Date(hit.mtime).toISOString(),
             refStatus: 'unknown' as const,
             freshness: { state: 'unknown' as const, observedAt, mtime: hit.mtime },
-            permissions: { read: readable.read, visibility: visibility as 'workspace' | 'roots', reason: readable.reason },
+            permissions: { read: readable.read, visibility, reason: readable.reason },
           }
         })
-        const narrowed = narrowToCwd
-          ? mapped.filter(hit => withinRoots(hit.path, [callerCwd as string]))
-          : mapped
-        const scopeFiltered = scopeRules === undefined ? { hits: narrowed, dropped: 0 } : scopeRules.filterSearchable(narrowed)
-        const budgeted = applyOutputBudget(scopeFiltered.hits, budgetChars)
-        const truncated = result.truncated || scopeFiltered.dropped > 0 || budgeted.budget.dropped > 0
-        const warnings = scopeFiltered.dropped > 0 ? ['scope-filtered:' + String(scopeFiltered.dropped)] : []
-        // Advancing by the kept count would re-fetch rows when the cwd/scope
-        // filter or the budget dropped something inside this page.
-        const lossy = narrowed.length < mapped.length || scopeFiltered.dropped > 0 || budgeted.budget.dropped > 0
-        const nextPage = truncated ? result.offset + (lossy ? mapped.length : budgeted.items.length) : undefined
+        // The budget measures the mapped payload (evidence fields included), and
+        // the cursor is recomputed from its raw positions so deferred rows stay
+        // reachable on the next page.
+        const budgeted = applyOutputBudget(mapped, limitChars)
+        const dropped = [...window.dropped]
+        for (let index = budgeted.items.length; index < mapped.length; index++) {
+          dropped.push({ index: window.indices[index]!, reason: 'budget' })
+        }
+        const advance = pageAdvance({
+          offset,
+          fetchedRows: window.rawConsumed,
+          keptIndices: window.indices.slice(0, budgeted.items.length),
+          dropped,
+          more: window.more,
+        })
+        const hits = budgeted.items
+        const warnings: string[] = []
+        if (window.scopeDropped > 0) warnings.push('scope-filtered:' + String(window.scopeDropped))
+        // A workspace page that stays empty past the bounded fill is reported
+        // explicitly: an empty page must not read as "this file does not exist".
+        if (narrowToCwd && window.items.length === 0 && offset === 0) warnings.push('workspace-empty')
+        const uniqueWarnings = [...new Set(warnings)]
+        const hints = warningHintsOf(narrowToCwd ? [...uniqueWarnings, 'total-is-global'] : uniqueWarnings)
         return {
           ok: true as const,
           query: args.query,
           mode: 'names' as const,
-          total: result.total,
-          totalCount: result.total,
-          returned: budgeted.items.length,
-          offset: result.offset,
-          ...(nextPage === undefined ? {} : { nextOffset: nextPage }),
-          truncated,
-          indexing: result.indexing === true,
-          tookMs: result.tookNs / 1e6,
-          hits: budgeted.items,
+          total: window.total,
+          totalCount: window.total,
+          ...(narrowToCwd ? { totalAllRoots: window.total } : {}),
+          returned: hits.length,
+          offset,
+          ...(advance.nextOffset === undefined ? {} : { nextOffset: advance.nextOffset }),
+          truncated: advance.truncated,
+          hasMore: advance.hasMore,
+          consumed: advance.consumed,
+          ...(advance.truncation === undefined ? {} : { truncation: advance.truncation }),
+          indexing: window.indexing === true,
+          tookMs: window.tookMs,
+          hits,
           budget: budgeted.budget,
-          ...(warnings.length === 0 ? {} : { warnings }),
-          scope: scope as 'workspace' | 'all',
+          ...(uniqueWarnings.length === 0 ? {} : { warnings: uniqueWarnings }),
+          ...(hints === undefined ? {} : { warningHints: hints }),
+          scope,
           ...(scope === 'workspace' && !cwdIsIndexed ? { scopeFallback: 'cwd-not-indexed; searched every configured root' } : {}),
+          ...(detail === 'compact' ? { detail } : {}),
         }
       } catch (error) {
-        return { ok: false as const, query: args.query, error: messageOf(error) }
+        return { ok: false as const, query: args.query, error: messageOf(error), errorInfo: errorInfoOf('engine-error', messageOf(error)) }
       }
     },
   })
@@ -683,6 +843,7 @@ const OUTLINE_OUTPUT = {
     state: CONTENT_STATE_SCHEMA,
     warnings: { type: 'array', items: { type: 'string' } },
     error: { type: 'string' },
+    errorInfo: ERROR_INFO_SCHEMA,
   },
 } as const
 
@@ -700,6 +861,7 @@ const SYMBOL_OUTPUT = {
     state: CONTENT_STATE_SCHEMA,
     warnings: { type: 'array', items: { type: 'string' } },
     error: { type: 'string' },
+    errorInfo: ERROR_INFO_SCHEMA,
   },
 } as const
 
@@ -728,6 +890,7 @@ const REPO_MAP_OUTPUT = {
     state: CONTENT_STATE_SCHEMA,
     warnings: { type: 'array', items: { type: 'string' } },
     error: { type: 'string' },
+    errorInfo: ERROR_INFO_SCHEMA,
   },
 } as const
 
@@ -806,21 +969,55 @@ export function makeOutlineTool(content: ContentIndex, ensure?: () => void, root
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
       ensure?.()
       const path = args.path.trim()
       const state = contentStateOf(content)
-      if (path === '') return { ok: false as const, path, symbols: [], error: 'path is empty', ...(state === undefined ? {} : { state }) }
+      if (path === '') {
+        return {
+          ok: false as const,
+          path,
+          symbols: [],
+          error: 'path is empty',
+          errorInfo: errorInfoOf('invalid-arguments', 'path is empty', { hint: 'Pass an absolute file path inside the configured index roots.' }),
+          ...(state === undefined ? {} : { state }),
+        }
+      }
       const resolved = resolveWithinRoots(path, roots)
       if (resolved === undefined) {
-        return { ok: false as const, path, symbols: [], error: 'content-path-denied', warnings: ['path-outside-roots'], ...(state === undefined ? {} : { state }) }
+        return {
+          ok: false as const,
+          path,
+          symbols: [],
+          error: 'content-path-denied',
+          errorInfo: errorInfoOf('content-path-denied'),
+          warnings: ['path-outside-roots'],
+          ...(state === undefined ? {} : { state }),
+        }
       }
       const readable = scope?.readability(resolved.path) ?? { read: 'allowed' as const, reason: 'path is inside the configured roots' }
       if (readable.read === 'denied') {
-        return { ok: false as const, path: resolved.path, symbols: [], error: 'content-scope-denied', warnings: ['path-not-readable'], ...(state === undefined ? {} : { state }) }
+        return {
+          ok: false as const,
+          path: resolved.path,
+          symbols: [],
+          error: 'content-scope-denied',
+          errorInfo: errorInfoOf('content-scope-denied'),
+          warnings: ['path-not-readable'],
+          ...(state === undefined ? {} : { state }),
+        }
       }
       if (scope !== undefined && (!scope.isSearchable(resolved.path) || !scope.isIndexable(resolved.path))) {
-        return { ok: false as const, path: resolved.path, symbols: [], error: 'content-scope-denied', warnings: ['scope-filtered'], ...(state === undefined ? {} : { state }) }
+        return {
+          ok: false as const,
+          path: resolved.path,
+          symbols: [],
+          error: 'content-scope-denied',
+          errorInfo: errorInfoOf('content-scope-denied'),
+          warnings: ['scope-filtered'],
+          ...(state === undefined ? {} : { state }),
+        }
       }
       const limit = Math.max(1, Math.min(200, Math.trunc(args.maxSymbols ?? 200)))
       // The store keeps the configured-root spelling the engine indexed, while
@@ -873,11 +1070,21 @@ export function makeSymbolTool(content: ContentIndex, ensure?: () => void, scope
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
       ensure?.()
       const state = contentStateOf(content)
       const name = args.name.trim()
-      if (name === '') return { ok: false as const, name, symbols: [], error: 'name is empty', ...(state === undefined ? {} : { state }) }
+      if (name === '') {
+        return {
+          ok: false as const,
+          name,
+          symbols: [],
+          error: 'name is empty',
+          errorInfo: errorInfoOf('invalid-arguments', 'name is empty', { hint: 'Pass a non-empty symbol name or fragment.' }),
+          ...(state === undefined ? {} : { state }),
+        }
+      }
       const limit = Math.max(1, Math.min(200, Math.trunc(args.limit ?? 50)))
       const all = content.findSymbols(name, limit)
       const visible: Array<{ path: string; name: string; kind: string; line: number; scope?: string; language?: string; ref?: string; permissions?: { read: 'allowed' | 'denied'; visibility: 'workspace' | 'roots' | 'session' | 'external'; reason: string } }> = []
@@ -936,6 +1143,7 @@ export function makeRepoMapTool(content: ContentIndex, ensure?: () => void, root
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
+    isConcurrencySafe: () => true,
     async execute(args) {
       ensure?.()
       const state = contentStateOf(content)
@@ -945,12 +1153,26 @@ export function makeRepoMapTool(content: ContentIndex, ensure?: () => void, root
         const requested: string[] = []
         for (const root of args.roots) {
           if (typeof root !== 'string' || root.trim() === '') {
-            return { ok: false as const, files: [], error: 'content-path-denied', warnings: ['invalid-root'], ...(state === undefined ? {} : { state }) }
+            return {
+              ok: false as const,
+              files: [],
+              error: 'content-path-denied',
+              errorInfo: errorInfoOf('invalid-arguments', 'content-path-denied', { hint: 'Pass directory paths inside the configured index roots.' }),
+              warnings: ['invalid-root'],
+              ...(state === undefined ? {} : { state }),
+            }
           }
           const spelling = root.trim()
           const resolved = resolveWithinRoots(spelling, roots)
           if (resolved === undefined) {
-            return { ok: false as const, files: [], error: 'content-path-denied', warnings: ['path-outside-roots'], ...(state === undefined ? {} : { state }) }
+            return {
+              ok: false as const,
+              files: [],
+              error: 'content-path-denied',
+              errorInfo: errorInfoOf('content-path-denied'),
+              warnings: ['path-outside-roots'],
+              ...(state === undefined ? {} : { state }),
+            }
           }
           // Keep the caller's spelling: authorization used the canonical real
           // path, but the symbol rows are keyed by the configured-root spelling
@@ -1051,6 +1273,7 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           refreshSkippedByPressure?: number
           content?: {
             enabled?: boolean
+            building?: boolean
             files?: number
             sessions?: number
             messages?: number
@@ -1100,8 +1323,12 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           binary?: string
           warning?: string
           error?: string
+          errorInfo?: { code?: string; hint?: string }
         }
-        if (!v.ok) return [{ type: 'text', text: 'locator_status: engine unavailable — ' + (v.error ?? 'unknown error') }]
+        if (!v.ok) {
+          const hint = v.errorInfo?.hint === undefined ? '' : ' — ' + v.errorInfo.hint
+          return [{ type: 'text', text: 'locator_status: engine unavailable — ' + (v.error ?? 'unknown error') + hint }]
+        }
         const lines = [
           'locator_status: ' + String(v.entries ?? 0) + ' entries (' + String(v.files ?? 0) + ' files, ' + String(v.dirs ?? 0) + ' dirs)',
           '  roots: ' + ((v.roots ?? []).join(', ') || '(none)'),
@@ -1139,8 +1366,23 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           lines.push('  incremental: ' + (v.incrementalRefresh === false ? 'off (full rescan fallback)' : 'on') + ' · skipped ' + String(skipped) + ' healthy root(s), last ' + (v.refreshMode ?? 'refresh') + (v.refreshTookMs === undefined ? '' : ' in ' + String(v.refreshTookMs) + ' ms') + (v.refreshEntries === undefined ? '' : ' (' + String(v.refreshEntries) + ' entries)') + (v.refreshReason === undefined ? '' : ' · ' + v.refreshReason))
         }
         if (v.content?.enabled === true) {
-          lines.push('  content: ' + String(v.content.files ?? 0) + ' files / ' + String(v.content.messages ?? 0) + ' messages' + (v.content.fullIndex === true ? ' · full-index' : '') + (v.content.reasoningIndex === true ? ' · reasoning-indexed' : '') + (v.content.toolResultsIndex === true ? ' · tool-results-indexed' : '') + (v.content.truncated === true ? ' · truncated' : ''))
           const progress = v.content.progress
+          const building = v.content.building === true
+          const indexedSoFar = typeof progress?.indexed === 'number' ? progress.indexed : undefined
+          if (building) {
+            // Never report a building index as an empty one: the live counters
+            // (or the progress block) say how much is already searchable.
+            const files = v.content.files ?? 0
+            const messages = v.content.messages ?? 0
+            const live = files > 0 || messages > 0
+              ? String(files) + ' files / ' + String(messages) + ' messages indexed so far'
+              : indexedSoFar === undefined
+                ? 'starting'
+                : String(indexedSoFar) + ' entries indexed so far'
+            lines.push('  content: building — ' + live + (v.content.fullIndex === true ? ' · full-index' : '') + (v.content.reasoningIndex === true ? ' · reasoning-indexed' : '') + (v.content.toolResultsIndex === true ? ' · tool-results-indexed' : '') + (v.content.truncated === true ? ' · truncated' : '') + ' (searchable results and counts will grow)')
+          } else {
+            lines.push('  content: ' + String(v.content.files ?? 0) + ' files / ' + String(v.content.messages ?? 0) + ' messages' + (v.content.fullIndex === true ? ' · full-index' : '') + (v.content.reasoningIndex === true ? ' · reasoning-indexed' : '') + (v.content.toolResultsIndex === true ? ' · tool-results-indexed' : '') + (v.content.truncated === true ? ' · truncated' : ''))
+          }
           if (progress !== undefined) {
             const total = typeof progress.total === 'number' ? ' / ' + String(progress.total) : ''
             lines.push('  building: ' + (progress.phase === 'sessions' ? 'sessions' : 'files') + ' ' + String(progress.scanned ?? 0) + total + ' scanned, ' + String(progress.indexed ?? 0) + ' indexed' + (typeof progress.path === 'string' && progress.path !== '' ? ' · ' + progress.path : ''))
@@ -1185,7 +1427,7 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
               const codes = Object.entries(diagnostics.warningCounts)
                 .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
                 .map(([code, count]) => code + ' ' + String(count))
-              if (codes.length > 0) parts.push('extract warnings: ' + codes.slice(0, 3).join(', '))
+              if (codes.length > 0) parts.push('warning counts: ' + codes.slice(0, 3).join(', '))
             }
             if (typeof diagnostics.lastRefreshMs === 'number' && diagnostics.lastRefreshMs > 0) {
               parts.push('refresh ' + String(diagnostics.lastRefreshMs) + ' ms' + (typeof diagnostics.lastRefreshMode === 'string' && diagnostics.lastRefreshMode !== '' ? ' (' + diagnostics.lastRefreshMode + ')' : ''))
@@ -1213,6 +1455,8 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
+    // Status reads the pushed engine stats copy and one content snapshot.
+    isConcurrencySafe: () => true,
     async execute() {
       rt.start()
       const status = rt.status
@@ -1252,7 +1496,12 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
         scanning: status.scanning !== undefined,
         stateDir: engine?.stateDir ?? rt.stateDir,
         binary: rt.binary,
-        ...(content === undefined ? {} : { content: { enabled: true, ...content.status(), ...contentDiagnosticsOf(content) } }),
+        ...(content === undefined ? {} : (() => {
+          // One snapshot per status call: content.status() is the live counters
+          // block (it grows while a build runs), diagnostics is O(1).
+          const contentState = contentStateOf(content)
+          return contentState === undefined ? {} : { content: { enabled: true, ...contentState, ...contentDiagnosticsOf(content) } }
+        })()),
         scope: {
           ...scopeDescription,
           outputBudgetChars: outputBudgetChars(config),
@@ -1261,7 +1510,7 @@ export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope
           ...(hookWarnings.length === 0 ? {} : { warnings: hookWarnings }),
         },
         ...(status.warning === undefined ? {} : { warning: status.warning }),
-        ...(status.error === undefined ? {} : { error: status.error }),
+        ...(status.error === undefined ? {} : { error: status.error, errorInfo: errorInfoOf('engine-error', status.error) }),
       }
     },
   })
@@ -1298,13 +1547,20 @@ export function makeRebuildTool(rt: LocatorRuntime) {
         rt.roots,
         rt.config.excludes,
       )
-      if (!scope.ok) return { ok: false as const, error: scope.error }
+      if (!scope.ok) {
+        return {
+          ok: false as const,
+          error: scope.error,
+          errorInfo: errorInfoOf('invalid-arguments', scope.error, { hint: 'Rebuild roots must stay inside the configured roots and excludes must come from the configured exclude list.' }),
+        }
+      }
       try {
         rt.start()
         const result = await rt.rebuild(scope.roots, scope.excludes)
         return { ok: true as const, started: result.started }
       } catch (error) {
-        return { ok: false as const, error: messageOf(error) }
+        const message = messageOf(error)
+        return { ok: false as const, error: message, errorInfo: errorInfoOf('engine-error', message) }
       }
     },
   })

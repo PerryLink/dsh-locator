@@ -38,9 +38,23 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import type { LocatorRuntime, SearchArgs } from './runtime.ts'
 import type { ContentHit, ContentIndex } from './content.ts'
+import { fileRef } from './refs.ts'
 import type { ContentSearchOptions } from './content-search.ts'
 import { contentScopeOptionsOf, readContextLines, runContentSearchRequest, type CallerIdentity, type ContentRequest, type ContentRequestResult } from './find.ts'
-import { applyOutputBudget, DEFAULT_OUTPUT_BUDGET_CHARS, type Scope } from './scope.ts'
+import {
+  applyOutputBudget,
+  DEFAULT_OUTPUT_BUDGET_CHARS,
+  ERROR_CODES,
+  errorInfoOf,
+  evidenceLimitOf,
+  evidenceVisible,
+  pageAdvance,
+  pageSize,
+  selectPage,
+  type ErrorInfo,
+  type HitDetail,
+  type Scope,
+} from './scope.ts'
 import { isAbortError, readCombinedRequest, runCombinedSearch, type CombinedDeps } from './combined.ts'
 import { engineResourceFields, type EngineStatus } from './runtime.ts'
 import {
@@ -100,6 +114,8 @@ interface SearchBody {
   pathPrefix?: unknown
   count?: unknown
   countLimit?: unknown
+  detail?: unknown
+  evidenceLimit?: unknown
 }
 
 const BODY_LIMIT = 64 * 1024
@@ -234,13 +250,12 @@ function handler(
       return
     }
     if (req.method !== 'POST') {
-      res.statusCode = 405
       res.setHeader('allow', 'POST')
-      res.end()
+      sendFailure(res, 405, 'method-not-allowed', 'method not allowed (use POST)')
       return
     }
     if (!isJsonContentType(req.headers['content-type'])) {
-      sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
+      sendFailure(res, 415, 'unsupported-media-type', 'content-type must be application/json')
       return
     }
     let body: Record<string, unknown>
@@ -248,18 +263,72 @@ function handler(
       body = await readJson(req, BODY_LIMIT)
     } catch (error) {
       const status = error instanceof HttpError ? error.status : 400
-      sendJson(res, status, { ok: false, error: messageOf(error) })
+      sendFailure(res, status, wireErrorCode(status), messageOf(error))
       return
     }
     try {
       const value = await run(body, res)
-      sendJson(res, 200, { ok: true, ...asRecord(value) })
+      sendJson(res, 200, withErrorInfo({ ok: true, ...asRecord(value) }))
     } catch (error) {
       // A client disconnect cancels the work; there is nobody left to read the
       // error, so report it only if the response is still writable.
-      sendJson(res, 200, { ok: false, error: isAbortError(error) ? 'request-aborted' : messageOf(error) })
+      const code = isAbortError(error) ? 'request-aborted' : 'request-failed'
+      sendFailure(res, 200, code, isAbortError(error) ? 'request-aborted' : messageOf(error))
     }
   }
+}
+
+/** Stable wire error code per HTTP status. */
+function wireErrorCode(status: number): string {
+  if (status === 413) return 'body-too-large'
+  if (status === 415) return 'unsupported-media-type'
+  if (status === 405) return 'method-not-allowed'
+  if (status === 400) return 'invalid-json'
+  return 'request-failed'
+}
+
+/** Send one JSON failure with both the legacy error string and errorInfo. */
+function sendFailure(res: ServerResponse, status: number, code: string, message: string): void {
+  sendJson(res, status, { ok: false, error: message, errorInfo: errorInfoOf(code, message) })
+}
+
+/** Content/tool error codes that are already machine-readable message strings. */
+const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set<string>([
+  ...Object.values(ERROR_CODES),
+  'content-query-too-short',
+  'content-query-too-long',
+  'content-query-too-many-terms',
+  'content-query-invalid',
+  'content-regex-not-supported',
+  'content-search-cancelled',
+  'content-search-worker-failed',
+  'content-path-denied',
+  'content-scope-denied',
+  'session-not-authorized',
+  'content-index-unavailable',
+  'name-index-unavailable',
+  'invalid-escape',
+  'invalid-control-char',
+])
+
+/** Best-effort structured error for a legacy error message (routes never throw). */
+function errorInfoForMessage(message: string): ErrorInfo {
+  const trimmed = message.trim()
+  if (KNOWN_ERROR_CODES.has(trimmed)) return errorInfoOf(trimmed)
+  const lower = trimmed.toLowerCase()
+  if (lower.includes('already running')) return errorInfoOf('content-build-running', message)
+  if (lower.includes('outside the indexed roots')) return errorInfoOf('content-path-denied', message)
+  if (lower.includes('does not exist')) return errorInfoOf('invalid-arguments', message, { hint: 'Check the path; locator_status lists the indexed roots.' })
+  if (lower.includes('aborted')) return errorInfoOf('request-aborted', message)
+  return errorInfoOf('request-failed', message)
+}
+
+/** Attach errorInfo to any route value that reports ok:false. */
+function withErrorInfo(value: Record<string, unknown>): Record<string, unknown> {
+  if (value.ok === false && typeof value.error === 'string' && value.errorInfo === undefined) {
+    return { ...value, errorInfo: errorInfoForMessage(value.error) }
+  }
+  return value
 }
 
 /**
@@ -289,25 +358,25 @@ function searchHandler(
         body = searchQueryOf(req)
       } catch (error) {
         const status = error instanceof HttpError ? error.status : 400
-        sendJson(res, status, { ok: false, error: messageOf(error) })
+        sendFailure(res, status, status === 400 ? 'invalid-arguments' : wireErrorCode(status), messageOf(error))
         return
       }
       try {
         const value = await search(rt, content, ensure, scope, body, res)
-        sendJson(res, 200, { ok: true, ...asRecord(value) })
+        sendJson(res, 200, withErrorInfo({ ok: true, ...asRecord(value) }))
       } catch (error) {
-        sendJson(res, 200, { ok: false, error: isAbortError(error) ? 'request-aborted' : messageOf(error) })
+        const code = isAbortError(error) ? 'request-aborted' : 'request-failed'
+        sendFailure(res, 200, code, isAbortError(error) ? 'request-aborted' : messageOf(error))
       }
       return
     }
     if (req.method !== 'POST') {
-      res.statusCode = 405
       res.setHeader('allow', 'GET, POST')
-      res.end()
+      sendFailure(res, 405, 'method-not-allowed', 'method not allowed (use GET or POST)')
       return
     }
     if (!isJsonContentType(req.headers['content-type'])) {
-      sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
+      sendFailure(res, 415, 'unsupported-media-type', 'content-type must be application/json')
       return
     }
     let body: Record<string, unknown>
@@ -315,14 +384,15 @@ function searchHandler(
       body = await readJson(req, BODY_LIMIT)
     } catch (error) {
       const status = error instanceof HttpError ? error.status : 400
-      sendJson(res, status, { ok: false, error: messageOf(error) })
+      sendFailure(res, status, wireErrorCode(status), messageOf(error))
       return
     }
     try {
       const value = await search(rt, content, ensure, scope, body, res)
-      sendJson(res, 200, { ok: true, ...asRecord(value) })
+      sendJson(res, 200, withErrorInfo({ ok: true, ...asRecord(value) }))
     } catch (error) {
-      sendJson(res, 200, { ok: false, error: isAbortError(error) ? 'request-aborted' : messageOf(error) })
+      const code = isAbortError(error) ? 'request-aborted' : 'request-failed'
+      sendFailure(res, 200, code, isAbortError(error) ? 'request-aborted' : messageOf(error))
     }
   }
 }
@@ -383,11 +453,16 @@ function searchQueryOf(req: IncomingMessage): Record<string, unknown> {
     if (!MATCH_MODES.has(matchMode)) throw new HttpError(400, 'invalid matchMode parameter')
     body.matchMode = matchMode
   }
+  const detail = url.searchParams.get('detail')
+  if (detail !== null && detail !== '') {
+    if (detail !== 'full' && detail !== 'compact') throw new HttpError(400, 'invalid detail parameter')
+    body.detail = detail
+  }
   for (const name of ['sessionId', 'pathPrefix'] as const) {
     const value = url.searchParams.get(name)
     if (value !== null && value !== '') body[name] = value
   }
-  for (const name of ['limit', 'headLimit', 'offset', 'contextLines', 'countLimit'] as const) {
+  for (const name of ['limit', 'headLimit', 'offset', 'contextLines', 'countLimit', 'evidenceLimit'] as const) {
     const value = url.searchParams.get(name)
     if (value === null || value === '') continue
     if (!/^-?\d+$/.test(value)) throw new HttpError(400, 'invalid ' + name + ' parameter')
@@ -640,11 +715,18 @@ async function search(
 ): Promise<unknown> {
   const body = raw as SearchBody
   const mode = body.mode === 'content' || body.mode === 'count' ? body.mode : 'names'
-  const limit = clampNumber(body.headLimit ?? body.limit, 1, rt.config.maxResults, 100)
+  const limit = pageSize(
+    typeof body.limit === 'number' ? body.limit : undefined,
+    typeof body.headLimit === 'number' ? body.headLimit : undefined,
+    rt.config.maxResults,
+    10,
+  )
   const offset = clampNumber(body.offset, 0, 100_000, 0)
   const scope = body.scope === 'all' ? 'all' : 'workspace'
   const query = typeof body.query === 'string' ? body.query : ''
   const budgetChars = rt.config.outputBudgetChars ?? DEFAULT_OUTPUT_BUDGET_CHARS
+  const detail: HitDetail = body.detail === 'compact' ? 'compact' : 'full'
+  const evidenceLimit = evidenceLimitOf(detail, typeof body.evidenceLimit === 'number' ? body.evidenceLimit : undefined)
   if (mode === 'content' || mode === 'count') {
     if (content === undefined) return { ok: false, mode, query, error: 'content-index-unavailable' }
     ensure?.()
@@ -654,6 +736,8 @@ async function search(
       limit: mode === 'count' ? 1 : limit,
       offset: mode === 'count' ? 0 : offset,
       scope,
+      detail,
+      evidenceLimit,
       // The HTTP API has no per-session caller identity, so session documents
       // are never exposed here: file bodies only, over every indexed root.
       filesOnly: true,
@@ -677,55 +761,76 @@ async function search(
     }
     const tookMs = Date.now() - started
     if (!result.ok) return { ok: false, mode, query, error: result.error, warnings: result.warnings }
+    const countKnown = result.count.kind === 'unknown' ? undefined : result.count.value
     if (mode === 'count') {
       return {
         ok: true,
         mode,
         query,
-        totalCount: result.count.kind === 'unknown' ? 0 : result.count.value,
+        ...(countKnown === undefined ? {} : { total: countKnown, totalCount: countKnown }),
         contentCount: result.count,
+        count: result.count,
         hits: [],
-        truncated: false,
+        truncated: result.count.kind === 'bounded',
+        hasMore: false,
+        consumed: 0,
         tookMs,
       }
     }
-    const filtered = scopeRules === undefined ? result.hits : scopeRules.filterContent(result.hits).hits
-    const scopedDropped = result.hits.length - filtered.length
-    const withContext = contextLines <= 0
-      ? filtered
-      : await Promise.all(filtered.map(async hit => {
-          if (hit.kind !== 'file' || hit.line === undefined) return hit
-          const context = await readContextLines(hit.path, hit.line, contextLines)
-          return context === undefined ? hit : { ...hit, context: context.lines, contextStart: context.start }
-        }))
-    const budgeted = applyOutputBudget(withContext, budgetChars)
-    const lossy = scopedDropped > 0 || budgeted.budget.dropped > 0
-    const truncated = result.hits.length >= limit || lossy
-    // Advance by the whole underlying page when the scope filter or the output
-    // budget dropped rows inside it; advancing by the kept prefix would page
-    // into duplicates and need one request per dropped row (0.20.0 P0-15).
-    const nextOffset = offset + (lossy ? result.hits.length : budgeted.items.length)
+    const keepVisible = (hit: { path: string }): boolean => scopeRules === undefined ? true : scopeRules.contentVisible(hit.path)
+    // Select the raw page (scope + limit) first, then add context and trim to the
+    // budget once, so nextOffset stays aligned with returned rows.
+    const selected = selectPage(result.hits, limit, 0, keepVisible)
+    let items = selected.items
+    let keptIndices = [...selected.keptIndices]
+    const dropped = [...selected.dropped]
+    if (contextLines > 0) {
+      items = await Promise.all(items.map(async hit => {
+        if (hit.kind !== 'file' || hit.line === undefined) return hit
+        const context = await readContextLines(hit.path, hit.line, contextLines)
+        return context === undefined ? hit : { ...hit, context: context.lines, contextStart: context.start }
+      }))
+    }
+    const budgeted = applyOutputBudget(items, budgetChars)
+    for (let index = budgeted.items.length; index < keptIndices.length; index++) {
+      dropped.push({ index: keptIndices[index]!, reason: 'budget' })
+    }
+    keptIndices = keptIndices.slice(0, budgeted.items.length)
+    // selectPage works on page-relative positions; the cursor math is in
+    // absolute store offsets.
+    const advance = pageAdvance({
+      offset,
+      fetchedRows: result.hits.length,
+      keptIndices: keptIndices.map(index => offset + index),
+      dropped: dropped.map(drop => ({ index: offset + drop.index, reason: drop.reason })),
+      more: result.hits.length >= limit || selected.unscanned > 0,
+    })
     return {
       ok: true,
       mode,
       query,
-      totalCount: result.count.kind === 'unknown' ? undefined : result.count.value,
+      ...(countKnown === undefined ? {} : { total: countKnown, totalCount: countKnown }),
       returned: budgeted.items.length,
       offset,
-      truncated,
-      ...(truncated ? { nextOffset } : {}),
+      truncated: advance.truncated,
+      hasMore: advance.hasMore,
+      consumed: advance.consumed,
+      ...(advance.nextOffset === undefined ? {} : { nextOffset: advance.nextOffset }),
+      ...(advance.truncation === undefined ? {} : { truncation: advance.truncation }),
       tookMs,
       hits: budgeted.items,
       budget: budgeted.budget,
       count: result.count,
+      contentCount: result.count,
       state: result.state,
       warnings: result.warnings,
+      ...(detail === 'compact' ? { detail } : {}),
     }
   }
   const sort = sortKey(body.sort)
   const args: SearchArgs = {
     query,
-    limit: mode === 'names' ? limit : limit,
+    limit,
     offset,
     sort,
     desc: body.desc === true,
@@ -738,35 +843,59 @@ async function search(
   rt.start()
   const result = await rt.search(args)
   const observedAt = Date.now()
-  const mapped = result.hits.map(hit => {
+  // Map the whole store page before selecting: the evidence fields are part of
+  // the payload the budget measures, and the final slice must happen after them.
+  const mapped = result.hits.map((hit, index) => {
     const readable = scopeRules?.readability(hit.path) ?? { read: 'allowed' as const, reason: 'name hits come from the configured index roots' }
+    const base = {
+      path: hit.path,
+      name: hit.name,
+      size: hit.size,
+      mtime: hit.mtime,
+      ext: hit.ext,
+      dir: hit.dir,
+      ...(hit.dir || readable.read !== 'allowed' ? {} : { ref: fileRefFor(hit.path, hit.mtime, hit.size) }),
+    }
+    if (!evidenceVisible(index, detail, evidenceLimit)) return base
     return {
-      ...hit,
-      ...(readable.read === 'allowed' ? {} : { ref: undefined }),
+      ...base,
+      modified: new Date(hit.mtime).toISOString(),
       refStatus: 'unknown' as const,
       freshness: { state: 'unknown' as const, observedAt, mtime: hit.mtime },
       permissions: { read: readable.read, visibility: 'roots' as const, reason: readable.reason },
     }
   })
-  const scoped = scopeRules === undefined ? mapped : scopeRules.filterSearchable(mapped).hits
-  const budgeted = applyOutputBudget(scoped, budgetChars)
-  const lossy = scoped.length < mapped.length || budgeted.budget.dropped > 0
-  const truncated = result.truncated || lossy
-  const nextOffset = result.offset + (lossy ? mapped.length : budgeted.items.length)
+  const selected = selectPage(mapped, limit, budgetChars, hit => scopeRules === undefined ? true : scopeRules.isSearchable(hit.path))
+  const advance = pageAdvance({
+    offset: result.offset,
+    fetchedRows: result.hits.length,
+    keptIndices: selected.keptIndices.map(index => result.offset + index),
+    dropped: selected.dropped.map(drop => ({ index: result.offset + drop.index, reason: drop.reason })),
+    more: result.truncated || selected.unscanned > 0,
+  })
   return {
     mode: 'names',
     query,
     total: result.total,
     totalCount: result.total,
-    returned: budgeted.items.length,
+    returned: selected.items.length,
     offset: result.offset,
-    ...(truncated ? { nextOffset } : {}),
-    truncated,
+    truncated: advance.truncated,
+    hasMore: advance.hasMore,
+    consumed: advance.consumed,
+    ...(advance.nextOffset === undefined ? {} : { nextOffset: advance.nextOffset }),
+    ...(advance.truncation === undefined ? {} : { truncation: advance.truncation }),
     indexing: result.indexing === true,
     tookMs: result.tookNs / 1e6,
-    hits: budgeted.items,
-    budget: budgeted.budget,
+    hits: selected.items,
+    budget: selected.budget,
+    ...(detail === 'compact' ? { detail } : {}),
   }
+}
+
+/** Path/mtime/size identity ref used by the HTTP name-hit rows. */
+function fileRefFor(path: string, mtime: number, size: number): string {
+  return fileRef({ path, mtime, size })
 }
 
 /**

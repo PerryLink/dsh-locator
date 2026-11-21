@@ -104,7 +104,7 @@ En resumen: la **idea** de Everything (índice persistente + consultas estructur
 dsh plugin --profile web add dsh-locator
 
 # fijar una versión
-dsh plugin --profile web add dsh-locator@0.20.2
+dsh plugin --profile web add dsh-locator@0.21.1
 
 # rama principal de GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -154,7 +154,7 @@ Busca los PDF que cambié la semana pasada
 
 Sintaxis estilo Everything que devuelve ruta, tamaño, fecha de modificación, extensión y tipo. Adecuada para «el nombre contiene report», «PDF modificados esta semana», «vídeos de más de 50 MB».
 
-La ordenación, la paginación y `limit`/`offset` los hace el motor del host; las consultas habituales sobre 1,51 M de entradas responden en decenas de milisegundos.
+La ordenación, la paginación y `limit`/`offset` los hace el motor del host; las consultas habituales sobre 258 k entradas responden en decenas de milisegundos.
 
 ### Por contenido: `locator_find`
 
@@ -421,6 +421,13 @@ DeepSeek Harness
 
 El motor es un único proceso Go; respeta `GOMEMLIMIT`/`GOGC` y `memoryLimitMB`, donde `0` (por defecto) calcula un límite automático (25% de la RAM, 384–1024 MiB). Un motor 0.20 carga un snapshot de 1,5 M de entradas en ~186 MB de heap y se estabiliza en ~335 MB de RSS con el watcher instalado (límite de 512 MiB); la versión anterior necesitaba ~700 MB en el mismo punto. Ninguno cambia el formato del snapshot. Con la caché de páginas de la base de contenido, el proceso anfitrión de DSH rondaba los 700 MB de RSS en la instalación en vivo, con latencia en reposo de p50 2 ms.
 
+## Notas de actualización 0.21.1
+
+- Parámetros AI: límites por defecto search 10 / find 8, paginación sin saltar filas descartadas por presupuesto, `detail:compact`, `budgetChars`, `errorInfo`.
+- `scope`/count corregidos; `explore` ordena por relevancia; capability marca rebuild/reindex/export como write/ask.
+- CLI/MCP ahora son realmente de solo lectura (copian el estado a un directorio temporal) y el contenido se limita a los roots configurados; las sesiones se ocultan por defecto.
+- schema v4: primer arranque hace una reconstrucción completa del contenido (0.21.1 incluye el trabajo de cobertura de 0.21.0). 589 tests.
+
 ## Notas de actualización 0.20.2
 
 - **Cobertura**: `contentMaxTotalBytes` 1.6 GB, `contentMaxDbBytes` 8 GB, `contentMaxSessions` 1000; cobertura medida 69.8% -> **99.9%** (142,492/142,613 archivos), 842 sesiones, base de contenido 4.89 GB.
@@ -542,7 +549,7 @@ El motor es un único proceso Go; respeta `GOMEMLIMIT`/`GOGC` y `memoryLimitMB`,
 
 - **Índice de razonamiento opcional**: `contentIndexReasoning: true` añade los bloques `reasoning`/`thinking` del asistente al mismo documento de sesión (respuesta final primero, dentro del límite de 8KB); `locator_find` puede buscar el razonamiento y el salto sigue apuntando al mensaje. Desactivado por defecto; cambiarlo fuerza reconstrucción de sesiones.
 
-- **Índice de contenido completo**: `contentFullIndex: true` (o ambos caps a `0`) indexa todos los archivos de texto elegibles (~185k archivos / 2.0 GB, ~5.9 GB de FTS en la máquina de referencia); la primera construcción tarda unos minutos y las consultas rondan 0.04–0.7 s. Los límites por defecto siguen activos para no consumir decenas de GB sin avisar.
+- **Índice de contenido completo**: `contentFullIndex: true` (o ambos caps a `0`) indexa todos los archivos de texto elegibles (~164k archivos / 1.74 GB, ~5.45 GB de FTS en la máquina de referencia); la primera construcción medida es 331 s y las consultas rondan 0.02–0.4 s. Los límites por defecto siguen activos para no consumir decenas de GB sin avisar.
 - `locator_find` sigue limitado al workspace; si el cwd no está dentro de ningún root indexado, ya no restringe los archivos a ese cwd (antes devolvía vacío) y busca en los roots; las sesiones siguen limitadas a la actual. Usa `scope: "all"` para cruzar ámbitos.
 - Panel: **cargar más** (paginación por offset), **búsquedas recientes** y **filtro de resultados cargados**.
 - Seguridad: se rechazan destinos bajo mount points anidados dentro de un root en Linux; `/open` usa `O_NOFOLLOW` y verifica el inodo.

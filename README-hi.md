@@ -104,7 +104,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # संस्करण तय करें
-dsh plugin --profile web add dsh-locator@0.20.2
+dsh plugin --profile web add dsh-locator@0.21.1
 
 # GitHub मुख्य ब्रांच
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -154,7 +154,7 @@ dsh plugin --profile web add /पूरा/पाथ/dsh-locator-0.7.7.tgz
 
 Everything-शैली क्वेरी जो पाथ, आकार, बदलाव की तिथि, एक्सटेंशन और प्रकार लौटाती है। “नाम में report है”, “इस हफ़्ते बदली PDF”, “50MB से बड़े वीडियो” जैसी ज़रूरतों के लिए।
 
-क्रम, पेजिंग और `limit`/`offset` होस्ट इंजन करता है; 1.51 M एंट्री पर सामान्य क्वेरी दसियों मिलीसेकंड में लौटती है।
+क्रम, पेजिंग और `limit`/`offset` होस्ट इंजन करता है; 258 k एंट्री पर सामान्य क्वेरी दसियों मिलीसेकंड में लौटती है।
 
 ### सामग्री से: `locator_find`
 
@@ -422,6 +422,13 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है; `GOMEMLIMIT`/`GOGC` और `memoryLimitMB` मानता है, जहाँ `0` (डिफ़ॉल्ट) auto सीमा निकालता है (RAM का 25%, 384–1024 MiB)। 0.20 इंजन 1.5 M एंट्री का snapshot ~186 MB heap में लोड करता है और watcher के साथ ~335 MB RSS पर रहता है (512 MiB सीमा); पिछला संस्करण वहीं ~700 MB लेता था। स्नैपशॉट फ़ॉर्मेट नहीं बदलता। कंटेंट DB पेज कैश सहित DSH होस्ट प्रोसेस लाइव सेटअप में ~700 MB RSS और idle देरी p50 2 ms रही।
 
+## 0.21.1 अपग्रेड नोट्स
+
+- AI अनुबंध: डिफ़ॉल्ट search 10 / find 8, बजट से गिराई गई पंक्तियाँ अब नहीं छूटतीं, `detail:compact`, `budgetChars`, `errorInfo`।
+- `scope`/count ठीक; `explore` प्रासंगिकता क्रम में; capability rebuild/reindex/export को write/ask मानता है।
+- CLI/MCP वास्तव में read-only हैं (state को अस्थायी डायरेक्टरी में कॉपी करते हैं), content केवल configured roots तक सीमित और sessions डिफ़ॉल्ट रूप से छिपे।
+- schema v4: पहले स्टार्ट पर एक पूर्ण content rebuild (0.21.1 में 0.21.0 का coverage कार्य शामिल है)। 589 tests।
+
 ## 0.20.2 अपग्रेड नोट्स
 
 - **कवरेज**: `contentMaxTotalBytes` 1.6 GB, `contentMaxDbBytes` 8 GB, `contentMaxSessions` 1000; मापी गई कवरेज 69.8% -> **99.9%** (142,492/142,613 फ़ाइलें), 842 sessions, content DB 4.89 GB।
@@ -543,7 +550,7 @@ DeepSeek Harness
 
 - वैकल्पिक **reasoning इंडेक्स**: `contentIndexReasoning: true` assistant के `reasoning`/`thinking` ब्लॉक को उसी session message दस्तावेज़ में जोड़ता है (अंतिम उत्तर पहले, 8KB सीमा में), जिससे `locator_find` सोच-प्रक्रिया खोज सकता है; jump संदेश पर ही रहता है। डिफ़ॉल्ट बंद; बदलने पर session rebuild होता है।
 
-- **पूर्ण सामग्री इंडेक्स**: `contentFullIndex: true` (या दोनों caps `0`) से सभी पात्र टेक्स्ट फ़ाइलें इंडेक्स होती हैं (~185k फ़ाइलें / 2.0 GB, संदर्भ मशीन पर ~5.9 GB FTS); पहला निर्माण कुछ मिनट लेता है, क्वेरी ~0.04–0.7 s रहती हैं। डिफ़ॉल्ट सीमाएँ बनी रहती हैं ताकि सामान्य उपयोग में दसियों GB अचानक न भरें।
+- **पूर्ण सामग्री इंडेक्स**: `contentFullIndex: true` (या दोनों caps `0`) से सभी पात्र टेक्स्ट फ़ाइलें इंडेक्स होती हैं (~164k फ़ाइलें / 1.74 GB, संदर्भ मशीन पर ~5.45 GB FTS); पहला निर्माण 331 s मापा गया, क्वेरी ~0.02–0.4 s रहती हैं। डिफ़ॉल्ट सीमाएँ बनी रहती हैं ताकि सामान्य उपयोग में दसियों GB अचानक न भरें।
 - `locator_find` workspace-स्कोप्ड रहता है; यदि cwd किसी indexed root में नहीं है तो फ़ाइल हिट उस cwd तक सीमित नहीं रहते (पहले खाली आते थे), indexed roots में खोज होती है; सत्र हिट केवल वर्तमान सत्र। क्रॉस-स्कोप के लिए `scope: "all"`.
 - पैनल: **और लोड करें** (offset पेजिंग), **हाल की खोजें**, **लोड किए गए परिणाम फ़िल्टर करें**।
 - सुरक्षा: Linux में root के भीतर nested mount point वाले लक्ष्य अस्वीकार; `/open` `O_NOFOLLOW` से खोलकर inode जाँचता है।

@@ -50,13 +50,6 @@ export interface SearchToolOptions {
 export type SearchMode = 'names' | 'content' | 'count';
 /** Parse one search mode, defaulting to "names". */
 export declare function parseSearchMode(value: unknown): SearchMode;
-/**
- * Parse and clamp the shared page-size arguments.
- * @param limit - historical limit argument.
- * @param headLimit - explicit page-size cap (min with limit).
- * @param max - configured maximum.
- */
-export declare function pageSize(limit: number | undefined, headLimit: number | undefined, max: number): number;
 /** Build the locator_search tool. */
 export declare function makeSearchTool(rt: LocatorRuntime, options?: SearchToolOptions): import("@deepseek-ai/dsh-tools").ToolDefinition;
 /** Build locator_outline: every stored symbol for one indexed file. */

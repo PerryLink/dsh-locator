@@ -14,6 +14,13 @@
  * and the whole-word post-filter stops after a fixed number of rows, body bytes
  * or milliseconds and reports a bounded count.
  *
+ * 0.21.0 adapts the query layer to content schema v4: docs_meta identifies a
+ * document by (path_id, kind_id) and keeps the path text once in the normalized
+ * `paths` dictionary. Every docs_meta scope filter resolves through that
+ * dictionary (META_ROWIDS_*), while the FTS `docs` table and its own
+ * path/kind UNINDEXED columns stay unchanged. Filters, counts, paging and the
+ * short-query fallback keep their 0.20.2 behavior.
+ *
  * 0.20.2 adds two quality fixes on top of that:
  * - wide-page kind grouping (P0-1): the adaptive-rank wide path used to page in
  *   rowid order, and a full build indexes sessions first, so common words
@@ -38,7 +45,7 @@
  * @module dsh-locator/content-search
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { ContentHit } from './content.ts';
+import { type ContentHit } from './content.ts';
 /** How the query text is interpreted. */
 export type ContentMatchMode = 'normal' | 'extended' | 'regex';
 /** How much work the caller wants the count to spend. */

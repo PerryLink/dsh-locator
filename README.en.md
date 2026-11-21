@@ -104,7 +104,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.20.2
+dsh plugin --profile web add dsh-locator@0.21.1
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -154,7 +154,7 @@ Which conversation settled this design?
 
 Everything-style syntax returning path, size, modification time, extension and kind. Suited to “the file name contains report”, “PDFs changed this week”, “videos over 50 MB”.
 
-Sorting, pagination and `limit`/`offset` happen in the host engine; common queries over 1.51 M entries return in tens of milliseconds.
+Sorting, pagination and `limit`/`offset` happen in the host engine; common queries over 258 k entries return in tens of milliseconds.
 
 ### By content: `locator_find`
 
@@ -218,6 +218,16 @@ Press `Ctrl+F` in a conversation (or click `⌕` in the session header) to open 
 | `capability_search` | Find a tool/MCP action/skill by intent in the live DSH capability registry (not file search). |
 | `capability_preflight` | Validate a capability, its argument schema, risk and approval requirements before calling it. |
 
+### For AI agents
+
+- **Pick the right tool**: names/paths -> `locator_search`; bodies or sessions -> `locator_find`; open question -> `locator_explore`; known symbol -> `locator_symbol` / `locator_outline`; citation check -> `locator_resolve` / `locator_cite`; health/build -> `locator_status`. `mode` on search/find is for count/names/content variants of the same entry; prefer the default mode.
+- **Defaults**: `locator_search` defaults to `limit=10`, `locator_find` to `limit=8`, with an 8,000-character output budget; ask for more with `limit` and/or `budgetChars`. Pagination is honest: `truncation:{reason,dropped,consumed}`, `hasMore` and `nextOffset` never skip budget-dropped rows, so consecutive pages do not lose results.
+- **Compact mode**: agents should usually pass `detail:'compact'` (drops hash/provenance/freshness/permissions, keeps ref/line/snippet); use `detail:'full'` or `evidenceLimit` when the evidence chain matters.
+- **Scope**: default is `workspace` (filtered by the caller cwd); `total` may be all-roots (see `totalAllRoots`/hints). An empty workspace first page returns `workspace-empty` plus a `scope:'all'` hint; `locator_find` names mode also honours cwd/pathPrefix.
+- **Errors and hints**: on failure read `errorInfo:{code,retryable,hint}` (the legacy `error` string is still present); actionable warning hints are in `warningHints`.
+- **Coverage boundary**: content covers file bodies and session messages by default; tool results/reasoning are opt-in (`contentIndexToolResults`/`contentIndexReasoning`), archived sessions are hidden by default; use `locator_status` content/coverage to judge completeness.
+- **CLI/MCP**: `locator-cli` and `locator-mcp` are genuinely read-only - they copy the index state to a temporary directory before starting the engine and never write the live state. Content search returns only files under the configured roots and hides sessions by default (`--allow-sessions` opts in).
+- **Example**: `locator_find{query:'retry policy', detail:'compact', limit:8}`, then follow `nextOffset`; verify key refs with `locator_resolve{ref}`; pass `scope:'all'` explicitly when you need every configured root.
 ### CLI and MCP
 
 The npm package also exposes two bins (or run the scripts directly):
@@ -311,7 +321,7 @@ Every field is a Schemastery config field; override the `dsh-locator` entry in t
 | `contentIndexSymbols` | `true` | Build the code-symbol store behind `locator_outline`/`locator_symbol`/`locator_repo_map`. |
 | `contentSymbolMaxBytes` | `524288` | Largest code file considered for symbol extraction. |
 | `contentFullIndex` | `false` | One-switch full mode: overrides body/file caps to unlimited. |
-| `notIndexed` | `[]` | Globs that never enter the content index (name index still covers them). |
+| `notIndexed` | sensitive defaults | Globs that never enter the content index (name index still covers them). Defaults exclude `_key.*`/`发布令牌*`/`.env*`/`*.pem`/`*.key`/`*.p12`/`*.pfx`/`id_rsa*`/`id_ed25519*`. |
 | `notSearchable` | `[]` | Globs never returned as hits (still readable). |
 | `notReadable` | `[]` | Globs agents must not read (content hits and evidence refs are refused). |
 | `outputBudgetChars` | `8000` | Per-tool-result character budget; `0` disables it. |
@@ -331,7 +341,7 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 
 **Name index** (development machine, one `/home/yy` root, WSL2 ext4 warm page cache)
 
-| Metric | 0.19.4 | 0.20.2 |
+| Metric | 0.19.4 | 0.21.1 |
 |---|---|---|
 | Cold scan (default cache exclusion) | 2.40 M entries / 16.4 s / 754 MB peak | **0.48 M entries / 1.4 s / 164 MB** (−80% entries, ~12× faster) |
 | Snapshot size | 207 MB | **35 MB** |
@@ -345,7 +355,7 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 
 **Content index** (real home, 1 GB budget)
 
-| Metric | 0.19.4 | 0.20.2 |
+| Metric | 0.19.4 | 0.21.1 |
 |---|---|---|
 | Common-word query (`the`, 30 hits) | 73 ms exact / 70 ms none | **5.3 ms / 1.6 ms** (13.8× / 43.7×) |
 | Wide query (`the`) file share | 0% (sessions only) | **100%** (file-first grouped paging + light rerank) |
@@ -353,9 +363,9 @@ Measured on a WSL2 development machine (Linux, warm page cache) and a real home 
 | `function` (26.7 k hits) | 146 ms | **41 ms** |
 | Rare-term query | 8.8 ms | 13 ms (4 ms absolute difference, no practical impact) |
 | Incremental refresh (no change) | ~12 s (dump of 1.5 M entries) | **<0.3 s** (engine generation fast path) |
-| Full rebuild | ~3.5 min (the old build stopped early once the budget filled) | **measured 5m44s** (0.20.2 two-phase planning + parallel prefetch, 260 k candidates / 1.6 GB budget / 0 evictions; 11 min in 0.20.1) |
-| Database size | ~4.1 GB (4.1× the body budget) | **measured 4.89 GB live** (1.49 GB of bodies; segments=1 after the idle merge) |
-| Coverage | ~93.4 k files; new files freeze once the budget is full | **measured 142,492 files / 842 sessions / 9,154 messages, 99.9% coverage** (142,613 candidates) |
+| Full rebuild | ~3.5 min (the old build stopped early once the budget filled) | **measured 5m31s** (0.21.1: two-phase planning + parallel prefetch + schema v4 + /mnt/d coverage; 163 k candidates / 2 GB budget / 0 evictions) |
+| Database size | ~4.1 GB (4.1× the body budget) | **measured 5.45 GB live** (1.74 GB of bodies incl. /mnt/d; schema v4 + idle vacuum, segments=1, freelist≈0) |
+| Coverage | ~93.4 k files; new files freeze once the budget is full | **measured 163,791 / 163,951 files = 99.9%**, 432 sessions / 4,492 messages (including the /mnt/d workspace) |
 | Host latency | Content queries run in a worker, host unaffected | Unchanged; `/combined` enrichment is asynchronous, so 9p roots no longer block the event loop; measured HTTP `/content` common-word query **~3 ms** |
 
 **Cheaper configurations**
@@ -485,6 +495,15 @@ DeepSeek Harness
 ## Memory
 
 The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memoryLimitMB` knob, where `0` (the default) derives an automatic limit from the machine (25% of RAM clamped to 384–1024 MiB). A 0.20 engine loads a 1.5 M-entry snapshot into ~186 MB of heap and settles around 335 MB RSS with the watcher installed (512 MiB limit); the previous release needed ~700 MB in the same spot. Neither changes the snapshot format. With the content database page cache, the DSH host process sat around 700 MB RSS in the live setup, with idle latency around p50 2 ms.
+
+## 0.21.1 upgrade notes
+
+- **AI contract fixes**: pagination no longer skips budget-dropped rows (`truncation/hasMore/nextOffset` fixed), results are sliced to the limit, default page sizes are search 10 / find 8, new `budgetChars`, `detail:'compact'`/`evidenceLimit`, `errorInfo`/`warningHints`, and read-only tools declare concurrency safety.
+- **Scope/count fixes**: workspace fills the first page after cwd filtering and emits `workspace-empty` with a scope hint; `totalAllRoots`; find names honours cwd/pathPrefix; visibility reflects the real scope; count fields are no longer mutually exclusive.
+- **explore/capability**: explore sorts BM25 ascending (most relevant first) with `matchedQuery/why`; capability reports rebuild/reindex/export as write/ask and `preflight.ok = admitted`.
+- **CLI/MCP are genuinely read-only**: engine state is copied to a temporary directory, content search returns only files under the configured roots and hides sessions by default; hits carry refs, search/find return budgets/nextOffset; MCP exposes output schemas and `isError`, with one long-lived engine per process. It can no longer overwrite the live snapshot.
+- **status**: live file/message counts and progress while building; resolved `content-db-*` warnings are cleared after a successful rebuild (history stays in `warningCounts`).
+- **Migration**: schema v4 (the 0.21.0 content/coverage work) triggers one full content rebuild on first start; `locator_find` no longer returns `hash` by default (`includeHash` opt-in); CLI/MCP hides sessions by default. 589 tests; six engines rebuilt at 0.21.1.
 
 ## 0.20.2 upgrade notes
 
@@ -619,7 +638,7 @@ The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memor
 
 - Optional **reasoning index**: `contentIndexReasoning: true` appends assistant `reasoning`/`thinking` blocks to the same session message document (final answer first, inside the 8KB body cap), so `locator_find` can search thinking traces while jumps still target the message. Off by default; toggling it forces a session rebuild.
 
-- **Full content index**: set `contentFullIndex: true` (or both caps to `0`) to index every eligible text file. On the reference machine that is ~**185k files / 2.0 GB** of text, ~**5.9 GB** FTS database; the first build takes a few minutes and queries stay ~**0.04–0.7 s**. The default caps (1 GB / 200k) stay in place so ordinary installs do not silently consume tens of GB; the panel shows `truncated`.
+- **Full content index**: set `contentFullIndex: true` (or both caps to `0`) to index every eligible text file. On the reference machine that is ~**164k files / 1.74 GB** of text (including the /mnt/d workspace), ~**5.45 GB** FTS database; the first build measured 331 s and queries stay ~**0.02–0.4 s**. The default caps (1.6 GB / 200k) stay in place so ordinary installs do not silently consume tens of GB; the panel shows `truncated`.
 - `locator_find` stays workspace-scoped (current session + caller cwd), but when the caller cwd is **outside every indexed root** it no longer restricts file hits to that cwd (which could only return nothing); it searches the indexed roots and still limits session hits to the current session. Use `scope: "all"` to cross scopes explicitly.
 - Panel: **load more** (offset paging), **recent searches** (localStorage, clearable), and **filter loaded results**.
 - Security: reject targets below nested mount points inside a root on Linux (bind-mount escape); `/open` opens with `O_NOFOLLOW` and verifies the inode, narrowing the TOCTOU window.

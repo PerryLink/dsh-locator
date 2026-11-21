@@ -3,11 +3,20 @@
  * locator-mcp.mjs — a read-only MCP stdio server in front of dsh-locator.
  *
  * Protocol subset: JSON-RPC 2.0 over newline-delimited stdio, implementing
- * initialize, ping, tools/list, tools/call and the empty resources listings.
- * There are no write tools, no network calls and no live-host dependency: the
- * server reads the local name index (one short-lived engine session) and the
- * content database in read-only mode, and every file/session ref it resolves
- * must live inside the configured roots.
+ * initialize, ping, tools/list, tools/call, shutdown/exit and the empty
+ * resources listings. There are no write tools, no network calls and no
+ * live-host dependency.
+ *
+ * 0.21.1 AI contract:
+ *   - initialize starts one long-lived engine backed by a temporary read-only
+ *     copy of the state directory; tools/call reuses it and shutdown/EOF stops
+ *     it (the engine is never spawned once per call);
+ *   - tools/list publishes an outputSchema plus read-only annotations;
+ *   - tools/call sets isError whenever the tool result has ok=false;
+ *   - every hit carries a citable ref, and search/find report
+ *     truncated/nextOffset/budget;
+ *   - session-log body hits are excluded unless allowSessions is passed, and
+ *     file hits are restricted to the configured roots.
  *
  * Start it from an MCP client:
  *   node /path/to/dsh-locator/scripts/locator-mcp.mjs --root /path/to/dir
@@ -27,6 +36,7 @@ import {
   EXIT_USAGE,
   asCliError,
   citeRefs,
+  createEngineSession,
   makeSettings,
   parseCliArgs,
   resolveRef,
@@ -48,12 +58,88 @@ const READ_ONLY_ANNOTATIONS = Object.freeze({
   openWorldHint: false,
 })
 
+/** Additive output-budget block emitted by search/find. */
+const BUDGET_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    limitChars: { type: 'integer' },
+    usedChars: { type: 'integer' },
+    truncated: { type: 'boolean' },
+    dropped: { type: 'integer' },
+  },
+  required: ['limitChars', 'usedChars', 'truncated', 'dropped'],
+}
+
+/** One search/find hit: a citable ref plus the fields it resolves from. */
+const HIT_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    kind: { type: 'string', enum: ['file', 'session', 'dir'] },
+    path: { type: 'string' },
+    name: { type: 'string' },
+    title: { type: 'string' },
+    snippet: { type: 'string' },
+    line: { type: 'integer' },
+    size: { type: 'integer' },
+    mtime: { type: 'integer' },
+    dir: { type: 'boolean' },
+    sessionId: { type: 'string' },
+    messageId: { type: 'string' },
+    ref: { type: 'string', description: 'ref://file?... or dsh-session:... usable with locator_resolve/locator_cite.' },
+    refStatus: { type: 'string', enum: ['fresh', 'stale', 'missing', 'tombstoned', 'unknown'] },
+    freshness: { type: 'object', additionalProperties: true },
+    permissions: { type: 'object', additionalProperties: true },
+    context: { type: 'array', items: { type: 'string' } },
+    contextStart: { type: 'integer' },
+  },
+  required: ['kind', 'path'],
+}
+
+const SEARCH_OUTPUT_SCHEMA = { type: 'object', additionalProperties: true, properties: {
+  ok: { type: 'boolean' }, command: { type: 'string' }, mode: { type: 'string' }, query: { type: 'string' },
+  limit: { type: 'integer' }, offset: { type: 'integer' }, total: { type: 'integer' }, totalCount: { type: 'integer' },
+  returned: { type: 'integer' }, truncated: { type: 'boolean' }, nextOffset: { type: 'integer' }, indexing: { type: 'boolean' },
+  budget: BUDGET_OUTPUT_SCHEMA,
+  warnings: { type: 'array', items: { type: 'string' } },
+  hits: { type: 'array', items: HIT_OUTPUT_SCHEMA },
+}, required: ['ok'] }
+
+const FIND_OUTPUT_SCHEMA = { type: 'object', additionalProperties: true, properties: {
+  ok: { type: 'boolean' }, command: { type: 'string' }, mode: { type: 'string' }, query: { type: 'string' }, db: { type: 'string' },
+  limit: { type: 'integer' }, offset: { type: 'integer' }, total: { type: 'integer' }, returned: { type: 'integer' },
+  truncated: { type: 'boolean' }, nextOffset: { type: 'integer' },
+  budget: BUDGET_OUTPUT_SCHEMA,
+  warnings: { type: 'array', items: { type: 'string' } },
+  hits: { type: 'array', items: HIT_OUTPUT_SCHEMA },
+}, required: ['ok'] }
+
+const STATUS_OUTPUT_SCHEMA = { type: 'object', additionalProperties: true, properties: {
+  ok: { type: 'boolean' }, command: { type: 'string' }, readOnly: { type: 'boolean' },
+  roots: { type: 'array', items: { type: 'string' } }, stateDir: { type: 'string' }, binary: { type: 'string' },
+  engine: { type: 'object', additionalProperties: true }, content: { type: 'object', additionalProperties: true },
+  copiedStateFiles: { type: 'array', items: { type: 'string' } }, warnings: { type: 'array', items: { type: 'string' } },
+}, required: ['ok'] }
+
+const RESOLVE_OUTPUT_SCHEMA = { type: 'object', additionalProperties: true, properties: {
+  ok: { type: 'boolean' }, ref: { type: 'string' }, kind: { type: 'string' }, path: { type: 'string' },
+  title: { type: 'string' }, excerpt: { type: 'string' }, error: { type: 'string' },
+  freshness: { type: 'object', additionalProperties: true }, permissions: { type: 'object', additionalProperties: true },
+  warnings: { type: 'array', items: { type: 'string' } },
+}, required: ['ok'] }
+
+const CITE_OUTPUT_SCHEMA = { type: 'object', additionalProperties: true, properties: {
+  ok: { type: 'boolean' }, command: { type: 'string' }, format: { type: 'string' },
+  citations: { type: 'array', items: { type: 'object', additionalProperties: true } },
+}, required: ['ok'] }
+
 const SEARCH_INPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     query: { type: 'string', description: 'Everything-style file-name query.' },
-    limit: { type: 'integer', minimum: 1, maximum: 1000 },
+    limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Page size; aligns with the host tools (max 100).' },
     offset: { type: 'integer', minimum: 0 },
     sort: { type: 'string', enum: ['name', 'path', 'size', 'mtime', 'ext'] },
     desc: { type: 'boolean' },
@@ -76,6 +162,7 @@ const FIND_INPUT_SCHEMA = {
     contextLines: { type: 'integer', minimum: 0, maximum: 10 },
     caseSensitive: { type: 'boolean' },
     wholeWord: { type: 'boolean' },
+    allowSessions: { type: 'boolean', description: 'Include session-log body hits. Off by default; the log path and its recorded workspace must stay inside the configured roots.' },
   },
   required: ['query'],
 }
@@ -105,32 +192,42 @@ const CITE_INPUT_SCHEMA = {
 export const TOOL_DEFINITIONS = Object.freeze([
   {
     name: 'locator_search',
-    description: 'Search the local file-name index (dsh-locator) read-only. Returns names, sizes and modification times from the configured roots; no workspace needed.',
+    title: 'Search local file names (read-only)',
+    description: 'Search the local file-name index (dsh-locator) read-only. Roots are fixed at server start; every hit carries a citable ref. Results are paginated (truncated/nextOffset) and budgeted (8000 characters by default).',
     inputSchema: SEARCH_INPUT_SCHEMA,
+    outputSchema: SEARCH_OUTPUT_SCHEMA,
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'locator_find',
-    description: 'Search file bodies in the local content index (dsh-locator) read-only. Every term needs 3+ characters (FTS5 trigram); optional context lines.',
+    title: 'Search local file contents (read-only)',
+    description: 'Search file bodies in the local content index (dsh-locator) read-only. File hits are restricted to the configured roots; session-log hits are omitted unless allowSessions is true (then their log path and recorded workspace must stay inside the roots). Every term needs 3+ characters (FTS5 trigram); results are paginated and budgeted.',
     inputSchema: FIND_INPUT_SCHEMA,
+    outputSchema: FIND_OUTPUT_SCHEMA,
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'locator_status',
-    description: 'Report the local index status read-only: roots, entry counts, state directory, engine binary and content-index counts.',
+    title: 'Report local index status (read-only)',
+    description: 'Report the local index status read-only: roots, entry counts, state directory, engine binary and content-index counts (files, sessions, messages, refs). The engine runs against a temporary state copy; the caller state directory is never written.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    outputSchema: STATUS_OUTPUT_SCHEMA,
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'locator_resolve',
+    title: 'Resolve one evidence ref (read-only)',
     description: 'Resolve one evidence ref (ref://file or dsh-session:) read-only. Paths must stay inside the configured roots; session refs are metadata-only.',
     inputSchema: RESOLVE_INPUT_SCHEMA,
+    outputSchema: RESOLVE_OUTPUT_SCHEMA,
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
     name: 'locator_cite',
+    title: 'Render citations for evidence refs (read-only)',
     description: 'Render markdown/mention citations for up to 20 evidence refs, read-only. Does not read file bodies.',
     inputSchema: CITE_INPUT_SCHEMA,
+    outputSchema: CITE_OUTPUT_SCHEMA,
     annotations: READ_ONLY_ANNOTATIONS,
   },
 ])
@@ -195,47 +292,63 @@ function optionalEnum(args, name, values) {
   return value
 }
 
+/** Copy only the entries whose value is defined. */
+function definedOnly(entries) {
+  const out = {}
+  for (const [key, value] of entries) if (value !== undefined) out[key] = value
+  return out
+}
 
 /**
  * Execute one tool call against the read-only core.
  * @param settings - fixed roots/state/binary snapshot taken at startup.
  * @param name - tool name.
  * @param args - tool arguments already checked to be an object.
+ * @param context - optional { engine } shared long-lived engine session.
  * @returns the tool result object.
  */
-export async function callTool(settings, name, args) {
+export async function callTool(settings, name, args, context = {}) {
+  const engine = context.engine
   if (name === 'locator_search') {
     const query = requireString(args, 'query')
     return await runNameSearch(settings, query, {
-      ...(optionalInteger(args, 'limit', 1, 1000) === undefined ? {} : { limit: args.limit }),
-      ...(optionalInteger(args, 'offset', 0, 1_000_000) === undefined ? {} : { offset: args.offset }),
-      ...(optionalEnum(args, 'sort', ['name', 'path', 'size', 'mtime', 'ext']) === undefined ? {} : { sort: args.sort }),
-      ...(optionalBoolean(args, 'desc') === undefined ? {} : { desc: args.desc }),
-      ...(optionalBoolean(args, 'regex') === undefined ? {} : { regex: args.regex }),
-      ...(optionalBoolean(args, 'caseSensitive') === undefined ? {} : { caseSensitive: args.caseSensitive }),
-      ...(optionalBoolean(args, 'wholeWord') === undefined ? {} : { wholeWord: args.wholeWord }),
-      ...(optionalBoolean(args, 'filesOnly') === undefined ? {} : { filesOnly: args.filesOnly }),
-      ...(optionalBoolean(args, 'dirsOnly') === undefined ? {} : { dirsOnly: args.dirsOnly }),
+      ...definedOnly([
+        ['limit', optionalInteger(args, 'limit', 1, 100)],
+        ['offset', optionalInteger(args, 'offset', 0, 1_000_000)],
+        ['sort', optionalEnum(args, 'sort', ['name', 'path', 'size', 'mtime', 'ext'])],
+        ['desc', optionalBoolean(args, 'desc')],
+        ['regex', optionalBoolean(args, 'regex')],
+        ['caseSensitive', optionalBoolean(args, 'caseSensitive')],
+        ['wholeWord', optionalBoolean(args, 'wholeWord')],
+        ['filesOnly', optionalBoolean(args, 'filesOnly')],
+        ['dirsOnly', optionalBoolean(args, 'dirsOnly')],
+      ]),
+      ...(engine === undefined ? {} : { engine }),
     })
   }
   if (name === 'locator_find') {
     const query = requireString(args, 'query')
+    const allowSessions = optionalBoolean(args, 'allowSessions') === true
     return await runFindSearch(settings, query, {
-      ...(optionalInteger(args, 'limit', 1, 100) === undefined ? {} : { limit: args.limit }),
-      ...(optionalInteger(args, 'offset', 0, 1_000_000) === undefined ? {} : { offset: args.offset }),
-      ...(optionalInteger(args, 'contextLines', 0, 10) === undefined ? {} : { contextLines: args.contextLines }),
-      ...(optionalBoolean(args, 'caseSensitive') === undefined ? {} : { caseSensitive: args.caseSensitive }),
-      ...(optionalBoolean(args, 'wholeWord') === undefined ? {} : { wholeWord: args.wholeWord }),
+      ...definedOnly([
+        ['limit', optionalInteger(args, 'limit', 1, 100)],
+        ['offset', optionalInteger(args, 'offset', 0, 1_000_000)],
+        ['contextLines', optionalInteger(args, 'contextLines', 0, 10)],
+        ['caseSensitive', optionalBoolean(args, 'caseSensitive')],
+        ['wholeWord', optionalBoolean(args, 'wholeWord')],
+      ]),
+      allowSessions,
     })
   }
-  if (name === 'locator_status') return await runStatus(settings)
+  if (name === 'locator_status') return await runStatus(settings, engine === undefined ? {} : { engine })
   if (name === 'locator_resolve') {
     const ref = requireString(args, 'ref')
     const mode = optionalEnum(args, 'mode', ['meta', 'excerpt'])
-    return await resolveRef(settings, ref, {
-      ...(mode === undefined ? {} : { mode }),
-      ...(optionalInteger(args, 'maxBytes', 1, 65536) === undefined ? {} : { maxBytes: args.maxBytes }),
-    })
+    const maxBytes = optionalInteger(args, 'maxBytes', 1, 65536)
+    return await resolveRef(settings, ref, definedOnly([
+      ['mode', mode],
+      ['maxBytes', maxBytes],
+    ]))
   }
   if (name === 'locator_cite') {
     if (!Array.isArray(args.refs) || args.refs.length === 0) throw new ToolArgumentError('refs must be a non-empty array of ref strings')
@@ -246,11 +359,13 @@ export async function callTool(settings, name, args) {
   throw new RpcError(-32602, 'unknown tool: ' + name)
 }
 
-/** Render one tool result as an MCP content result. */
+/** Render one tool result as an MCP content result (isError follows result.ok). */
 function toolResult(value) {
+  const isError = value !== null && typeof value === 'object' && value.ok === false
   return {
     content: [{ type: 'text', text: JSON.stringify(value) }],
-    isError: false,
+    ...(isError || value === null || typeof value !== 'object' ? {} : { structuredContent: value }),
+    isError,
   }
 }
 
@@ -268,7 +383,7 @@ function toolFailure(error) {
 /**
  * Handle one decoded JSON-RPC message.
  * @param message - decoded message (request or notification).
- * @param context - mutable server context (negotiated version, settings).
+ * @param context - mutable server context (negotiated version, settings, engine).
  * @returns the response object, or undefined for a notification.
  */
 export async function handleMessage(message, context) {
@@ -285,6 +400,22 @@ export async function handleMessage(message, context) {
   try {
     if (method === 'initialize') {
       context.protocolVersion = negotiateProtocolVersion(params.protocolVersion)
+      context.initialized = true
+      if (context.engine === undefined) context.engine = createEngineSession(context.settings)
+      // Start the one long-lived engine during initialize; every tools/call
+      // reuses it (and its single temporary state copy) until shutdown/EOF.
+      try {
+        context.engine.start()
+        context.engineError = undefined
+      } catch (error) {
+        context.engineError = error instanceof Error ? error.message : String(error)
+      }
+      const instructions = [
+        "Read-only local evidence search. Roots are fixed at server start (" + context.settings.roots.join(", ") + "); no tool can write files, change the index or widen the roots.",
+        "The engine runs against a temporary read-only copy of the state directory; the caller state directory is never written.",
+        "Every hit carries a citable ref; search/find report truncated, nextOffset and a budget block.",
+        "Session-log body hits are excluded unless a tool call passes allowSessions.",
+      ].join(" ")
       return {
         jsonrpc: '2.0',
         id,
@@ -292,7 +423,7 @@ export async function handleMessage(message, context) {
           protocolVersion: context.protocolVersion,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: 'dsh-locator', version },
-          instructions: 'Read-only local evidence search. Roots are fixed at server start (' + context.settings.roots.join(', ') + '); no tool can write files, change the index or widen the roots.',
+          instructions,
         },
       }
     }
@@ -300,7 +431,13 @@ export async function handleMessage(message, context) {
       context.initialized = true
       return undefined
     }
-    if (isNotification) return undefined
+    if (isNotification) {
+      if (method === 'exit' || method === 'notifications/exit') {
+        if (context.engine !== undefined) await context.engine.close()
+        if (typeof context.stop === 'function') context.stop()
+      }
+      return undefined
+    }
     if (method === 'ping') return { jsonrpc: '2.0', id, result: {} }
     if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: TOOL_DEFINITIONS } }
     if (method === 'tools/call') {
@@ -308,13 +445,20 @@ export async function handleMessage(message, context) {
       if (typeof name !== 'string' || name === '') throw new RpcError(-32602, 'tools/call requires a tool name')
       const args = params.arguments === undefined || params.arguments === null ? {} : params.arguments
       if (typeof args !== 'object' || Array.isArray(args)) throw new RpcError(-32602, 'tools/call arguments must be an object')
+      if (context.shuttingDown === true) throw new RpcError(-32600, 'server is shutting down')
       try {
-        const result = await callTool(context.settings, name, args)
+        const toolContext = context.engine === undefined ? {} : { engine: context.engine }
+        const result = await callTool(context.settings, name, args, toolContext)
         return { jsonrpc: '2.0', id, result: toolResult(result) }
       } catch (error) {
         if (error instanceof RpcError) throw error
         return { jsonrpc: '2.0', id, result: toolFailure(error) }
       }
+    }
+    if (method === 'shutdown') {
+      context.shuttingDown = true
+      if (context.engine !== undefined) await context.engine.close()
+      return { jsonrpc: '2.0', id, result: { ok: true } }
     }
     if (method === 'resources/list') return { jsonrpc: '2.0', id, result: { resources: [] } }
     if (method === 'resources/templates/list') return { jsonrpc: '2.0', id, result: { resourceTemplates: [] } }
@@ -331,20 +475,30 @@ export async function handleMessage(message, context) {
 
 /**
  * Start the stdio server.
- * @param options - test seams for streams and settings.
+ * @param options - test seams for streams, settings and a prebuilt engine session.
  * @returns a handle with close() and the fixed settings.
  */
 export function startServer(options = {}) {
   const input = options.input ?? process.stdin
   const output = options.output ?? process.stdout
   const settings = options.settings ?? makeSettings({})
-  const context = { settings, protocolVersion: '2024-11-05', initialized: false }
+  const engine = options.engine ?? createEngineSession(settings)
+  const context = { settings, engine, protocolVersion: '2024-11-05', initialized: false, shuttingDown: false }
   const send = value => {
     if (value === undefined) return
     output.write(JSON.stringify(value) + '\n')
   }
   const lines = createInterface({ input })
   let queue = Promise.resolve()
+  let closed = false
+  const close = async () => {
+    if (closed) return
+    closed = true
+    try { lines.close() } catch { /* already closed */ }
+    try { await engine.close() } catch { /* engine already gone */ }
+  }
+  context.stop = () => { void close() }
+  lines.on('close', () => { void close() })
   const handleLine = async line => {
     const text = line.trim()
     if (text === '') return
@@ -374,7 +528,9 @@ export function startServer(options = {}) {
   return {
     settings,
     context,
-    close: () => { lines.close() },
+    engine,
+    /** Stop the engine, delete its temporary state copy and close the input. */
+    close,
     idle: () => queue,
   }
 }
@@ -386,7 +542,8 @@ export function usage() {
     '',
     'Usage: node scripts/locator-mcp.mjs [--root DIR]... [--state DIR] [--bin FILE] [--timeout MS]',
     '',
-    'Roots are fixed at startup and no tool can widen them. Tools:',
+    "Roots are fixed at startup and no tool can widen them. One long-lived engine runs",
+    "against a temporary read-only copy of the state directory and is stopped on shutdown/EOF. Tools:",
     ...TOOL_DEFINITIONS.map(tool => '  ' + tool.name + ' — ' + tool.description.split('.')[0]),
     '',
     'Environment: DSH_LOCATOR_ROOTS (path-separator separated), DSH_LOCATOR_STATE, DSH_LOCATOR_BIN.',
@@ -401,7 +558,7 @@ export function settingsFromArgv(argv, env = process.env) {
   return settingsFromFlags(parsed.flags, env)
 }
 
-/** Stdio entrypoint; resolves with the exit code after stdin reaches EOF. */
+/** Stdio entrypoint; resolves with the exit code after the server starts. */
 export async function main(argv = process.argv.slice(2)) {
   let settings
   try {
@@ -412,7 +569,12 @@ export async function main(argv = process.argv.slice(2)) {
     return failure.exitCode === EXIT_OK ? EXIT_OK : (failure.exitCode ?? EXIT_USAGE)
   }
   process.stderr.write('locator-mcp: serving ' + String(TOOL_DEFINITIONS.length) + ' read-only tools (roots: ' + settings.roots.join(', ') + ')\n')
-  startServer({ settings })
+  const server = startServer({ settings })
+  const stop = exitCode => {
+    void server.close().finally(() => { process.exitCode = exitCode })
+  }
+  process.once('SIGINT', () => stop(130))
+  process.once('SIGTERM', () => stop(143))
   return EXIT_OK
 }
 

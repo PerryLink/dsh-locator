@@ -685,7 +685,7 @@ function contentHttpHit(path: string, overrides: Record<string, unknown> = {}): 
 }
 
 describe('search paging and real tookMs (0.20.0 P0-15)', () => {
-  it('advances nextOffset past the whole name page when the output budget trims it', async () => {
+  it('keeps budget-deferred rows reachable instead of skipping the page', async () => {
     const hits = [httpHit('/root/a.md'), httpHit('/root/b.md'), httpHit('/root/c.md')]
     const harness = fakeHarness({ connection: new FakeConnection() })
     registerHttp(harness.ctx, fakeRuntime([], hits, { config: { outputBudgetChars: 120 } }))
@@ -694,11 +694,16 @@ describe('search paging and real tookMs (0.20.0 P0-15)', () => {
     expect(body.ok).toBe(true)
     expect(returned).toBeLessThan(3)
     expect(body.budget).toMatchObject({ truncated: true })
-    // One page, not one request per dropped row: advance by the fetched page.
-    expect(body.nextOffset).toBe(3)
+    // 0.21.1: the cursor lands after the last returned row, so the deferred rows
+    // are delivered on the next page instead of being skipped.
+    expect(body.nextOffset).toBe(1)
+    expect(body.hasMore).toBe(true)
+    expect(body.truncation).toMatchObject({ reason: 'budget' })
+    const next = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'a', limit: 3, offset: 1 }))).json()
+    expect((next.hits as Array<{ path: string }>)[0]?.path).toBe('/root/b.md')
   })
 
-  it('advances nextOffset past rows dropped by the scope filter', async () => {
+  it('does not invent a next page when scope-filtered rows are already consumed', async () => {
     const hits = [httpHit('/root/a.md'), httpHit('/root/b.md'), httpHit('/root/c.md')]
     const scope = new Scope({ notSearchable: ['b.md'], notReadable: [], notIndexed: [] }, false)
     const harness = fakeHarness({ connection: new FakeConnection() })
@@ -706,8 +711,8 @@ describe('search paging and real tookMs (0.20.0 P0-15)', () => {
     const body = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'a', limit: 3 }))).json()
     expect(body.ok).toBe(true)
     expect((body.hits as Array<{ path: string }>).map(hit => hit.path)).toEqual(['/root/a.md', '/root/c.md'])
-    expect(body.truncated).toBe(true)
-    expect(body.nextOffset).toBe(3)
+    expect(body.truncated).toBe(false)
+    expect(body.nextOffset).toBeUndefined()
   })
 
   it('reports the real content tookMs and page-advancing nextOffset', async () => {
@@ -733,7 +738,10 @@ describe('search paging and real tookMs (0.20.0 P0-15)', () => {
     expect(body.tookMs).toBeGreaterThanOrEqual(20)
     expect((body.hits as unknown[]).length).toBeLessThan(3)
     expect(body.budget).toMatchObject({ truncated: true })
-    expect(body.nextOffset).toBe(3)
+    // The budget deferred the other rows; the cursor points at the first one.
+    expect(body.nextOffset).toBe(1)
+    expect(body.hasMore).toBe(true)
+    expect(body.truncation).toMatchObject({ reason: 'budget' })
   })
 
   it('cancels the content query when the client disconnects', async () => {
@@ -955,5 +963,80 @@ describe('status route 0.20.0 observability', () => {
     registerHttp(harness.ctx, fakeRuntime(), fakeContent())
     const body = (await callRoute(harness, '/dsh-locator/status', fakeRequest({}))).json()
     expect((body.content as { diagnostics?: unknown }).diagnostics).toBeUndefined()
+  })
+})
+
+
+describe('search 0.21.1 contract', () => {
+  it('returns structured errorInfo on failures', async () => {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [httpHit('/root/a.md')]))
+    const body = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'x', mode: 'content' }))).json()
+    expect(body.ok).toBe(false)
+    expect(body.error).toBe('content-index-unavailable')
+    expect(body.errorInfo).toMatchObject({ code: 'content-index-unavailable', retryable: false })
+    const bad = await callRoute(harness, '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?limit=abc'))
+    expect(bad.statusCode).toBe(400)
+    expect((bad.json().errorInfo as { code?: string }).code).toBe('invalid-arguments')
+  })
+
+  it('defaults the name page size to 10 and reports page truncation', async () => {
+    const hits = Array.from({ length: 15 }, (_, index) => httpHit('/root/file-' + String(index) + '.md'))
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], hits))
+    const body = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'file' }))).json()
+    expect(body.ok).toBe(true)
+    expect((body.hits as unknown[]).length).toBe(10)
+    expect(body.truncated).toBe(true)
+    expect(body.hasMore).toBe(true)
+    expect(body.nextOffset).toBe(10)
+    expect(body.truncation).toMatchObject({ reason: 'page' })
+    expect(body.total).toBe(15)
+  })
+
+  it('supports compact detail over POST and GET', async () => {
+    const hits = [httpHit('/root/a.md'), httpHit('/root/b.md')]
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], hits))
+    const post = (await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'a', detail: 'compact', limit: 2 }))).json()
+    expect(post.detail).toBe('compact')
+    const compactHits = post.hits as Array<Record<string, unknown>>
+    expect(compactHits[0]?.ref).toBeDefined()
+    expect(compactHits[0]?.freshness).toBeUndefined()
+    expect(compactHits[0]?.permissions).toBeUndefined()
+    expect(compactHits[0]?.refStatus).toBeUndefined()
+    const get = await callRoute(harness, '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?q=a&detail=compact&limit=1'))
+    expect(get.statusCode).toBe(200)
+    expect(get.json().detail).toBe('compact')
+    const invalid = await callRoute(harness, '/dsh-locator/search', fakeRequest('', {}, 'GET', '/dsh-locator/search?q=a&detail=weird'))
+    expect(invalid.statusCode).toBe(400)
+    expect((invalid.json().errorInfo as { code?: string }).code).toBe('invalid-arguments')
+  })
+
+  it('reports live content counters on a building index', async () => {
+    const building = {
+      status: () => ({
+        building: true,
+        files: 5,
+        sessions: 0,
+        messages: 2,
+        truncated: false,
+        updatedAt: 1,
+        error: '',
+        warnings: [],
+        progress: { phase: 'files', scanned: 9, indexed: 12, total: 20, startedAt: 1 },
+      }),
+      authorizedSessionIds: () => new Set<string>(),
+      indexedMtime: () => undefined,
+      sessionEventRefs: () => new Map(),
+      async search() {
+        return { hits: [], count: { value: 0, kind: 'unknown' as const }, warnings: [] }
+      },
+    } as unknown as ContentIndex
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime(), building)
+    const body = (await callRoute(harness, '/dsh-locator/status', fakeRequest({}))).json()
+    expect(body.content).toMatchObject({ enabled: true, building: true, files: 5, messages: 2 })
+    expect((body.content as { progress?: { indexed?: number } }).progress?.indexed).toBe(12)
   })
 })

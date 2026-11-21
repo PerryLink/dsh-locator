@@ -9,8 +9,16 @@
  *   - file bodies: open <state>/content.db with node:sqlite in read-only mode
  *     and run the same FTS5 trigram query the plugin uses.
  *
- * The CLI never talks to a live DSH host, never writes the index and never
- * mutates state: it is safe to run next to (or instead of) the plugin.
+ * P0 read-only contract (0.21.1): the engine never sees the caller's state
+ * directory. prepareReadOnlyState() copies index.snapshot / index.journal /
+ * meta.json into a private mkdtemp directory and every engine spawn points at
+ * that copy, so a search/status invocation cannot create, rewrite, append to or
+ * fsync the live index. The content database is opened through SQLite's
+ * immutable URI (or a temporary copy on platforms without URI support), which
+ * keeps SQLite from creating -wal/-shm side files next to the caller's DB.
+ *
+ * The CLI never talks to a live DSH host and never mutates state: it is safe to
+ * run next to (or instead of) the plugin.
  *
  * Exit codes: 0 success, 1 unexpected runtime error, 2 usage/validation error,
  * 3 index or engine unavailable.
@@ -18,9 +26,9 @@
 
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { chmodSync, constants as fsConstants, copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { DatabaseSync } from 'node:sqlite'
@@ -108,6 +116,162 @@ export function resolveStateDir(flag, env = process.env) {
   return defaultStateDir()
 }
 
+/** Files a locator engine reads from and writes to its state directory. */
+export const STATE_FILE_NAMES = Object.freeze(['index.snapshot', 'index.journal', 'meta.json'])
+
+/** Prefix of every temporary engine-state copy (diagnostics only). */
+const READ_ONLY_STATE_PREFIX = 'dsh-locator-readonly-'
+
+/** Prefix of every temporary content-database copy. */
+const CONTENT_COPY_PREFIX = 'dsh-locator-content-'
+
+/** Default soft output budget for search/find results, in characters. */
+export const DEFAULT_SEARCH_BUDGET_CHARS = 8_000
+
+/** Maximum page size, aligned with the host locator tools (src/config.ts maxResults). */
+export const MAX_SEARCH_LIMIT = 100
+
+/** Temporary engine-state copies that still need cleanup (also cleaned on process exit). */
+const liveReadOnlyStates = new Set()
+let readOnlyExitHookInstalled = false
+
+/** Copy one file, preferring a copy-on-write reflink and falling back to a byte copy. */
+function copyFileForReadOnly(from, to) {
+  if (typeof fsConstants.COPYFILE_FICLONE === 'number') {
+    try {
+      copyFileSync(from, to, fsConstants.COPYFILE_FICLONE)
+      return
+    } catch { /* reflink unsupported; fall through to a plain copy */ }
+  }
+  copyFileSync(from, to)
+}
+
+/** Remove every temporary state copy before the process disappears. */
+function installReadOnlyExitHook() {
+  if (readOnlyExitHookInstalled || typeof process === 'undefined' || typeof process.once !== 'function') return
+  readOnlyExitHookInstalled = true
+  process.once('exit', () => {
+    for (const state of [...liveReadOnlyStates]) {
+      try { state.cleanup() } catch { /* best effort while exiting */ }
+    }
+  })
+}
+
+/**
+ * Build a private, read-only copy of a caller's engine state directory.
+ *
+ * The engine (indexd serve) needs a writable state directory: it appends
+ * index.journal and rewrites index.snapshot/meta.json while it runs. Pointing
+ * it at the caller's live state would mutate a running plugin's index, so the
+ * three state files are copied into a fresh mkdtemp directory and the engine is
+ * spawned against that copy. Nothing is ever written to sourceStateDir (it is
+ * not even created when it does not exist).
+ *
+ * @param sourceStateDir - the caller's state directory (may not exist).
+ * @returns the temporary engine state plus a cleanup function.
+ */
+export function prepareReadOnlyState(sourceStateDir) {
+  const engineStateDir = mkdtempSync(join(tmpdir(), READ_ONLY_STATE_PREFIX))
+  const copied = []
+  let sourceExists = false
+  try {
+    sourceExists = statSync(sourceStateDir).isDirectory()
+  } catch {
+    sourceExists = false
+  }
+  try {
+    if (sourceExists) {
+      for (const name of STATE_FILE_NAMES) {
+        const from = join(sourceStateDir, name)
+        let info
+        try { info = statSync(from) } catch { continue }
+        if (!info.isFile()) continue
+        copyFileForReadOnly(from, join(engineStateDir, name))
+        copied.push(name)
+      }
+    }
+  } catch (error) {
+    try { rmSync(engineStateDir, { recursive: true, force: true }) } catch { /* best effort */ }
+    throw new CliError(
+      'read-only-state-failed',
+      'cannot prepare a read-only copy of ' + String(sourceStateDir) + ': ' + String(error && error.message ? error.message : error),
+      EXIT_UNAVAILABLE,
+    )
+  }
+  const state = {
+    sourceStateDir,
+    engineStateDir,
+    copied,
+    readOnly: true,
+    cleanup: () => {
+      if (!liveReadOnlyStates.delete(state)) return
+      try { rmSync(engineStateDir, { recursive: true, force: true, maxRetries: 2 }) } catch { /* best effort */ }
+    },
+  }
+  liveReadOnlyStates.add(state)
+  installReadOnlyExitHook()
+  return state
+}
+
+/** Remove every still-live temporary state copy (tests and fatal paths). */
+export function cleanupReadOnlyStates() {
+  for (const state of [...liveReadOnlyStates]) {
+    try { state.cleanup() } catch { /* best effort */ }
+  }
+}
+
+/**
+ * One lazy, long-lived engine session backed by a temporary read-only state
+ * copy. The first request spawns the engine; every later request reuses it, so
+ * a long-lived MCP server starts exactly one engine and one state copy.
+ * @param settings - resolved roots/binary/timeouts (the caller's stateDir).
+ * @returns a session with start/request/waitForInitialScan/close helpers.
+ */
+export function createEngineSession(settings) {
+  let engine = null
+  let prepared = null
+  let closed = false
+  let spawnCount = 0
+  const ensure = () => {
+    if (closed) throw new CliError('engine-closed', 'the read-only engine session is already closed', EXIT_UNAVAILABLE)
+    if (engine === null) {
+      prepared = prepareReadOnlyState(settings.stateDir)
+      engine = startEngine(settings, prepared.engineStateDir)
+      spawnCount++
+    }
+    return engine
+  }
+  const session = {
+    /** Number of engine processes spawned by this session (0 or 1 in practice). */
+    get spawnCount() { return spawnCount },
+    /** The temporary state directory the engine actually uses, once started. */
+    get engineStateDir() { return prepared === null ? undefined : prepared.engineStateDir },
+    /** State files copied from the caller's directory. */
+    get copiedFiles() { return prepared === null ? [] : prepared.copied },
+    /** Spawn the engine now (the MCP server does this during initialize). */
+    start() { ensure(); return session },
+    /** One engine RPC, spawning the engine on first use. */
+    async request(method, params = {}, timeoutMs) { return await ensure().request(method, params, timeoutMs) },
+    /** Wait for the engine's first scan, spawning the engine on first use. */
+    async waitForInitialScan(timeoutMs) { return await ensure().waitForInitialScan(timeoutMs) },
+    /** Stop the engine and delete the temporary state copy. Idempotent. */
+    async close() {
+      if (closed) return
+      closed = true
+      const current = engine
+      engine = null
+      try {
+        if (current !== null) await current.close()
+      } finally {
+        const state = prepared
+        prepared = null
+        if (state !== null) state.cleanup()
+      }
+    },
+  }
+  return session
+}
+
 /** Default wait for the engine's background first scan before a one-shot search. */
 export const INITIAL_SCAN_TIMEOUT_MS = 10_000
 
@@ -137,18 +301,22 @@ export function makeSettings(overrides = {}, env = process.env) {
 }
 
 /**
- * Start one short-lived engine session (name index only, watcher disabled) and
- * return request/close helpers. Ready is signalled by the engine's "ready" or
- * "stats" event; a failed spawn, an early exit or the timeout rejects it.
+ * Start one engine session (name index only, watcher disabled) and return
+ * request/close helpers. Ready is signalled by the engine's "ready" or "stats"
+ * event; a failed spawn, an early exit or the timeout rejects it.
+ *
+ * engineStateDir must already exist and should be a temporary read-only copy
+ * (see prepareReadOnlyState); the caller's stateDir is never created here.
  */
-export function startEngine(settings) {
-  if (!existsSync(settings.stateDir)) {
-    try { mkdirSync(settings.stateDir, { recursive: true, mode: 0o700 }) } catch { /* engine reports the real error */ }
-  }
+export function startEngine(settings, engineStateDir = settings.stateDir) {
+  // Never create the caller's state directory here: the engine only ever runs
+  // against the temporary copy prepared by prepareReadOnlyState() (see
+  // createEngineSession), which already exists. A caller that explicitly asks
+  // for a fresh state directory gets it created by the engine on first save.
   if (process.platform !== 'win32' && settings.binary.includes(sep)) {
     try { chmodSync(settings.binary, 0o755) } catch { /* read-only install */ }
   }
-  const args = ['serve', '--state', settings.stateDir]
+  const args = ['serve', '--state', engineStateDir]
   for (const root of settings.roots) args.push('--root', root)
   args.push('--no-watch')
   const child = spawn(settings.binary, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
@@ -315,19 +483,67 @@ export function startEngine(settings) {
   return { request, close, child, waitForInitialScan }
 }
 
-/** Run a name search through a one-shot engine session. */
+/** Build a canonical ref://file URI (mirrors src/refs.ts fileRef). */
+export function fileRefOf(input) {
+  const params = new URLSearchParams()
+  params.set('path', input.path)
+  if (typeof input.mtime === 'number' && Number.isFinite(input.mtime)) params.set('mtime', String(Math.trunc(input.mtime)))
+  if (typeof input.size === 'number' && Number.isFinite(input.size)) params.set('size', String(Math.trunc(input.size)))
+  if (typeof input.line === 'number' && Number.isInteger(input.line) && input.line > 0) params.set('line', String(input.line))
+  return 'ref://file?' + params.toString()
+}
+
+/** Build the canonical dsh-session: URI for one session id (mirrors src/refs.ts). */
+export function sessionRefOf(sessionId) {
+  return 'dsh-session:' + Buffer.from(JSON.stringify(sessionId), 'utf8').toString('base64url')
+}
+
+/** Apply the additive output budget block to one page of hits (mirrors src/scope.ts). */
+export function applyHitBudget(items, limitChars) {
+  const limit = typeof limitChars === 'number' && Number.isFinite(limitChars) ? Math.trunc(limitChars) : 0
+  if (limit <= 0) return { items: [...items], budget: { limitChars: limit, usedChars: 0, truncated: false, dropped: 0 } }
+  const kept = []
+  let used = 0
+  for (const item of items) {
+    const size = JSON.stringify(item)?.length ?? 0
+    if (kept.length > 0 && used + size > limit) break
+    kept.push(item)
+    used += size
+  }
+  const dropped = items.length - kept.length
+  return { items: kept, budget: { limitChars: limit, usedChars: used, truncated: dropped > 0 || used > limit, dropped } }
+}
+
+/** Add the citable ref / freshness / permissions fields AI clients expect. */
+function decorateNameHit(hit, observedAt) {
+  if (hit === null || typeof hit !== 'object') return hit
+  const path = typeof hit.path === 'string' ? hit.path : ''
+  if (path === '') return hit
+  const mtime = typeof hit.mtime === 'number' && Number.isFinite(hit.mtime) ? hit.mtime : undefined
+  const size = typeof hit.size === 'number' && Number.isFinite(hit.size) ? hit.size : undefined
+  const decorated = { ...hit, kind: hit.dir === true ? 'dir' : 'file' }
+  if (hit.dir !== true) decorated.ref = fileRefOf({ path, ...(mtime === undefined ? {} : { mtime }), ...(size === undefined ? {} : { size }) })
+  decorated.freshness = { state: 'unknown', observedAt, ...(mtime === undefined ? {} : { mtime }) }
+  decorated.refStatus = 'unknown'
+  decorated.permissions = { read: 'allowed', visibility: 'roots', reason: 'name hits come from the configured index roots' }
+  return decorated
+}
+
+/** Run a name search through a shared read-only engine session. */
 export async function runNameSearch(settings, query, options = {}) {
-  const limit = clampInt(options.limit, 1, 1000, 50)
+  const limit = clampInt(options.limit, 1, MAX_SEARCH_LIMIT, 50)
   const offset = clampInt(options.offset, 0, 1_000_000, 0)
-  const session = startEngine(settings)
+  const budgetChars = clampInt(options.budgetChars, 0, 10_000_000, DEFAULT_SEARCH_BUDGET_CHARS)
+  const engine = options.engine ?? createEngineSession(settings)
+  const ownsEngine = options.engine === undefined
   const started = Date.now()
   try {
     // Wait for the engine's first scan before querying. `ready` is emitted
     // before the scan starts, so an immediate search could return zero hits on
     // a slow/cold filesystem (observed on Windows and macOS CI runners). On
     // timeout the search still runs and the result carries a warning.
-    const scanComplete = await session.waitForInitialScan()
-    const result = await session.request('search', {
+    const scanComplete = await engine.waitForInitialScan()
+    const result = await engine.request('search', {
       query,
       limit,
       offset,
@@ -339,7 +555,14 @@ export async function runNameSearch(settings, query, options = {}) {
       filesOnly: options.filesOnly === true,
       dirsOnly: options.dirsOnly === true,
     })
-    const hits = Array.isArray(result.hits) ? result.hits : []
+    const observedAt = Date.now()
+    const hits = (Array.isArray(result.hits) ? result.hits : []).map(hit => decorateNameHit(hit, observedAt))
+    const budgeted = applyHitBudget(hits, budgetChars)
+    const lossy = budgeted.budget.dropped > 0
+    const hasTotal = typeof result.total === 'number'
+    const total = hasTotal ? result.total : hits.length
+    const truncated = result.truncated === true || (hasTotal ? total > offset + hits.length : hits.length >= limit) || lossy
+    const nextOffset = truncated ? offset + (lossy ? hits.length : budgeted.items.length) : undefined
     return {
       ok: true,
       command: 'search',
@@ -347,36 +570,101 @@ export async function runNameSearch(settings, query, options = {}) {
       query,
       limit,
       offset: typeof result.offset === 'number' ? result.offset : offset,
-      total: typeof result.total === 'number' ? result.total : hits.length,
-      returned: hits.length,
-      truncated: result.truncated === true || typeof result.total === 'number' ? result.total > hits.length + offset : false,
+      total,
+      totalCount: total,
+      returned: budgeted.items.length,
+      truncated,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
+      budget: budgeted.budget,
       indexing: result.indexing === true || !scanComplete,
       ...(scanComplete ? {} : { warnings: ['initial-scan-incomplete'] }),
       tookMs: Date.now() - started,
-      hits,
+      hits: budgeted.items,
     }
   } catch (error) {
     throw asCliError(error, 'name-search-failed')
   } finally {
-    await session.close()
+    if (ownsEngine) await engine.close()
   }
 }
 
-/** Read-only handle to <state>/content.db with a schema sanity probe. */
+/**
+ * Open a SQLite database with the immutable URI, which tells SQLite the file
+ * will not change and therefore forbids it from creating -wal/-shm side files
+ * next to the caller's database. Returns a read-only connection.
+ */
+function openImmutableContent(path) {
+  // A file: URL keeps spaces / '%' / '#' in the path safe; SQLite accepts the
+  // URL when the URI filename flag is enabled (node:sqlite sets it).
+  return new DatabaseSync(pathToFileURL(path).href + '?immutable=1', { readOnly: true })
+}
+
+/** Copy content.db (+ its WAL, if present) into a temporary read-only directory. */
+function openCopiedContent(path) {
+  let dir
+  try {
+    dir = mkdtempSync(join(tmpdir(), CONTENT_COPY_PREFIX))
+    copyFileForReadOnly(path, join(dir, 'content.db'))
+    const wal = path + '-wal'
+    if (existsSync(wal)) {
+      try { if (statSync(wal).size > 0) copyFileForReadOnly(wal, join(dir, 'content.db-wal')) } catch { /* a vanished WAL is not fatal */ }
+    }
+    const db = new DatabaseSync(join(dir, 'content.db'), { readOnly: true })
+    db.prepare('SELECT count(*) AS n FROM docs').get()
+    return {
+      db,
+      path,
+      readOnly: 'copy',
+      walIgnored: false,
+      close: () => {
+        try { db.close() } catch { /* already closed */ }
+        try { rmSync(dir, { recursive: true, force: true, maxRetries: 2 }) } catch { /* best effort */ }
+      },
+    }
+  } catch (error) {
+    if (dir !== undefined) {
+      try { rmSync(dir, { recursive: true, force: true, maxRetries: 2 }) } catch { /* best effort */ }
+    }
+    throw error
+  }
+}
+
+/**
+ * Read-only handle to <state>/content.db with a schema sanity probe.
+ *
+ * The caller's content directory is never written: the primary path opens the
+ * database through SQLite's immutable URI (no -wal/-shm side files), and the
+ * fallback copies the database into a temporary directory for SQLite builds
+ * that do not accept URI filenames. Callers must use the returned close().
+ */
 export function openContentDb(stateDir) {
   const path = join(stateDir, 'content.db')
   if (!existsSync(path)) {
     throw new CliError('content-index-missing', 'content index not found: ' + path + ' (run a content search once in DSH)', EXIT_UNAVAILABLE)
   }
-  let db
+  let walIgnored = false
   try {
-    db = new DatabaseSync(path, { readOnly: true })
+    const wal = path + '-wal'
+    walIgnored = existsSync(wal) && statSync(wal).size > 0
+  } catch { walIgnored = false }
+  try {
+    const db = openImmutableContent(path)
     db.prepare('SELECT count(*) AS n FROM docs').get()
-  } catch (error) {
-    try { db?.close() } catch { /* ignore */ }
-    throw new CliError('content-index-unreadable', 'cannot read ' + path + ': ' + String(error && error.message ? error.message : error), EXIT_UNAVAILABLE)
+    return {
+      db,
+      path,
+      readOnly: 'immutable',
+      walIgnored,
+      close: () => { try { db.close() } catch { /* already closed */ } },
+    }
+  } catch (immutableError) {
+    try {
+      return openCopiedContent(path)
+    } catch (copyError) {
+      const detail = error => String(error && error.message ? error.message : error)
+      throw new CliError('content-index-unreadable', 'cannot read ' + path + ': ' + detail(immutableError) + ' / ' + detail(copyError), EXIT_UNAVAILABLE)
+    }
   }
-  return { db, path }
 }
 
 /** Split a content query into trigram terms, rejecting shorter ones. */
@@ -418,37 +706,141 @@ function snippetOf(body, terms) {
   return { snippet: snippet.length > 320 ? snippet.slice(0, 319) + '…' : snippet, line }
 }
 
-/** Run one body query against content.db (read-only). */
+/** Escape LIKE metacharacters so a root path matches literally. */
+function escapeLike(value) {
+  return value.replace(/[\\%_]/g, character => '\\' + character)
+}
+
+/** Trim trailing separators, keeping filesystem roots like "/" or "C:\\" intact. */
+function trimTrailingSeparators(value) {
+  if (value === '/' || /^[A-Za-z]:[\\/]$/.test(value) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+$/.test(value)) return value
+  return value.replace(/[\\/]+$/, '')
+}
+
+/**
+ * SQL prefilter for the configured roots. Paths are compared lexically here;
+ * the canonical containment check (resolveWithinRoots) still runs on every
+ * returned row, so this is a performance aid and never the trust boundary.
+ */
+function contentPathScope(roots) {
+  const prefixes = new Set()
+  for (const root of roots) {
+    if (typeof root !== 'string' || root === '') continue
+    for (const candidate of [root, resolve(root)]) prefixes.add(candidate)
+    const canonical = realPathOf(root)
+    if (canonical !== undefined) prefixes.add(canonical.path)
+  }
+  const clauses = []
+  const params = []
+  for (const prefix of prefixes) {
+    const base = trimTrailingSeparators(prefix)
+    if (base === '') continue
+    clauses.push('docs.path = ?')
+    params.push(base)
+    for (const suffix of new Set([sep, '/', '\\'])) {
+      clauses.push("docs.path LIKE ? ESCAPE '\\'")
+      params.push(escapeLike(base + suffix) + '%')
+    }
+  }
+  return { sql: clauses.length === 0 ? '0' : '(' + clauses.join(' OR ') + ')', params }
+}
+
+/** Look up the workspace cwd recorded for one indexed session log (schema v4 sources). */
+function sessionWorkspaceOf(db, path, cache) {
+  if (cache.has(path)) return cache.get(path)
+  let cwd
+  try {
+    const row = db.prepare('SELECT cwd FROM sources WHERE path = ?').get(path)
+    if (row !== undefined && row !== null && typeof row.cwd === 'string' && row.cwd !== '') cwd = row.cwd
+  } catch { cwd = undefined }
+  cache.set(path, cwd)
+  return cwd
+}
+
+/** Canonical roots/session boundary for one content hit. */
+function contentHitAllowed(hit, settings, allowSessions, db, cwdCache) {
+  if (typeof hit.path !== 'string' || hit.path === '') return false
+  if (resolveWithinRoots(hit.path, settings.roots) === undefined) return false
+  if (hit.kind !== 'session') return true
+  if (!allowSessions) return false
+  const cwd = sessionWorkspaceOf(db, hit.path, cwdCache)
+  if (cwd !== undefined && resolveWithinRoots(cwd, settings.roots) === undefined) return false
+  return true
+}
+
+/** Map one content.db row into a hit carrying the AI contract fields. */
+function toContentHit(row, terms, observedAt) {
+  const body = typeof row.body === 'string' ? row.body : ''
+  const snippet = snippetOf(body, terms)
+  const kind = row.kind === 'session' ? 'session' : 'file'
+  const path = typeof row.path === 'string' ? row.path : ''
+  const sessionId = typeof row.session_id === 'string' && row.session_id !== '' ? row.session_id : undefined
+  const hit = {
+    kind,
+    path,
+    ...(typeof row.title === 'string' && row.title !== '' ? { title: row.title } : {}),
+    snippet: snippet.snippet,
+    line: snippet.line,
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(typeof row.message_id === 'string' && row.message_id !== '' ? { messageId: row.message_id } : {}),
+  }
+  if (path !== '') {
+    hit.ref = kind === 'session' && sessionId !== undefined ? sessionRefOf(sessionId) : fileRefOf({ path, line: snippet.line })
+    hit.freshness = { state: 'unknown', observedAt }
+    hit.refStatus = 'unknown'
+    hit.permissions = kind === 'session'
+      ? { read: 'allowed', visibility: 'session', reason: 'session log is inside the configured roots' }
+      : { read: 'allowed', visibility: 'roots', reason: 'file is inside the configured roots' }
+  }
+  return hit
+}
+
+/**
+ * Run one body query against content.db (read-only, roots/session bounded).
+ *
+ * Trust boundary: file hits are restricted to the configured roots; session
+ * documents are omitted by default and only returned with allowSessions plus a
+ * canonical path check (and, when the database records it, a workspace cwd
+ * check). The SQL prefilter is not the boundary: every returned row is checked
+ * again through resolveWithinRoots.
+ */
 export function runContentSearch(settings, query, options = {}) {
   const terms = contentTerms(query)
-  const limit = clampInt(options.limit, 1, 100, 30)
+  const limit = clampInt(options.limit, 1, MAX_SEARCH_LIMIT, 30)
   const offset = clampInt(options.offset, 0, 100_000, 0)
-  const { db, path } = openContentDb(settings.stateDir)
+  const allowSessions = options.allowSessions === true
+  const { db, path, close, walIgnored } = openContentDb(settings.stateDir)
   try {
     const match = terms.map(quoteFts).join(' AND ')
+    const scope = contentPathScope(settings.roots)
+    const where = 'WHERE docs MATCH ?' + (allowSessions ? '' : " AND docs.kind = 'file'") + (scope.sql === '0' ? ' AND 0' : ' AND ' + scope.sql)
     const rows = db.prepare(
-      'SELECT rowid AS rowid, kind AS kind, path AS path, title AS title, body AS body, session_id AS session_id, message_id AS message_id FROM docs WHERE docs MATCH ? ORDER BY rank LIMIT ? OFFSET ?',
-    ).all(match, limit, offset)
+      'SELECT rowid AS rowid, kind AS kind, path AS path, title AS title, body AS body, session_id AS session_id, message_id AS message_id FROM docs ' + where + ' ORDER BY rank LIMIT ? OFFSET ?',
+    ).all(match, ...scope.params, limit, offset)
+    const observedAt = Date.now()
+    const cwdCache = new Map()
     const hits = []
+    let scopeDropped = 0
     for (const row of rows) {
-      const body = typeof row.body === 'string' ? row.body : ''
-      const snippet = snippetOf(body, terms)
-      hits.push({
-        kind: row.kind === 'session' ? 'session' : 'file',
-        path: typeof row.path === 'string' ? row.path : '',
-        ...(typeof row.title === 'string' && row.title !== '' ? { title: row.title } : {}),
-        snippet: snippet.snippet,
-        line: snippet.line,
-        ...(typeof row.session_id === 'string' && row.session_id !== '' ? { sessionId: row.session_id } : {}),
-        ...(typeof row.message_id === 'string' && row.message_id !== '' ? { messageId: row.message_id } : {}),
-      })
+      const hit = toContentHit(row, terms, observedAt)
+      if (!contentHitAllowed(hit, settings, allowSessions, db, cwdCache)) { scopeDropped++; continue }
+      hits.push(hit)
     }
     let total
     try {
-      total = Number(db.prepare('SELECT count(*) AS n FROM docs WHERE docs MATCH ?').get(match).n)
+      total = Number(db.prepare('SELECT count(*) AS n FROM docs ' + where).get(match, ...scope.params).n)
     } catch {
       total = undefined
     }
+    const budgetChars = clampInt(options.budgetChars, 0, 10_000_000, 0)
+    const budgeted = budgetChars > 0 ? applyHitBudget(hits, budgetChars) : { items: hits, budget: undefined }
+    const lossy = scopeDropped > 0 || (budgeted.budget !== undefined && budgeted.budget.dropped > 0)
+    const pageFull = rows.length >= limit
+    const truncated = pageFull || lossy || (total !== undefined && total > offset + rows.length)
+    const nextOffset = truncated ? offset + (lossy ? rows.length : budgeted.items.length) : undefined
+    const warnings = []
+    if (scopeDropped > 0) warnings.push('scope-filtered:' + String(scopeDropped))
+    if (walIgnored === true) warnings.push('content-wal-not-visible')
     return {
       ok: true,
       command: 'content-search',
@@ -458,15 +850,18 @@ export function runContentSearch(settings, query, options = {}) {
       limit,
       offset,
       ...(total === undefined ? {} : { total }),
-      returned: hits.length,
-      truncated: hits.length >= limit,
-      hits,
+      returned: budgeted.items.length,
+      truncated,
+      ...(nextOffset === undefined ? {} : { nextOffset }),
+      ...(budgeted.budget === undefined ? {} : { budget: budgeted.budget }),
+      ...(warnings.length === 0 ? {} : { warnings }),
+      hits: budgeted.items,
     }
   } catch (error) {
     if (error instanceof CliError) throw error
     throw new CliError('content-query-failed', String(error && error.message ? error.message : error), EXIT_RUNTIME)
   } finally {
-    try { db.close() } catch { /* ignore */ }
+    close()
   }
 }
 
@@ -490,36 +885,78 @@ export async function withContext(hits, contextLines) {
   }))
 }
 
-/** locator_find equivalent: body search plus optional context lines. */
+/** locator_find equivalent: body search plus context lines and the output budget. */
 export async function runFindSearch(settings, query, options = {}) {
-  const result = runContentSearch(settings, query, options)
+  const result = runContentSearch(settings, query, { ...options, budgetChars: 0 })
   const contextLines = clampInt(options.contextLines, 0, 10, 0)
   const hits = await withContext(result.hits, contextLines)
-  const budgetChars = clampInt(options.budgetChars, 0, 10_000_000, 8_000)
-  if (budgetChars > 0) {
-    const kept = []
-    let used = 0
-    for (const hit of hits) {
-      const size = JSON.stringify(hit).length
-      if (kept.length > 0 && used + size > budgetChars) break
-      kept.push(hit)
-      used += size
-    }
-    const dropped = hits.length - kept.length
-    result.hits = kept
-    result.returned = kept.length
-    result.truncated = result.truncated || dropped > 0
-    result.budget = { limitChars: budgetChars, usedChars: used, truncated: dropped > 0, dropped }
-  }
+  const budgetChars = clampInt(options.budgetChars, 0, 10_000_000, DEFAULT_SEARCH_BUDGET_CHARS)
+  const budgeted = applyHitBudget(hits, budgetChars)
+  const lossy = budgeted.budget.dropped > 0
+  const pageFull = result.hits.length >= result.limit
+  const truncated = pageFull || lossy || (result.total !== undefined && result.total > result.offset + result.hits.length)
+  const nextOffset = truncated ? result.offset + (lossy ? result.hits.length : budgeted.items.length) : undefined
+  result.hits = budgeted.items
+  result.returned = budgeted.items.length
+  result.truncated = truncated
+  result.budget = budgeted.budget
+  if (nextOffset === undefined) delete result.nextOffset
+  else result.nextOffset = nextOffset
   result.command = 'find'
   return result
 }
 
+/** Column names of one SQLite table, or an empty set when it does not exist. */
+function tableColumns(db, table) {
+  const names = new Set()
+  try {
+    for (const column of db.prepare('PRAGMA table_info(' + table + ')').all()) {
+      if (column !== null && typeof column.name === 'string') names.add(column.name)
+    }
+  } catch { /* missing table */ }
+  return names
+}
+
+/** Content-database counts with schema-v4 semantics (files / sessions / messages). */
+function contentCounts(db) {
+  const counts = { files: 0, sessions: 0, messages: 0 }
+  const metaColumns = tableColumns(db, 'docs_meta')
+  if (metaColumns.has('kind_id')) {
+    for (const row of db.prepare('SELECT kind_id AS kindId, count(*) AS n FROM docs_meta GROUP BY kind_id').all()) {
+      const kindId = Number(row.kindId)
+      if (kindId === 0) counts.files = Number(row.n)
+      else if (kindId === 1) counts.messages = Number(row.n)
+    }
+  } else {
+    // Legacy pre-v4 database: the kind text lives on the docs row.
+    for (const row of db.prepare('SELECT kind AS kind, count(*) AS n FROM docs GROUP BY kind').all()) {
+      if (row.kind === 'file') counts.files = Number(row.n)
+      else if (row.kind === 'session') counts.messages = Number(row.n)
+    }
+  }
+  // v4 stores one sources row per indexed session log. A database written by
+  // the plugin always has a sources row for every session document; a
+  // hand-built or partially migrated database may not, so fall back to distinct
+  // session ids only in that (empty-sources) case.
+  try {
+    counts.sessions = Number(db.prepare('SELECT count(*) AS n FROM sources').get().n)
+  } catch { counts.sessions = 0 }
+  if (counts.sessions === 0 && counts.messages > 0) {
+    try {
+      counts.sessions = Number(db.prepare("SELECT count(DISTINCT session_id) AS n FROM docs WHERE kind = 'session' AND session_id IS NOT NULL").get().n)
+    } catch { /* keep the sources-derived zero */ }
+  }
+  return counts
+}
+
 /** Aggregate status: engine stats plus read-only content.db counts. */
-export async function runStatus(settings) {
+export async function runStatus(settings, options = {}) {
+  const session = options.engine ?? createEngineSession(settings)
+  const ownsSession = options.engine === undefined
   const result = {
     ok: true,
     command: 'status',
+    readOnly: true,
     roots: settings.roots,
     stateDir: settings.stateDir,
     binary: settings.binary,
@@ -527,45 +964,46 @@ export async function runStatus(settings) {
     content: { available: false },
     warnings: [],
   }
-  const session = startEngine(settings)
   try {
-    const stats = await session.request('status')
-    result.engine = {
-      ok: true,
-      version: typeof stats.version === 'string' ? stats.version : '',
-      platform: typeof stats.platform === 'string' ? stats.platform : '',
-      entries: Number(stats.entries ?? 0),
-      files: Number(stats.files ?? 0),
-      dirs: Number(stats.dirs ?? 0),
-      watching: stats.watching === true,
-      scanning: stats.scanning === true,
-      usn: stats.usn === true,
-      stateDir: typeof stats.stateDir === 'string' ? stats.stateDir : settings.stateDir,
+    try {
+      const stats = await session.request('status')
+      result.engine = {
+        ok: true,
+        readOnly: true,
+        version: typeof stats.version === 'string' ? stats.version : '',
+        platform: typeof stats.platform === 'string' ? stats.platform : '',
+        entries: Number(stats.entries ?? 0),
+        files: Number(stats.files ?? 0),
+        dirs: Number(stats.dirs ?? 0),
+        watching: stats.watching === true,
+        scanning: stats.scanning === true,
+        usn: stats.usn === true,
+        stateDir: settings.stateDir,
+      }
+      if (Array.isArray(stats.roots) && stats.roots.length > 0) result.roots = stats.roots
+      if (session.copiedFiles.length > 0) result.copiedStateFiles = session.copiedFiles
+    } catch (error) {
+      result.engine = { ok: false, error: error && error.code ? error.code + ': ' + error.message : String(error) }
+      result.warnings.push('engine-unavailable')
     }
-    if (Array.isArray(stats.roots) && stats.roots.length > 0) result.roots = stats.roots
-  } catch (error) {
-    result.engine = { ok: false, error: error && error.code ? error.code + ': ' + error.message : String(error) }
-    result.warnings.push('engine-unavailable')
   } finally {
-    try { await session.close() } catch { /* already gone */ }
+    if (ownsSession) {
+      try { await session.close() } catch { /* already gone */ }
+    }
   }
   try {
     if (!existsSync(join(settings.stateDir, 'content.db'))) {
       result.content = { available: false, reason: 'missing' }
     } else {
-      const { db } = openContentDb(settings.stateDir)
+      const { db, close, readOnly, walIgnored } = openContentDb(settings.stateDir)
       try {
-        const counts = { files: 0, sessions: 0, messages: 0 }
-        for (const row of db.prepare('SELECT kind AS kind, count(*) AS n FROM docs GROUP BY kind').all()) {
-          if (row.kind === 'file') counts.files = Number(row.n)
-          else if (row.kind === 'session') counts.sessions = Number(row.n)
-        }
-        counts.messages = counts.sessions
+        const counts = contentCounts(db)
         let refs = 0
         try { refs = Number(db.prepare('SELECT count(*) AS n FROM refs').get().n) } catch { refs = 0 }
-        result.content = { available: true, ...counts, refs }
+        result.content = { available: true, ...counts, refs, readOnly }
+        if (walIgnored === true) result.warnings.push('content-wal-not-visible')
       } finally {
-        try { db.close() } catch { /* ignore */ }
+        close()
       }
     }
   } catch (error) {
@@ -673,6 +1111,42 @@ async function readHead(path, maxBytes) {
   }
 }
 
+/**
+ * Find the indexed log path for one session id.
+ *
+ * Schema v4 keeps one `sources` row per session log (the session id is the log
+ * directory name); older databases are answered from the docs/docs_meta rows.
+ * @returns the log path plus the mtime the index recorded, or undefined.
+ */
+function findSessionLog(db, sessionId) {
+  try {
+    for (const row of db.prepare('SELECT path, mtime FROM sources').all()) {
+      if (typeof row.path !== 'string' || row.path === '') continue
+      if (basename(dirname(row.path)) !== sessionId) continue
+      return { path: row.path, ...(typeof row.mtime === 'number' ? { mtime: Math.trunc(row.mtime) } : {}) }
+    }
+  } catch { /* no sources table (legacy schema) */ }
+  const metaColumns = tableColumns(db, 'docs_meta')
+  try {
+    if (metaColumns.has('path_id') && tableColumns(db, 'paths').has('path')) {
+      const row = db.prepare('SELECT p.path AS path, m.mtime AS mtime FROM docs_meta m JOIN paths p ON p.id = m.path_id JOIN docs d ON d.rowid = m.rowid WHERE m.kind_id = 1 AND d.session_id = ? LIMIT 1').get(sessionId)
+      if (row !== undefined && row !== null && typeof row.path === 'string') {
+        return { path: row.path, ...(typeof row.mtime === 'number' ? { mtime: Math.trunc(row.mtime) } : {}) }
+      }
+    } else if (metaColumns.has('path')) {
+      const row = db.prepare("SELECT m.path AS path, m.mtime AS mtime FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE d.kind = 'session' AND d.session_id = ? LIMIT 1").get(sessionId)
+      if (row !== undefined && row !== null && typeof row.path === 'string') {
+        return { path: row.path, ...(typeof row.mtime === 'number' ? { mtime: Math.trunc(row.mtime) } : {}) }
+      }
+    }
+  } catch { /* fall through to the docs row */ }
+  try {
+    const row = db.prepare("SELECT path FROM docs WHERE kind = 'session' AND session_id = ? LIMIT 1").get(sessionId)
+    if (row !== undefined && row !== null && typeof row.path === 'string' && row.path !== '') return { path: row.path }
+  } catch { /* no usable docs row */ }
+  return undefined
+}
+
 /** Resolve one evidence ref to metadata (read-only, roots-authorized). */
 export async function resolveRef(settings, ref, options = {}) {
   const parsed = parseRef(ref)
@@ -745,17 +1219,13 @@ export async function resolveRef(settings, ref, options = {}) {
     let sessionPath
     let indexedAt
     try {
-      const { db } = openContentDb(settings.stateDir)
+      const { db, close } = openContentDb(settings.stateDir)
       try {
-        const row = db.prepare("SELECT m.path AS path, m.mtime AS mtime FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE d.kind = 'session' AND d.session_id = ? LIMIT 1").get(sessionId)
-        sessionPath = row && typeof row.path === 'string' ? row.path : undefined
-        indexedAt = row && typeof row.mtime === 'number' ? row.mtime : undefined
-        if (parsed.kind === 'session-event' && sessionPath === undefined) {
-          const eventRow = db.prepare("SELECT m.path AS path FROM docs_meta m JOIN docs d ON d.rowid = m.rowid WHERE d.kind = 'session' AND d.session_id = ? LIMIT 1").get(sessionId)
-          sessionPath = eventRow && typeof eventRow.path === 'string' ? eventRow.path : undefined
-        }
+        const log = findSessionLog(db, sessionId)
+        sessionPath = log === undefined ? undefined : log.path
+        indexedAt = log === undefined ? undefined : log.mtime
       } finally {
-        try { db.close() } catch { /* ignore */ }
+        close()
       }
     } catch {
       sessionPath = undefined
@@ -863,8 +1333,8 @@ const USAGE = [
   'dsh-locator CLI ' + version,
   '',
   'Usage:',
-  '  locator-cli search <query> [--json] [--limit N] [--offset N] [--mode names|content] [--sort name|path|size|mtime|ext] [--desc] [--regex] [--case-sensitive] [--whole-word] [--files-only] [--dirs-only]',
-  '  locator-cli find <query> [--json] [--limit N] [--offset N] [--context N]',
+  '  locator-cli search <query> [--json] [--limit N] [--offset N] [--mode names|content] [--allow-sessions] [--sort name|path|size|mtime|ext] [--desc] [--regex] [--case-sensitive] [--whole-word] [--files-only] [--dirs-only]',
+  '  locator-cli find <query> [--json] [--limit N] [--offset N] [--context N] [--allow-sessions]',
   '  locator-cli status [--json]',
   '  locator-cli resolve <ref> [--json] [--excerpt]',
   '  locator-cli cite <ref...> [--json] [--format markdown|json|mention]',
@@ -875,7 +1345,13 @@ const USAGE = [
   '  --state <dir>    snapshot directory (default DSH_LOCATOR_STATE or the platform cache)',
   '  --bin <path>     engine binary (default DSH_LOCATOR_BIN or the bundled build)',
   '  --json           machine-readable JSON on stdout',
+  '  --limit <n>      page size, clamped to 1..100 (the host tools use the same cap)',
   '  --timeout <ms>   engine request timeout (default 15000)',
+  '  --budget <chars>  soft output budget for search/find hits (default 8000)',
+  '  --allow-sessions  include session-log body hits (default: files only; path and recorded workspace must be inside the roots)',
+  '',
+  'Read-only: the engine runs against a temporary copy of index.snapshot/index.journal/meta.json;',
+  'the caller state directory is never created or written.',
   '',
   'Environment: DSH_LOCATOR_STATE, DSH_LOCATOR_ROOTS (path-separator separated), DSH_LOCATOR_BIN, DSH_LOCATOR_SCAN_TIMEOUT (ms).',
   'Exit codes: 0 ok, 1 runtime error, 2 usage error, 3 index/engine unavailable.',
@@ -899,6 +1375,7 @@ export function parseCliArgs(argv) {
     ['--files-only', 'filesOnly'],
     ['--dirs-only', 'dirsOnly'],
     ['--excerpt', 'excerpt'],
+    ['--allow-sessions', 'allowSessions'],
   ])
   const valueFlags = new Map([
     ['--limit', 'limit'],
@@ -952,19 +1429,28 @@ export function settingsFromFlags(flags = {}, env = process.env) {
 
 /** Render a result as human text (the CLI default). */
 export function renderText(result) {
+  /** One trailing "(truncated; nextOffset N; ...)" note shared by search and find. */
+  const pageNote = value => {
+    if (value.truncated !== true && value.nextOffset === undefined) return ''
+    const bits = []
+    if (value.nextOffset !== undefined) bits.push('nextOffset ' + String(value.nextOffset))
+    if (value.budget !== undefined && value.budget.dropped > 0) bits.push(String(value.budget.dropped) + ' hit(s) over the ' + String(value.budget.limitChars ?? 0) + '-char budget')
+    return ' (truncated' + (bits.length === 0 ? '' : '; ' + bits.join('; ')) + ')'
+  }
   if (result.command === 'search') {
-    const lines = [String(result.returned) + ' of ' + String(result.total ?? '?') + ' match(es) for ' + JSON.stringify(result.query) + (result.truncated ? ' (truncated)' : '')]
+    const lines = [String(result.returned) + ' of ' + String(result.total ?? '?') + ' match(es) for ' + JSON.stringify(result.query) + pageNote(result)]
     for (const hit of result.hits) lines.push(hit.path + (hit.dir ? '/' : ''))
     if (Array.isArray(result.warnings) && result.warnings.length > 0) lines.push('warnings: ' + result.warnings.join(', '))
     return lines.join('\n')
   }
   if (result.command === 'content-search' || result.command === 'find') {
-    const lines = [String(result.returned) + ' content hit(s)' + (result.total === undefined ? '' : ' of ' + String(result.total)) + ' for ' + JSON.stringify(result.query)]
+    const lines = [String(result.returned) + ' content hit(s)' + (result.total === undefined ? '' : ' of ' + String(result.total)) + ' for ' + JSON.stringify(result.query) + pageNote(result)]
     for (const hit of result.hits) {
       const location = hit.kind === 'session' ? 'session ' + (hit.sessionId ?? '') : hit.path + (hit.line === undefined ? '' : ':' + String(hit.line))
       lines.push('[' + hit.kind + '] ' + location + ' — ' + hit.snippet)
       if (Array.isArray(hit.context)) lines.push('  ' + hit.context.map((line, index) => String((hit.contextStart ?? 1) + index) + ': ' + line).join('\n  '))
     }
+    if (Array.isArray(result.warnings) && result.warnings.length > 0) lines.push('warnings: ' + result.warnings.join(', '))
     return lines.join('\n')
   }
   if (result.command === 'status') {
@@ -973,9 +1459,9 @@ export function renderText(result) {
     return [
       'engine: ' + (engine.ok ? 'ok ' + String(engine.version ?? '') + ' · ' + String(engine.entries ?? 0) + ' entries (' + String(engine.files ?? 0) + ' files, ' + String(engine.dirs ?? 0) + ' dirs)' : 'unavailable' + (engine.error === undefined ? '' : ': ' + engine.error)),
       '  roots: ' + (result.roots ?? []).join(', '),
-      '  state: ' + result.stateDir,
+      '  state: ' + result.stateDir + (result.readOnly === true ? ' (read-only; engine uses a temporary copy)' : ''),
       '  binary: ' + result.binary,
-      'content: ' + (content.available ? String(content.files ?? 0) + ' files / ' + String(content.sessions ?? 0) + ' sessions / ' + String(content.refs ?? 0) + ' refs' : 'unavailable (' + String(content.reason ?? 'missing') + ')'),
+      'content: ' + (content.available ? String(content.files ?? 0) + ' files / ' + String(content.sessions ?? 0) + ' sessions / ' + String(content.messages ?? 0) + ' messages / ' + String(content.refs ?? 0) + ' refs' : 'unavailable (' + String(content.reason ?? 'missing') + ')'),
       ...(result.warnings.length === 0 ? [] : ['warnings: ' + result.warnings.join(', ')]),
     ].join('\n')
   }
@@ -996,13 +1482,23 @@ export async function runCliCommand(parsed, env = process.env) {
   const query = parsed.positional.join(' ').trim()
   if (parsed.command === 'search') {
     if (query === '') usage('search needs a query')
-    if (parsed.flags.mode === 'content') return runContentSearch(settings, query, parsed.flags)
+    if (parsed.flags.mode === 'content') {
+      return runContentSearch(settings, query, {
+        ...parsed.flags,
+        allowSessions: parsed.flags.allowSessions === true,
+        budgetChars: parsed.flags.budgetChars ?? DEFAULT_SEARCH_BUDGET_CHARS,
+      })
+    }
     if (parsed.flags.mode !== undefined && parsed.flags.mode !== 'names') usage('--mode must be names or content')
     return await runNameSearch(settings, query, parsed.flags)
   }
   if (parsed.command === 'find') {
     if (query === '') usage('find needs a query')
-    return await runFindSearch(settings, query, { ...parsed.flags, budgetChars: parsed.flags.budgetChars ?? 8000 })
+    return await runFindSearch(settings, query, {
+      ...parsed.flags,
+      allowSessions: parsed.flags.allowSessions === true,
+      budgetChars: parsed.flags.budgetChars ?? DEFAULT_SEARCH_BUDGET_CHARS,
+    })
   }
   if (parsed.command === 'resolve') {
     if (query === '') usage('resolve needs a ref')
@@ -1048,12 +1544,21 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       io.stderr.write('locator-cli: ' + failure.code + ': ' + failure.message + '\n')
     }
     return failure.exitCode
+  } finally {
+    cleanupReadOnlyStates()
   }
 }
 
 // Run only when executed directly (the MCP server imports this module).
 const invokedDirectly = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 if (invokedDirectly) {
+  // Ctrl+C / termination must not leak a temporary state copy.
+  const stop = code => {
+    cleanupReadOnlyStates()
+    process.exit(code)
+  }
+  process.once('SIGINT', () => stop(130))
+  process.once('SIGTERM', () => stop(143))
   main().then(code => { process.exitCode = code }).catch(error => {
     process.stderr.write('locator-cli: fatal: ' + String(error && error.stack ? error.stack : error) + '\n')
     process.exitCode = EXIT_RUNTIME

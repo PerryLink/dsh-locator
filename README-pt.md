@@ -104,7 +104,7 @@ Resumindo: a **ideia** do Everything (índice persistente + consultas estruturad
 dsh plugin --profile web add dsh-locator
 
 # fixar uma versão
-dsh plugin --profile web add dsh-locator@0.20.2
+dsh plugin --profile web add dsh-locator@0.21.1
 
 # branch principal do GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -154,7 +154,7 @@ Em qual conversa este desenho foi decidido?
 
 Sintaxe no estilo Everything devolvendo caminho, tamanho, data de modificação, extensão e tipo. Ideal para “o nome contém report”, “PDFs alterados esta semana”, “vídeos com mais de 50 MB”.
 
-Ordenação, paginação e `limit`/`offset` são feitos no motor do host; consultas comuns sobre 1,51 M de entradas respondem em dezenas de milissegundos.
+Ordenação, paginação e `limit`/`offset` são feitos no motor do host; consultas comuns sobre 258 k entradas respondem em dezenas de milissegundos.
 
 ### Por conteúdo: `locator_find`
 
@@ -422,6 +422,13 @@ DeepSeek Harness
 
 O motor é um único processo Go; respeita `GOMEMLIMIT`/`GOGC` e `memoryLimitMB`, onde `0` (padrão) calcula um limite automático (25% da RAM, 384–1024 MiB). Um motor 0.20 carrega um snapshot de 1,5 M de entradas em ~186 MB de heap e fica em ~335 MB de RSS com o watcher instalado (limite de 512 MiB); a versão anterior precisava de ~700 MB no mesmo ponto. Nenhum altera o formato do snapshot. Com o cache de páginas do banco de conteúdo, o processo anfitrião do DSH ficava por volta de 700 MB de RSS na instalação ao vivo, com latência ociosa de p50 2 ms.
 
+## Notas de atualização 0.21.1
+
+- Contrato de IA: padrões search 10 / find 8, paginação não pula linhas descartadas por orçamento, `detail:compact`, `budgetChars`, `errorInfo`.
+- `scope`/count corrigidos; `explore` ordena por relevância; capability marca rebuild/reindex/export como write/ask.
+- CLI/MCP agora são realmente somente leitura (copiam o estado para um diretório temporário) e o conteúdo fica restrito aos roots configurados; sessões ficam ocultas por padrão.
+- schema v4: primeira inicialização faz um rebuild completo do conteúdo (0.21.1 inclui o trabalho de cobertura do 0.21.0). 589 tests.
+
 ## Notas de atualização 0.20.2
 
 - **Cobertura**: `contentMaxTotalBytes` 1,6 GB, `contentMaxDbBytes` 8 GB, `contentMaxSessions` 1000; cobertura medida 69,8% -> **99,9%** (142.492/142.613 arquivos), 842 sessões, banco de conteúdo 4,89 GB.
@@ -543,7 +550,7 @@ O motor é um único processo Go; respeita `GOMEMLIMIT`/`GOGC` e `memoryLimitMB`
 
 - **Índice de raciocínio opcional**: `contentIndexReasoning: true` adiciona os blocos `reasoning`/`thinking` do assistente ao mesmo documento de sessão (resposta final primeiro, dentro do limite de 8KB); `locator_find` busca o raciocínio e o salto continua no mensagem. Desativado por padrão; alternar força reconstrução das sessões.
 
-- **Índice de conteúdo completo**: `contentFullIndex: true` (ou ambos os caps em `0`) indexa todos os arquivos de texto elegíveis (~185k arquivos / 2.0 GB, ~5.9 GB de FTS na máquina de referência); a primeira construção leva alguns minutos e as consultas ficam em ~0,04–0,7 s. Os limites padrão continuam ativos para não consumir dezenas de GB sem aviso.
+- **Índice de conteúdo completo**: `contentFullIndex: true` (ou ambos os caps em `0`) indexa todos os arquivos de texto elegíveis (~164k arquivos / 1.74 GB, ~5.45 GB de FTS na máquina de referência); a primeira construção medida é 331 s e as consultas ficam em ~0,02–0,4 s. Os limites padrão continuam ativos para não consumir dezenas de GB sem aviso.
 - `locator_find` continua no workspace; se o cwd estiver fora de todos os roots indexados, ele não restringe mais os arquivos a esse cwd (antes retornava vazio) e busca nos roots; sessões continuam limitadas à atual. Use `scope: "all"` para cruzar escopos.
 - Painel: **carregar mais** (paginação por offset), **buscas recentes** e **filtro dos resultados carregados**.
 - Segurança: rejeita destinos sob mount points aninhados dentro de um root no Linux; `/open` usa `O_NOFOLLOW` e confere o inode.

@@ -40,6 +40,13 @@ const STOP_WORDS: ReadonlySet<string> = new Set([
   'is', 'are', 'was', 'were', 'of', 'to', 'in', 'on', 'at', 'a', 'an', 'that', 'this',
   'it', 'do', 'does', 'did', 'find', 'search', 'all', 'from', 'about', 'me', 'my', 'our',
   'tell', 'show', 'give', 'which', 'when', 'should', 'could', 'would', 'there', 'their',
+  // 0.21.1 (AI-friendliness): pronoun/auxiliary probes such as "we" or "our"
+  // only added unrelated name hits to the digest, and question scaffolding
+  // words ("just", "also", "than") matched nearly every path.
+  'we', 'us', 'you', 'your', 'they', 'them', 'its', 'i', 'am', 'been', 'being',
+  'has', 'have', 'had', 'will', 'can', 'may', 'might', 'must', 'shall', 'just',
+  'also', 'into', 'over', 'some', 'such', 'only', 'more', 'most', 'other', 'than',
+  'then', 'these', 'those', 'via', 'per',
 ])
 
 /**
@@ -105,9 +112,62 @@ interface ExploreRef {
   messageId?: string
   ref?: string
   refStatus?: 'fresh' | 'stale' | 'missing' | 'unknown'
+  /**
+   * Content-index relevance rank (FTS5 `rank`, i.e. bm25 with FTS5's ordering):
+   * lower (more negative) is a better match. Name-index hits never carry a rank,
+   * so they always sort after ranked content hits.
+   */
   score?: number
+  /** The probe that best explains this ref (a better-ranked content probe wins). */
+  matchedQuery?: string
+  /** Every probe that matched this ref (`<origin>:<query>`), de-duplicated and capped. */
+  why?: string[]
   read: 'allowed' | 'denied'
   visibility: 'workspace' | 'roots' | 'session' | 'external'
+}
+
+/** Maximum probe attributions kept per ref (keeps the digest bounded). */
+const MAX_WHY = 6
+
+/** Append probe labels, de-duplicated and capped by {@link MAX_WHY}. */
+function mergeWhy(existing: readonly string[] | undefined, incoming: readonly string[] | undefined): string[] {
+  const out: string[] = []
+  for (const label of [...(existing ?? []), ...(incoming ?? [])]) {
+    if (!out.includes(label) && out.length < MAX_WHY) out.push(label)
+  }
+  return out
+}
+
+/** Lower (more relevant) bm25 rank wins; an absent rank always loses to a number. */
+function bestScore(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right
+  if (right === undefined) return left
+  return Math.min(left, right)
+}
+
+/** Merge a duplicate name hit into an existing ref (probe attribution only). */
+function mergeNameRef(existing: ExploreRef, ref: ExploreRef): void {
+  existing.why = mergeWhy(existing.why, ref.why)
+}
+
+/**
+ * Merge one content hit into an existing ref. The content hit wins over a name
+ * hit (snippet + verified ref + bm25 rank), and the best rank wins when several
+ * content probes returned the same evidence row.
+ */
+function mergeContentRef(existing: ExploreRef, ref: ExploreRef): ExploreRef {
+  const previousScore = existing.score
+  const score = bestScore(previousScore, ref.score)
+  const betterRank = ref.score !== undefined && (previousScore === undefined || ref.score < previousScore)
+  const matchedQuery = betterRank ? ref.matchedQuery ?? existing.matchedQuery : existing.matchedQuery ?? ref.matchedQuery
+  return {
+    ...existing,
+    ...ref,
+    origin: 'content',
+    why: mergeWhy(existing.why, ref.why),
+    ...(score === undefined ? {} : { score }),
+    ...(matchedQuery === undefined ? {} : { matchedQuery }),
+  }
 }
 
 const REF_SCHEMA = {
@@ -124,7 +184,9 @@ const REF_SCHEMA = {
     messageId: { type: 'string' },
     ref: { type: 'string', description: 'Citable evidence reference for this occurrence (absent when not readable).' },
     refStatus: { type: 'string', enum: ['fresh', 'stale', 'missing', 'unknown'] },
-    score: { type: 'number' },
+    score: { type: 'number', description: 'BM25 rank from the content index (lower = more relevant); absent on name-index hits.' },
+    matchedQuery: { type: 'string', description: 'Probe that best explains this ref; a better-ranked content probe wins over name hits.' },
+    why: { type: 'array', items: { type: 'string' }, description: 'Every probe that matched this ref (origin:query), de-duplicated and capped.' },
     read: { type: 'string', enum: ['allowed', 'denied'] },
     visibility: { type: 'string', enum: ['workspace', 'roots', 'session', 'external'] },
   },
@@ -155,9 +217,16 @@ const EXPLORE_OUTPUT = {
         contentHits: { type: 'integer' },
         refs: { type: 'integer' },
         deduped: { type: 'integer' },
+        merged: { type: 'integer', description: 'Unique evidence refs after cross-probe de-duplication (before the ref cap and output budget).' },
+        maxRefs: { type: 'integer', description: 'Effective ref cap used for this call.' },
       },
     },
-    truncated: { type: 'boolean' },
+    truncated: { type: 'boolean', description: 'True when the digest was cut by the ref cap and/or the output budget; see truncatedReason and budget.dropped.' },
+    truncatedReason: {
+      type: 'string',
+      enum: ['maxRefs', 'budget', 'both'],
+      description: 'Why the digest is truncated: the caller ref cap (maxRefs), the output budget, or both.',
+    },
     budget: BUDGET_SCHEMA,
     tookMs: { type: 'number' },
     /** Set when the content store had to widen a workspace scope (e.g. 'global'). */
@@ -178,7 +247,7 @@ export interface ExploreToolOptions {
 }
 
 /** One name hit in the merged shape. */
-function nameRef(hit: SearchHit, scope: Scope | undefined, cwdIsIndexed: boolean): ExploreRef {
+function nameRef(hit: SearchHit, scope: Scope | undefined, cwdIsIndexed: boolean, query: string): ExploreRef {
   const readable = scope?.readability(hit.path) ?? { read: 'allowed' as const, reason: 'name hit inside the configured roots' }
   const visibility: 'workspace' | 'roots' = cwdIsIndexed ? 'workspace' : 'roots'
   return {
@@ -188,13 +257,17 @@ function nameRef(hit: SearchHit, scope: Scope | undefined, cwdIsIndexed: boolean
     title: hit.name,
     ...(hit.dir || readable.read !== 'allowed' ? {} : { ref: fileRef({ path: hit.path, mtime: hit.mtime, size: hit.size }) }),
     refStatus: 'unknown',
+    matchedQuery: query,
+    why: ['name:' + query],
     read: readable.read,
     visibility,
   }
 }
 
 /** One enriched content hit in the merged shape. */
-function contentRef(hit: EnrichedContentHit): ExploreRef {
+function contentRef(hit: EnrichedContentHit, query: string): ExploreRef {
+  // Compact/embedded content hits may omit the evidence block; the merge keeps
+  // whatever exists instead of failing the whole digest on a missing label.
   return {
     path: hit.path,
     kind: hit.kind,
@@ -204,11 +277,13 @@ function contentRef(hit: EnrichedContentHit): ExploreRef {
     ...(hit.line === undefined ? {} : { line: hit.line }),
     ...(hit.sessionId === undefined ? {} : { sessionId: hit.sessionId }),
     ...(hit.messageId === undefined ? {} : { messageId: hit.messageId }),
-    ref: hit.ref,
-    refStatus: hit.refStatus,
-    score: hit.score,
-    read: hit.permissions.read,
-    visibility: hit.permissions.visibility,
+    ...(hit.ref === undefined ? {} : { ref: hit.ref }),
+    ...(hit.refStatus === undefined ? {} : { refStatus: hit.refStatus }),
+    ...(hit.score === undefined ? {} : { score: hit.score }),
+    matchedQuery: query,
+    why: ['content:' + query],
+    read: hit.permissions?.read ?? 'allowed',
+    visibility: hit.permissions?.visibility ?? (hit.kind === 'session' ? 'session' : 'roots'),
   }
 }
 
@@ -252,6 +327,9 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
       scope: { type: 'string', enum: ['workspace', 'all'], description: 'workspace (default) keeps file hits under the caller cwd when it is indexed; all searches every configured root.' },
       maxChars: { type: 'integer', description: 'Result budget in characters; defaults to the configured outputBudgetChars (0 = unlimited).' },
     },
+    // Every probe is an independent read-only index query; overlapping calls
+    // share the runtime's read path and never mutate caller-visible state.
+    isConcurrencySafe: () => true,
     output: {
       schema: EXPLORE_OUTPUT,
       render: (_args, value) => {
@@ -260,8 +338,11 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
           summary?: string
           refs?: ExploreRef[]
           queries?: { names?: string[]; content?: string[] }
+          counts?: { maxRefs?: number; merged?: number }
           truncated?: boolean
+          truncatedReason?: 'maxRefs' | 'budget' | 'both'
           nextOffset?: number
+          budget?: { dropped?: number }
           warnings?: string[]
           error?: string
           scopeFallback?: string
@@ -270,7 +351,11 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
         if (!v.ok) return [{ type: 'text', text: 'locator_explore failed: ' + (v.error ?? 'unknown error') }]
         const lines = [v.summary ?? '']
         for (const ref of v.refs ?? []) {
-          const head = '  [' + String(ref.kind) + '] ' + (ref.title ?? ref.path)
+          // Name-only hits need their probe shown (that is how the caller
+          // judges "why did this unrelated file appear"); content hits already
+          // carry the matched snippet, so keep their line lean.
+          const via = ref.origin !== 'name' || ref.matchedQuery === undefined ? '' : ' [q: ' + ref.matchedQuery.slice(0, 48) + ']'
+          const head = '  [' + String(ref.kind) + '] ' + (ref.title ?? ref.path) + via
           const body = ref.snippet === undefined ? '' : ' — ' + ref.snippet.slice(0, 200)
           const evidence = ref.ref === undefined ? '' : '\n     ref ' + ref.ref + (ref.refStatus === undefined ? '' : ' (' + ref.refStatus + ')')
           const location = ref.kind === 'session' ? '\n     session ' + (ref.sessionId ?? '') + (ref.messageId === undefined ? '' : ' message ' + ref.messageId) : '\n     ' + ref.path + (ref.line === undefined ? '' : ' (line ' + String(ref.line) + ')')
@@ -280,7 +365,17 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
         if (queries !== undefined) lines.push('  queries: names=' + JSON.stringify(queries.names ?? []) + ' content=' + JSON.stringify(queries.content ?? []))
         if (v.scopeFallback !== undefined) lines.push('  scope fallback: ' + v.scopeFallback)
         if (v.warnings !== undefined && v.warnings.length > 0) lines.push('  warnings: ' + [...new Set(v.warnings)].join(', '))
-        if (v.truncated === true) lines.push('  (truncated by the result budget; narrow the question or use locator_find)')
+        if (v.truncated === true) {
+          const reason = v.truncatedReason === 'maxRefs'
+            ? 'the ref cap (maxRefs ' + String(v.counts?.maxRefs ?? '') + ')'
+            : v.truncatedReason === 'budget'
+              ? 'the output budget'
+              : v.truncatedReason === 'both'
+                ? 'the ref cap and the output budget'
+                : 'the result budget'
+          const dropped = v.budget?.dropped ?? 0
+          lines.push('  (truncated by ' + reason + (dropped > 0 ? '; ' + String(dropped) + ' ref(s) dropped by the budget' : '') + '; narrow the question or use locator_find)')
+        }
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
@@ -303,7 +398,11 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
       const cwdIsIndexed = callerCwd !== undefined && options.roots.some(root => withinRoots(callerCwd, [root]))
       const probes = exploreQueries(question, plan)
       const warnings: string[] = []
-      const nameTasks = probes.names.map(async query => {
+      /** One name probe: the query is kept so every hit can name its source. */
+      interface NamePage { query: string; hits: SearchHit[]; indexing: boolean }
+      /** One content probe: the query is kept so every hit can name its source. */
+      interface ContentPage { query: string; hits: EnrichedContentHit[] }
+      const nameTasks: Array<Promise<NamePage>> = probes.names.map(async query => {
         try {
           rt.start()
           const result = await rt.search({
@@ -318,14 +417,14 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
             filesOnly: false,
             dirsOnly: false,
           })
-          return { hits: result.hits, indexing: result.indexing === true }
+          return { query, hits: result.hits, indexing: result.indexing === true }
         } catch (error) {
           warnings.push('name-query-failed:' + messageOf(error).slice(0, 120))
-          return { hits: [] as SearchHit[], indexing: false }
+          return { query, hits: [] as SearchHit[], indexing: false }
         }
       })
       let contentScopeFallback: string | undefined
-      const contentTasks = options.content === undefined
+      const contentTasks: Array<Promise<ContentPage>> = options.content === undefined
         ? []
         : probes.content.map(async query => {
             try {
@@ -338,13 +437,13 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
               }, options.roots, options.allowCrossWorkspaceSessions === true, caller, contentScopeOptionsOf(rt))
               if (!result.ok) {
                 warnings.push('content-query-failed:' + result.error)
-                return [] as EnrichedContentHit[]
+                return { query, hits: [] as EnrichedContentHit[] }
               }
               if (result.scopeFallback !== undefined) contentScopeFallback = result.scopeFallback
-              return result.hits
+              return { query, hits: result.hits }
             } catch (error) {
               warnings.push('content-query-failed:' + messageOf(error).slice(0, 120))
-              return [] as EnrichedContentHit[]
+              return { query, hits: [] as EnrichedContentHit[] }
             }
           })
       const [namePages, contentPages] = await Promise.all([Promise.all(nameTasks), Promise.all(contentTasks)])
@@ -357,40 +456,86 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
         for (const hit of page.hits) {
           nameHits++
           if (scope === 'workspace' && cwdIsIndexed && !withinRoots(hit.path, [callerCwd as string])) continue
-          const ref = nameRef(hit, scopeRules, cwdIsIndexed)
+          const ref = nameRef(hit, scopeRules, cwdIsIndexed, page.query)
           if (scopeRules !== undefined && !scopeRules.isSearchable(ref.path)) continue
-          const key = refKey(ref)
-          if (merged.has(key)) { deduped++; continue }
-          merged.set(key, ref)
-        }
-      }
-      for (const page of contentPages) {
-        for (const hit of page) {
-          contentHits++
-          if (scopeRules !== undefined && !scopeRules.contentVisible(hit.path)) continue
-          const ref = contentRef(hit)
           const key = refKey(ref)
           const existing = merged.get(key)
           if (existing !== undefined) {
+            // 0.21.1: several name probes hitting the same path is one piece of
+            // evidence, not several refs. Keep the first occurrence and record
+            // every probe that matched (the caller can see why it surfaced).
             deduped++
-            // A content hit carries the snippet and a verified ref; let it win
-            // over the corresponding name hit in the merged digest.
-            merged.set(key, { ...existing, ...ref, origin: 'content' })
+            mergeNameRef(existing, ref)
             continue
           }
           merged.set(key, ref)
         }
       }
+      for (const page of contentPages) {
+        for (const hit of page.hits) {
+          contentHits++
+          if (scopeRules !== undefined && !scopeRules.contentVisible(hit.path)) continue
+          const ref = contentRef(hit, page.query)
+          const key = refKey(ref)
+          const existing = merged.get(key)
+          if (existing !== undefined) {
+            // A content hit carries the snippet and a verified ref; let it win
+            // over the corresponding name hit in the merged digest. When
+            // several content probes return the same row, the best bm25 rank is
+            // kept instead of whichever probe happened to resolve last.
+            deduped++
+            merged.set(key, mergeContentRef(existing, ref))
+            continue
+          }
+          merged.set(key, ref)
+        }
+      }
+      // 0.21.1: a name-only directory hit is noise once a content hit already
+      // proves the interesting file inside it. Dropping it keeps the digest
+      // budget for actual evidence instead of parent-directory names.
+      const contentPaths: string[] = []
+      for (const ref of merged.values()) if (ref.origin === 'content') contentPaths.push(ref.path)
+      if (contentPaths.length > 0) {
+        for (const [key, ref] of [...merged]) {
+          if (ref.origin !== 'name' || ref.kind !== 'dir') continue
+          if (contentPaths.some(path => path !== ref.path && withinRoots(path, [ref.path]))) {
+            merged.delete(key)
+            deduped++
+          }
+        }
+      }
+      const numericScore = (ref: ExploreRef): number | undefined =>
+        typeof ref.score === 'number' && Number.isFinite(ref.score) ? ref.score : undefined
       const ranked = [...merged.values()].sort((left, right) => {
+        const leftScore = numericScore(left)
+        const rightScore = numericScore(right)
+        // Content hits carry an FTS5 bm25 rank where lower (more negative) is a
+        // better match. This used to sort descending, which put the *least*
+        // relevant hit first and made the summary/Top and the budget cut keep
+        // the worst evidence. Hits without a rank (name-only) always sort after.
+        if (leftScore !== undefined && rightScore !== undefined && leftScore !== rightScore) return leftScore - rightScore
+        if (leftScore !== undefined && rightScore === undefined) return -1
+        if (leftScore === undefined && rightScore !== undefined) return 1
+        // A ref matched by more probes is stronger evidence than a one-probe
+        // name hit; this is the name-hit relevance tie-breaker.
+        const leftWhy = left.why?.length ?? 0
+        const rightWhy = right.why?.length ?? 0
+        if (leftWhy !== rightWhy) return rightWhy - leftWhy
         const origin = (left.origin === 'content' ? 0 : 1) - (right.origin === 'content' ? 0 : 1)
         if (origin !== 0) return origin
-        const score = (right.score ?? 0) - (left.score ?? 0)
-        if (score !== 0) return score
         return left.path.localeCompare(right.path)
       }).slice(0, maxRefs)
       const budgeted = applyOutputBudget(ranked, queryBudget)
-      const truncated = budgeted.budget.dropped > 0 || (ranked.length < merged.size && merged.size > maxRefs)
-      const counts = { nameHits, contentHits, refs: budgeted.items.length, deduped }
+      const droppedByMaxRefs = merged.size > maxRefs
+      const droppedByBudget = budgeted.budget.dropped > 0
+      const truncatedReason: 'maxRefs' | 'budget' | 'both' | undefined = droppedByMaxRefs && droppedByBudget
+        ? 'both'
+        : droppedByMaxRefs
+          ? 'maxRefs'
+          : droppedByBudget
+            ? 'budget'
+            : undefined
+      const counts = { nameHits, contentHits, refs: budgeted.items.length, deduped, merged: merged.size, maxRefs }
       return {
         ok: true as const,
         question,
@@ -399,7 +544,8 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
         refs: budgeted.items,
         queries: probes,
         counts,
-        truncated,
+        truncated: truncatedReason !== undefined,
+        ...(truncatedReason === undefined ? {} : { truncatedReason }),
         budget: budgeted.budget,
         tookMs: Date.now() - started,
         ...(contentScopeFallback === undefined ? {} : { scopeFallback: contentScopeFallback }),
