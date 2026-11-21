@@ -504,7 +504,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - **证据层**：`locator_resolve` 新增 `status`（fresh/stale/missing/tombstoned）、`checkedAt`、`anchor`；`locator_cite` 新增 `detail: exact|compact`（逐字原文 + offsets + fallback 链接）与 `maxBytes`；文件 ref 带 `line/cs/ce`；find 命中带 `refStatus`。
 - **URL ref 保鲜**（可选 `urlFreshness`，默认关闭）：ETag/Last-Modified + 有界正文哈希的条件请求，结果持久化到 refs meta；304→fresh、404/410→missing、不可达→stale。
 - **忽略语义三层**：`notIndexed` / `notSearchable` / `notReadable`（glob）分别控制「不进正文索引 / 名称不可见 / agent 不可读」；`locator_status` 展示生效规则。
-- **面板**：官方提及语法互操作（`@path` / `@"path"` / `@[标题](dsh-session:…)`）；搜索框粘贴 ref/mention 触发 Quick Switch；证据详情（行点击 / `Ctrl+I`）展示 freshness/permissions/hash/session 信息，可复制 ref/Markdown 引用、插入提及、打开/定位/跳转；`/combined` 命中新增证据字段；9 语言新增 45 条文案。
+- **面板**：官方提及语法互操作（`@path` / `@"path"` / `@[标题]` 后接 `dsh-session:` 目标）；搜索框粘贴 ref/mention 触发 Quick Switch；证据详情（行点击 / `Ctrl+I`）展示 freshness/permissions/hash/session 信息，可复制 ref/Markdown 引用、插入提及、打开/定位/跳转；`/combined` 命中新增证据字段；9 语言新增 45 条文案。
 - **公开 API 与 MCP**：`GET /dsh-locator/search?q=...`（同一 trust fence）；随包提供 `locator-cli`（search/find/status/resolve/cite，JSON 输出）与 `locator-mcp`（只读 MCP stdio server）并暴露为 npm bin；新增 `locator_explore` 多 query 探索（token 预算内）。
   ```sh
   npx dsh-locator search "handoff ext:md" --json

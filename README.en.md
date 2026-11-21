@@ -538,7 +538,7 @@ The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memor
 - **Evidence layer**: `locator_resolve` gains `status` (fresh/stale/missing/tombstoned), `checkedAt`, `anchor`; `locator_cite` gains `detail: exact|compact` (verbatim quote + offsets + fallback link) and `maxBytes`; file refs carry `line/cs/ce`; find hits carry `refStatus`.
 - **URL ref freshness** (opt-in `urlFreshness`, default off): conditional requests with ETag/Last-Modified and a bounded body hash persisted in refs metadata; 304 → fresh, 404/410 → missing, unreachable → stale.
 - **Ignore semantics**: `notIndexed` / `notSearchable` / `notReadable` globs separate content-index entry, name visibility and agent readability; status shows the effective rules.
-- **Panel**: official mention interop (`@path` / `@"path"` / `@[title](dsh-session:...)`), Quick Switch from pasted refs/mentions, evidence details (row click / `Ctrl+I`) with freshness/permissions/hash/session ids, copy ref or Markdown citation, open/locate/jump; `/combined` hits carry evidence fields; 45 new strings in 9 languages.
+- **Panel**: official mention interop (`@path` / `@"path"` / `@[title]` with a `dsh-session:` target), Quick Switch from pasted refs/mentions, evidence details (row click / `Ctrl+I`) with freshness/permissions/hash/session ids, copy ref or Markdown citation, open/locate/jump; `/combined` hits carry evidence fields; 45 new strings in 9 languages.
 - **Public API and MCP**: `GET /dsh-locator/search?q=...` on the same trust fence; `locator-cli` and `locator-mcp` (read-only MCP stdio server) ship as npm bins; `locator_explore` runs multi-query exploration within a token budget.
   ```sh
   npx dsh-locator search "handoff ext:md" --json

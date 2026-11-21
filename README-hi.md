@@ -466,7 +466,7 @@ DeepSeek Harness
 - **Evidence layer**: `locator_resolve` में `status`/`checkedAt`/`anchor`; `locator_cite` में `detail: exact|compact` (शब्दश: quote + offsets + fallback link) और `maxBytes`; file refs में `line/cs/ce`।
 - **URL ref freshness** (वैकल्पिक `urlFreshness`, डिफ़ॉल्ट बंद): ETag/Last-Modified + सीमित body hash के साथ conditional requests, refs metadata में सहेजा जाता है।
 - **Ignore semantics**: `notIndexed`/`notSearchable`/`notReadable` (globs) — content index, name visibility, agent readability अलग; status प्रभावी नियम दिखाता है।
-- **Panel**: official mention interop (`@path`/`@"path"`/`@[title](dsh-session:...)`), refs/menitons पेस्ट पर Quick Switch, evidence details (row click / `Ctrl+I`) में freshness/permissions/hash/session ids, ref या Markdown citation कॉपी, open/locate/jump; `/combined` hits में evidence फ़ील्ड; 9 भाषाओं में 45 नई strings।
+- **Panel**: official mention interop (`@path`/`@"path"`/`@[title]` और `dsh-session:` लक्ष्य), refs/menitons पेस्ट पर Quick Switch, evidence details (row click / `Ctrl+I`) में freshness/permissions/hash/session ids, ref या Markdown citation कॉपी, open/locate/jump; `/combined` hits में evidence फ़ील्ड; 9 भाषाओं में 45 नई strings।
 - **Public API और MCP**: `GET /dsh-locator/search?q=...` उसी trust fence पर; `locator-cli` और `locator-mcp` (read-only MCP stdio server) npm bins के रूप में; `locator_explore` token बजट में multi-query exploration।
 - **Optional hooks**: `rerankCommand` और `ocrCommand`, दोनों डिफ़ॉल्ट बंद।
 - **332 tests**; छह engine binaries 0.19.0 पर rebuild (darwin macOS CI में)।
