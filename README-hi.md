@@ -2,6 +2,11 @@
 
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-en-dark.webp">
+  <img src="docs/assets/dsh-locator-hero-en-light.webp" width="100%" alt="dsh-locator: नाम याद है तो नाम खोजें, बात याद है तो सामग्री खोजें — दाईं ओर 0.20.2 में मापी गई नाम-इंडेक्स विलंबताएँ (func 10.7 ms, go 6.0 ms, regex ~11 ms), और नीचे locator_search व locator_find टूल परिवार">
+</picture>
+
 # 🔎 dsh-locator
 
 **नाम याद है तो नाम से खोजें, बात याद है तो सामग्री से खोजें; फिर फ़ाइल खोलें या उसी बातचीत पर वापस जाएँ।**
@@ -71,6 +76,13 @@ dsh plugin --profile web add dsh-locator
 | बाहरी उपयोग | `locator_export` केवल-पढ़ने वाला SQLite मिरर लिखता है |
 
 इंडेक्स पूरी तरह स्थानीय है: कोई नेटवर्क कॉल नहीं, कोई टेलीमेट्री नहीं, कोई अपलोड नहीं; प्लगइन इंडेक्स की गई फ़ाइलों को कभी बदलता, हटाता या स्थानांतरित नहीं करता।
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-flow-v5-dark.svg">
+  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="dsh-locator संरचना: रूट Go इंजन में 35 MB नाम स्नैपशॉट के रूप में स्कैन और वॉच होते हैं; locator_search नाम खोजता है और होस्ट-साइड SQLite FTS5 इंडेक्स फ़ाइल बॉडी व DSH सेशन संदेशों पर locator_find का उत्तर देता है; दोनों टूल, Ctrl+Shift+F पैनल, CLI और MCP सर्वर को फ़ीड करते हैं, और हर परिणाम केवल-पढ़ने योग्य है">
+</picture>
+
+*संरचना: स्कैन/वॉच → 35 MB नाम स्नैपशॉट (Go) और होस्ट-साइड FTS5 बॉडी इंडेक्स → `locator_search` / `locator_find` → 12 टूल, `Ctrl+Shift+F` पैनल, CLI और MCP सर्वर। हर चरण में असली टूल, फ़ील्ड और कॉन्फ़िग नाम हैं, इसलिए एक ही चित्र पाँचों भाषाओं के लिए काम करता है; असली UI कैप्चर `docs/assets/panel-en.png` और `docs/assets/panel-zh.png` हैं।*
 
 ## Everything / Spotlight / grep से कैसे अलग है
 
@@ -353,6 +365,10 @@ pnpm check              # typecheck + टेस्ट + पैकेजिंग
 
 इंजन `engine/` में अलग Go मॉड्यूल है; टेस्ट `cd engine && go test ./...` से चलते हैं। macOS का FSEvents बैकएंड cgo चाहता है और macOS CI पर बनता है। Node टेस्ट CI में Linux, Windows और macOS पर चलते हैं।
 
+![dsh-locator टेस्ट सूट: pnpm test का असली रन — 20 स्पेक फ़ाइलें और 512 टेस्ट 12.47 सेकंड में पास](docs/assets/dsh-locator-demo.gif)
+
+*एनिमेटेड: 2026-11-21 को इस चेकआउट में `pnpm test` का असली रन — 20 स्पेक फ़ाइलें, 512 टेस्ट, 12.47 सेकंड, नेटवर्क नहीं। इस रिपॉज़िटरी में पैनल के लिए स्क्रीन-रिकॉर्डिंग टूल नहीं है, इसलिए रीप्ले टर्मिनल रन दिखाता है, कोई रचा हुआ UI एनिमेशन नहीं; मौजूद असली UI कैप्चर `docs/assets/panel-en.png` और `docs/assets/panel-zh.png` हैं।*
+
 ## डिज़ाइन
 
 ![dsh-locator आर्किटेक्चर: फ़ाइलसिस्टम → स्कैन/वॉच → कॉम्पैक्ट स्नैपशॉट → क्वेरी इंजन → एजेंट टूल / वेब पैनल](docs/assets/architecture.svg)
@@ -423,6 +439,14 @@ DeepSeek Harness
 - **कॉन्फ़िगरेशन**: 17 नई keys (अंग्रेज़ी तालिका देखें); `contentExtractMaxBytes` अब 8 MiB; `memoryLimitMB=0` का अर्थ अब auto।
 - **व्यवहार परिवर्तन**: caches डिफ़ॉल्ट रूप से नाम-खोज में नहीं; `status.builtAt` ms में; watcher async install के दौरान `watching` कुछ समय false। FTS schema v4 स्थगित (~100 MB लाभ बनाम 4 GB migration)।
 - `443 tests`; छह engines 0.20.0 पर rebuild।
+
+## 0.19.4 अपग्रेड नोट्स
+
+- **डिफ़ॉल्ट रूप से चीनी पैनल**: पैनल अब हर लुकअप पर अपनी भाषा हल करता है (पहले होस्ट का `<html lang>`; कोई समर्थित टैग न हो तो चीनी) बजाय मॉड्यूल लोड पर स्थिर रहने के; लाइव प्रोफ़ाइल DSH की भाषा वरीयता को भी `zh` पर पिन करती है।
+
+## 0.19.1 अपग्रेड नोट्स
+
+- DeepSeek Harness 0.2.2-rc.4 के साथ संरेखण (केवल संस्करण और दस्तावेज़; रनटाइम व्यवहार में कोई बदलाव नहीं)। ध्यान दें: यह रिलीज़ README इंसर्शन त्रुटियों के साथ आई, जिन्हें 0.19.2 में ठीक किया गया।
 
 ## 0.19.2 अपग्रेड नोट्स
 

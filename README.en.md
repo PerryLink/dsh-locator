@@ -2,6 +2,11 @@
 
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-en-dark.webp">
+  <img src="docs/assets/dsh-locator-hero-en-light.webp" width="100%" alt="dsh-locator: search names when you remember the name, contents when you remember the phrase — the measured 0.20.2 name-index latencies (func 10.7 ms, go 6.0 ms, regex ~11 ms) on the right, with the locator_search and locator_find tool families below">
+</picture>
+
 # 🔎 dsh-locator
 
 **Search names when you remember the name, contents when you remember the phrase — then open the file or jump back to the conversation.**
@@ -71,6 +76,13 @@ File lookup has two shapes:
 | External consumption | `locator_export` writes a read-only SQLite mirror |
 
 The index is local: no network calls, no telemetry, no uploads, and the plugin never modifies, moves or deletes indexed files.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-flow-v5-dark.svg">
+  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="dsh-locator structure: roots are scanned and watched into a 35 MB name snapshot in the Go engine; locator_search queries names, while the host-side SQLite FTS5 index answers locator_find over file bodies and DSH session messages; both feed the tools, the Ctrl+Shift+F panel, the CLI and the MCP server, and every result is read-only">
+</picture>
+
+*Structure: scan/watch → 35 MB name snapshot (Go) and a host-side FTS5 body index → `locator_search` / `locator_find` → the 12 tools, the `Ctrl+Shift+F` panel, the CLI and the MCP server. Every stage carries the real tool, field and config names, so the same picture serves all five languages; the real UI captures are `docs/assets/panel-en.png` and `docs/assets/panel-zh.png`.*
 
 ## How it differs from Everything / Spotlight / grep
 
@@ -416,6 +428,10 @@ pnpm check              # typecheck + tests + packaging/install verification
 ```
 
 The engine is a separate Go module under `engine/`; run its tests with `cd engine && go test ./...`. The macOS FSEvents backend needs cgo and is built on macOS CI. Node tests run on Linux, Windows and macOS in CI.
+
+![dsh-locator test suite: a real pnpm test run — 20 spec files and 512 tests passing in 12.47 s](docs/assets/dsh-locator-demo.gif)
+
+*Animated: the real `pnpm test` run in this checkout on 2026-11-21 — 20 spec files, 512 tests, 12.47 s, no network. This repository ships no screen-recording harness for the panel, so the replay shows the terminal run instead of a staged UI animation; the committed UI captures are `docs/assets/panel-en.png` and `docs/assets/panel-zh.png`.*
 
 ## Design
 

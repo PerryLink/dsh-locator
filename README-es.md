@@ -2,6 +2,11 @@
 
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-en-dark.webp">
+  <img src="docs/assets/dsh-locator-hero-en-light.webp" width="100%" alt="dsh-locator: si recuerdas el nombre busca nombres, si recuerdas la frase busca contenidos — a la derecha, las latencias medidas del índice de nombres en 0.20.2 (func 10.7 ms, go 6.0 ms, regex ~11 ms), y debajo las familias de herramientas locator_search y locator_find">
+</picture>
+
 # 🔎 dsh-locator
 
 **Busca por nombre cuando recuerdas el nombre y por contenido cuando recuerdas la frase; después abre el archivo o vuelve a la conversación.**
@@ -71,6 +76,13 @@ Buscar archivos tiene dos formas:
 | Consumo externo | `locator_export` escribe una réplica SQLite de solo lectura |
 
 El índice es local: sin llamadas de red, sin telemetría, sin subidas; el plugin nunca modifica, mueve ni borra los archivos indexados.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-flow-v5-dark.svg">
+  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="estructura de dsh-locator: las raíces se escanean y vigilan en una instantánea de nombres de 35 MB dentro del motor Go; locator_search consulta nombres y el índice SQLite FTS5 del host responde locator_find sobre cuerpos de archivos y mensajes de sesión de DSH; ambos alimentan las herramientas, el panel Ctrl+Shift+F, la CLI y el servidor MCP, y todo resultado es de solo lectura">
+</picture>
+
+*Estructura: escaneo/vigilancia → instantánea de nombres de 35 MB (Go) y un índice FTS5 de cuerpos en el host → `locator_search` / `locator_find` → las 12 herramientas, el panel `Ctrl+Shift+F`, la CLI y el servidor MCP. Cada etapa lleva los nombres reales de herramientas, campos y configuración, así que la misma imagen sirve para los cinco idiomas; las capturas reales de la interfaz son `docs/assets/panel-en.png` y `docs/assets/panel-zh.png`.*
 
 ## En qué se diferencia de Everything / Spotlight / grep
 
@@ -352,6 +364,10 @@ pnpm check              # typecheck + pruebas + verificación de empaquetado/ins
 
 El motor es un módulo Go independiente en `engine/`; sus pruebas se ejecutan con `cd engine && go test ./...`. El backend FSEvents de macOS necesita cgo y se compila en CI de macOS. Las pruebas de Node se ejecutan en Linux, Windows y macOS en CI.
 
+![suite de pruebas de dsh-locator: una ejecución real de pnpm test — 20 archivos de pruebas y 512 pruebas aprobadas en 12,47 s](docs/assets/dsh-locator-demo.gif)
+
+*Animado: la ejecución real de `pnpm test` en este checkout el 2026-11-21 — 20 archivos de pruebas, 512 pruebas, 12,47 s, sin red. El repositorio no incluye una herramienta de grabación de pantalla, así que la repetición muestra la ejecución de terminal en lugar de una animación de interfaz simulada; las capturas reales de la interfaz son `docs/assets/panel-en.png` y `docs/assets/panel-zh.png`.*
+
 ## Diseño
 
 ![Arquitectura de dsh-locator: sistemas de archivos → escaneo/vigilancia → instantánea compacta → motor de consultas → herramientas del agente / panel web](docs/assets/architecture.svg)
@@ -422,6 +438,14 @@ El motor es un único proceso Go; respeta `GOMEMLIMIT`/`GOGC` y `memoryLimitMB`,
 - **Configuración**: 17 claves nuevas (ver la tabla de la versión en inglés) y `contentExtractMaxBytes` pasa a 8 MiB; `memoryLimitMB=0` ahora significa automático.
 - **Cambios de comportamiento**: las cachés ya no se buscan por nombre por defecto; `status.builtAt` en milisegundos; `watching` puede ser false mientras el watcher se instala en segundo plano. El esquema FTS v4 se aplaza (~100 MB de beneficio frente a migrar 4 GB).
 - `443 tests`; seis engines reconstruidos en 0.20.0.
+
+## Notas de actualización 0.19.4
+
+- **Panel chino por defecto**: el panel ahora resuelve su idioma en cada consulta (`<html lang>` del host primero; chino cuando no hay etiqueta compatible) en lugar de fijarlo al cargar el módulo; el perfil en vivo también fija la preferencia de idioma de DSH en `zh`.
+
+## Notas de actualización 0.19.1
+
+- Se alinea con DeepSeek Harness 0.2.2-rc.4 (solo versión y documentación; sin cambios de comportamiento en tiempo de ejecución). Nota: esta versión se publicó con errores de inserción en el README, corregidos en 0.19.2.
 
 ## Notas de actualización 0.19.2
 

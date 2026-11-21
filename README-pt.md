@@ -2,6 +2,11 @@
 
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-en-dark.webp">
+  <img src="docs/assets/dsh-locator-hero-en-light.webp" width="100%" alt="dsh-locator: lembra do nome, busque nomes; lembra da frase, busque conteúdos — à direita, as latências medidas do índice de nomes em 0.20.2 (func 10.7 ms, go 6.0 ms, regex ~11 ms), e abaixo as famílias de ferramentas locator_search e locator_find">
+</picture>
+
 # 🔎 dsh-locator
 
 **Busque por nome quando lembra do nome e por conteúdo quando lembra da frase; depois abra o arquivo ou volte para a conversa.**
@@ -71,6 +76,13 @@ O `dsh-locator` junta os dois em um único plugin:
 | Consumo externo | `locator_export` grava um espelho SQLite somente leitura |
 
 O índice é local: sem chamadas de rede, sem telemetria, sem uploads; o plugin nunca modifica, move ou apaga os arquivos indexados.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-flow-v5-dark.svg">
+  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="estrutura do dsh-locator: as raízes são varridas e monitoradas em um snapshot de nomes de 35 MB dentro do motor Go; locator_search consulta nomes e o índice SQLite FTS5 do host responde locator_find sobre corpos de arquivos e mensagens de sessão do DSH; ambos alimentam as ferramentas, o painel Ctrl+Shift+F, a CLI e o servidor MCP, e todo resultado é somente leitura">
+</picture>
+
+*Estrutura: varredura/monitoramento → snapshot de nomes de 35 MB (Go) e um índice FTS5 de corpos no host → `locator_search` / `locator_find` → as 12 ferramentas, o painel `Ctrl+Shift+F`, a CLI e o servidor MCP. Cada etapa carrega os nomes reais de ferramentas, campos e configuração, então a mesma imagem serve aos cinco idiomas; as capturas reais da interface são `docs/assets/panel-en.png` e `docs/assets/panel-zh.png`.*
 
 ## Como difere de Everything / Spotlight / grep
 
@@ -353,6 +365,10 @@ pnpm check              # typecheck + testes + verificação de empacotamento/in
 
 O motor é um módulo Go separado em `engine/`; seus testes rodam com `cd engine && go test ./...`. O backend FSEvents do macOS precisa de cgo e é compilado no CI de macOS. Os testes Node rodam em Linux, Windows e macOS no CI.
 
+![suíte de testes do dsh-locator: uma execução real de pnpm test — 20 arquivos de teste e 512 testes aprovados em 12,47 s](docs/assets/dsh-locator-demo.gif)
+
+*Animado: a execução real de `pnpm test` neste checkout em 2026-11-21 — 20 arquivos de teste, 512 testes, 12,47 s, sem rede. O repositório não inclui uma ferramenta de gravação de tela, então a reprodução mostra a execução de terminal em vez de uma animação de interface encenada; as capturas reais da interface são `docs/assets/panel-en.png` e `docs/assets/panel-zh.png`.*
+
 ## Design
 
 ![Arquitetura do dsh-locator: sistemas de arquivos → varredura/vigilância → snapshot compacto → motor de consulta → ferramentas do agente / painel web](docs/assets/architecture.svg)
@@ -423,6 +439,14 @@ O motor é um único processo Go; respeita `GOMEMLIMIT`/`GOGC` e `memoryLimitMB`
 - **Configuração**: 17 chaves novas (veja a tabela na versão em inglês) e `contentExtractMaxBytes` agora 8 MiB; `memoryLimitMB=0` agora significa automático.
 - **Mudanças de comportamento**: caches não são mais pesquisáveis por nome por padrão; `status.builtAt` em milissegundos; `watching` pode ficar false enquanto o watcher instala em segundo plano. O schema FTS v4 foi adiado (~100 MB de ganho frente a migrar 4 GB).
 - `443 tests`; seis engines reconstruídos em 0.20.0.
+
+## Notas de atualização 0.19.4
+
+- **Painel em chinês por padrão**: o painel agora resolve o idioma a cada consulta (`<html lang>` do host primeiro; chinês quando não há tag compatível) em vez de fixá-lo no carregamento do módulo; o perfil em execução também fixa a preferência de idioma do DSH em `zh`.
+
+## Notas de atualização 0.19.1
+
+- Alinha-se ao DeepSeek Harness 0.2.2-rc.4 (apenas versão e documentação; sem mudança de comportamento em tempo de execução). Nota: esta versão saiu com erros de inserção no README, corrigidos na 0.19.2.
 
 ## Notas de atualização 0.19.2
 

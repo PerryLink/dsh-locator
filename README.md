@@ -2,6 +2,11 @@
 
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-zh-dark.webp">
+  <img src="docs/assets/dsh-locator-hero-zh-light.webp" width="100%" alt="dsh-locator：记得名字就搜名字，记得原话就搜正文——右侧是 0.20.2 名称索引实测延迟（func 10.7ms、go 6.0ms、正则约 11ms），下方是 locator_search 与 locator_find 两族工具">
+</picture>
+
 # 🔎 dsh-locator
 
 **记得名字就搜名字，记得内容就搜内容；找到之后直接打开，或者跳回那次对话。**
@@ -70,6 +75,13 @@ dsh plugin --profile web add dsh-locator
 | 外部工具消费 | `locator_export` 导出只读 SQLite |
 
 索引完全在本地：不联网、不上传、不埋点；插件不会修改、移动或删除被索引的文件。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-flow-v5-dark.svg">
+  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="dsh-locator 结构图：根目录经扫描与监听生成 35MB 名称快照（Go 引擎），locator_search 查名字；宿主侧 SQLite FTS5 索引为 locator_find 提供文件正文与 DSH 会话消息；两者共同供工具、Ctrl+Shift+F 面板、CLI 与 MCP 使用，所有结果只读">
+</picture>
+
+*结构：扫描/监听 → 35MB 名称快照（Go）与宿主侧 FTS5 正文索引 → `locator_search` / `locator_find` → 12 个工具、`Ctrl+Shift+F` 面板、CLI 与 MCP。图内只出现真实工具名、字段名与配置名，五语共用同一张结构图；真实界面截图见 `docs/assets/panel-en.png` 与 `docs/assets/panel-zh.png`。*
 
 ## 和 Everything / Spotlight / grep 有什么不同
 
@@ -403,6 +415,10 @@ pnpm check               # typecheck + 测试 + 打包/安装校验
 
 Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 FSEvents 版本需要 cgo，由 macOS CI 构建。Node 测试在 Linux、Windows、macOS 三个平台的 CI 上运行。
 
+![dsh-locator 测试套件：真实运行 pnpm test —— 20 个测试文件、512 个用例，12.47 秒全部通过](docs/assets/dsh-locator-demo.gif)
+
+*动图是 2026-11-21 在本检出中真实运行的 `pnpm test`：20 个测试文件、512 个用例、12.47 秒，不联网。仓库没有录屏工具，所以这里回放终端真实输出，而不是伪造一段界面动画；仓库中已有的真实界面截图是 `docs/assets/panel-en.png` 与 `docs/assets/panel-zh.png`。*
+
 ## 设计
 
 ![架构：文件系统 → 扫描/监听 → 紧凑快照 → 查询引擎 → agent 工具 / Web 面板](docs/assets/architecture.svg)
@@ -431,6 +447,10 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 - **全库内容正则 P0 不做**：正则模式会暂停内容组（文件/目录名仍可正则），避免 1GB 级全库扫描和 ReDoS；会话内查找条支持正则。
 - 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
 - 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
+
+## 内存
+
+引擎是单个 Go 进程，遵循 `GOMEMLIMIT`/`GOGC` 和 `memoryLimitMB` 配置；`0`（默认）表示按机器自动推算上限（取内存的 25%，限制在 384–1024 MiB）。0.20 引擎把 150 万条目的快照载入约 186 MB heap，装好 watcher 后稳态约 335 MB RSS（512 MiB 上限）；上一版在同一场景约需 700 MB。两者都不改变快照格式。把内容库页缓存算上，现场部署中 DSH 宿主进程约 700 MB RSS，空闲延迟约 p50 2ms。
 
 ## 0.20.2 更新
 
