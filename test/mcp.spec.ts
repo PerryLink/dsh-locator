@@ -667,7 +667,12 @@ describe('read-only state (P0)', () => {
     expect(ref).toContain('ref://file?')
     const resolved = JSON.parse(runCli(['resolve', ref, '--state', state, '--root', root, '--json'], sandbox.env).stdout) as { ok: boolean; path?: string }
     expect(resolved.ok).toBe(true)
-    expect(realpathSync(resolved.path as string)).toBe(realpathSync(join(root, 'alpha.md')))
+    // Windows may hand back the 8.3 (RUNNER~1) spelling while realpath keeps the
+    // long form (runneradmin); canonicalise both through the native API.
+    const canonicalPath = (value: string): string => {
+      try { return realpathSync.native(value) } catch { return realpathSync(value) }
+    }
+    expect(canonicalPath(resolved.path as string)).toBe(canonicalPath(join(root, 'alpha.md')))
     const cited = JSON.parse(runCli(['cite', ref, '--json'], sandbox.env).stdout) as { ok: boolean; citations: Array<{ ref?: string; markdown?: string }> }
     expect(cited.ok).toBe(true)
     expect(cited.citations[0]?.ref).toBe(ref)
