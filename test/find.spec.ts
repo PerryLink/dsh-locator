@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -655,7 +655,7 @@ describe('locator_find 0.21.1 names workspace and paging', () => {
       }
       expect(value.scope).toBe('workspace')
       expect(value.hits).toHaveLength(3)
-      expect(value.hits?.every(hit => hit.path.startsWith(cwd + '/'))).toBe(true)
+      expect(value.hits?.every(hit => hit.path.startsWith(cwd + sep))).toBe(true)
       expect(value.nextOffset).toBe(8)
       expect(value.totalAllRoots).toBe(10)
     } finally {

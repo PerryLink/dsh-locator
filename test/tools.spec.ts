@@ -16,7 +16,7 @@ import {
 } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -1393,7 +1393,7 @@ describe('locator_search 0.21.1 pagination contract', () => {
       truncation?: { reason?: string; dropped?: number }
     }
     expect(first.hits).toHaveLength(3)
-    expect(first.hits?.every(hit => hit.path.startsWith(cwd + '/'))).toBe(true)
+    expect(first.hits?.every(hit => hit.path.startsWith(cwd + sep))).toBe(true)
     expect(first.nextOffset).toBe(28)
     expect(first.truncated).toBe(true)
     expect(first.truncation).toMatchObject({ reason: 'scope', dropped: 25 })

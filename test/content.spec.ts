@@ -3072,7 +3072,7 @@ describe('mtimesForPaths (combined freshness seam)', () => {
     const filler = Array.from({ length: 420 }, (_, index) => join(root, 'absent-' + String(index) + '.md'))
     const asked = [...filler, ...paths, ...canonical, join(root, 'absent-final.md')]
     const mtimes = content.mtimesForPaths(asked)
-    expect(mtimes.size).toBe(3)
+    expect(mtimes.size).toBe(new Set([...paths, ...canonical]).size)
     for (let index = 0; index < paths.length; index++) {
       expect(mtimes.get(paths[index]!)).toBe(base + index * 1_000)
       expect(mtimes.get(canonical[index]!)).toBe(base + index * 1_000)
