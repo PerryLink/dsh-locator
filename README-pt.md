@@ -104,7 +104,7 @@ Resumindo: a **ideia** do Everything (índice persistente + consultas estruturad
 dsh plugin --profile web add dsh-locator
 
 # fixar uma versão
-dsh plugin --profile web add dsh-locator@0.22.1
+dsh plugin --profile web add dsh-locator@0.22.2
 
 # branch principal do GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -421,7 +421,7 @@ DeepSeek Harness
 
 O motor é um único processo Go; respeita `GOMEMLIMIT`/`GOGC` e `memoryLimitMB`, onde `0` (padrão) calcula um limite automático (25% da RAM, 384–1024 MiB). Um motor 0.20 carrega um snapshot de 1,5 M de entradas em ~186 MB de heap e fica em ~335 MB de RSS com o watcher instalado (limite de 512 MiB); a versão anterior precisava de ~700 MB no mesmo ponto. Nenhum altera o formato do snapshot. Com o cache de páginas do banco de conteúdo, o processo anfitrião do DSH ficava por volta de 700 MB de RSS na instalação ao vivo, com latência ociosa de p50 2 ms.
 
-## Notas de atualização 0.22.1
+## Notas de atualização 0.22.2
 
 - Superfície padrão 3+1: `locator_find` unificado, `locator_read`, `locator_status`; `locator_admin` (deferLoading) para rebuild/reindex/export. Tools legacy continuam disponíveis, mas diferidos.
 - Contrato único: envelope apiVersion/ok/items/page/cursor/coverage/budget, cursores opacos, 12 códigos de erro com remediation.

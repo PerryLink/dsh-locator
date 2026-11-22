@@ -103,7 +103,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # 指定版本
-dsh plugin --profile web add dsh-locator@0.22.1
+dsh plugin --profile web add dsh-locator@0.22.2
 
 # GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -460,7 +460,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 ## 内存
 
 引擎是单个 Go 进程，遵循 `GOMEMLIMIT`/`GOGC` 和 `memoryLimitMB` 配置；`0`（默认）表示按机器自动推算上限（取内存的 25%，限制在 384–1024 MiB）。0.20 引擎把 150 万条目的快照载入约 186 MB heap，装好 watcher 后稳态约 335 MB RSS（512 MiB 上限）；上一版在同一场景约需 700 MB。两者都不改变快照格式。把内容库页缓存算上，现场部署中 DSH 宿主进程约 700 MB RSS，空闲延迟约 p50 2ms。
-## 0.22.1 更新
+## 0.22.2 更新
 
 - **默认工具面 3+1**：`locator_find`（统一 auto/name/body/symbol）、`locator_read`（ref/refs/path + meta/excerpt/quote）、`locator_status`（brief 默认）；`locator_admin`（deferLoading）负责 rebuild/reindex/export。旧工具保留但 defer，不再占初始 prompt。
 - **统一契约**：信封含 `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`；opaque cursor；12 个闭合错误码（retryable/remediation/nextTools）；workspace 空页自动放宽并回显；预算按 items 字符计。

@@ -104,7 +104,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.22.1
+dsh plugin --profile web add dsh-locator@0.22.2
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -495,7 +495,7 @@ DeepSeek Harness
 
 The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memoryLimitMB` knob, where `0` (the default) derives an automatic limit from the machine (25% of RAM clamped to 384–1024 MiB). A 0.20 engine loads a 1.5 M-entry snapshot into ~186 MB of heap and settles around 335 MB RSS with the watcher installed (512 MiB limit); the previous release needed ~700 MB in the same spot. Neither changes the snapshot format. With the content database page cache, the DSH host process sat around 700 MB RSS in the live setup, with idle latency around p50 2 ms.
 
-## 0.22.1 upgrade notes
+## 0.22.2 upgrade notes
 
 - **Default surface is 3+1**: `locator_find` (unified auto/name/body/symbol), `locator_read` (ref/refs/path + meta/excerpt/quote), `locator_status` (brief by default); `locator_admin` (deferLoading) handles rebuild/reindex/export. Legacy tools stay registered but deferred, so they no longer tax the initial prompt.
 - **One contract**: envelopes carry `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`; opaque cursors; 12 closed error codes (`retryable/remediation/nextTools`); empty workspace pages widen once and echo the fallback; the budget counts item characters.
