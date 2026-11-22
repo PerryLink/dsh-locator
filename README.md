@@ -1,5 +1,3 @@
-> 宿主兼容性：DeepSeek Harness `dsh-v0.2.2-rc.4`（2026-11-18 核验）。
-
 <div align="center">
 
 <picture>
@@ -12,6 +10,8 @@
 **记得名字就搜名字，记得内容就搜内容；找到之后直接打开，或者跳回那次对话。**
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的全盘文件搜索：自带索引，不装 Everything，不依赖 `es.exe`，Windows / macOS / Linux 用同一套工具和同一个面板。
+
+最近一次核验：DeepSeek Harness `dsh-v0.2.3-alpha.1`（2026-11-22）。
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -103,7 +103,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # 指定版本
-dsh plugin --profile web add dsh-locator@0.22.0
+dsh plugin --profile web add dsh-locator@0.22.1
 
 # GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -196,7 +196,6 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 - **选区查找**：先在会话里选中文本，再按 `Ctrl+F`，查找条默认只在该选区范围内查找，并显示选区 chip；跨消息选区也支持；选区失效会自动回退到整个会话。
 - **已加载窗口**：查找条只覆盖当前已加载的消息；长会话可点“加载更早消息后重试”，不会自动连续翻页。
 - `Esc` 关闭查找条并清除高亮；会话切换、面板打开、插件卸载都会清理。全局面板负责跨文件/跨会话发现，查找条负责当前会话内逐处定位，两者不叠加高亮。
-
 
 ## 工具一览
 
@@ -461,7 +460,7 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 ## 内存
 
 引擎是单个 Go 进程，遵循 `GOMEMLIMIT`/`GOGC` 和 `memoryLimitMB` 配置；`0`（默认）表示按机器自动推算上限（取内存的 25%，限制在 384–1024 MiB）。0.20 引擎把 150 万条目的快照载入约 186 MB heap，装好 watcher 后稳态约 335 MB RSS（512 MiB 上限）；上一版在同一场景约需 700 MB。两者都不改变快照格式。把内容库页缓存算上，现场部署中 DSH 宿主进程约 700 MB RSS，空闲延迟约 p50 2ms。
-## 0.22.0 更新
+## 0.22.1 更新
 
 - **默认工具面 3+1**：`locator_find`（统一 auto/name/body/symbol）、`locator_read`（ref/refs/path + meta/excerpt/quote）、`locator_status`（brief 默认）；`locator_admin`（deferLoading）负责 rebuild/reindex/export。旧工具保留但 defer，不再占初始 prompt。
 - **统一契约**：信封含 `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`；opaque cursor；12 个闭合错误码（retryable/remediation/nextTools）；workspace 空页自动放宽并回显；预算按 items 字符计。

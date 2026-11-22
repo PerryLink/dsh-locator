@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.22.1] - 2026-11-22
+
+- Compatibility: declare DeepSeek Harness 0.2.3-alpha.1 support (>=0.2.3-0 <0.3.0-0 in engines.dsh and every @deepseek-ai/dsh-* peer range) and refresh README verification stamps.
+
 ## 0.22.0 — 2026-11-22
 
 AI-first tool surface. The default agent catalog is now **3+1 tools** (`locator_find`, `locator_read`, `locator_status`, plus the deferred `locator_admin`) with one envelope, opaque cursors and a closed error-code set; the legacy tools remain registered but `deferLoading`, so they no longer tax the initial prompt. Search/coverage/space behaviour is unchanged.

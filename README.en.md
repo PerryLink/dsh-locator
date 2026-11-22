@@ -1,5 +1,3 @@
-> Host compatibility: DeepSeek Harness `dsh-v0.2.2-rc.4` (verified 2026-11-18).
-
 <div align="center">
 
 <picture>
@@ -12,6 +10,8 @@
 **Search names when you remember the name, contents when you remember the phrase — then open the file or jump back to the conversation.**
 
 Whole-disk file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) with its **own** index: no Everything install, no `es.exe`, one set of tools and one panel across Windows, macOS and Linux.
+
+Last verified on DeepSeek Harness `dsh-v0.2.3-alpha.1` (2026-11-22).
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -104,7 +104,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.22.0
+dsh plugin --profile web add dsh-locator@0.22.1
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -197,7 +197,6 @@ Press `Ctrl+F` in a conversation (or click `⌕` in the session header) to open 
 - **Selection scope**: select text in the conversation and press `Ctrl+F`; the bar starts scoped to that selection and shows a selection chip. Cross-message selections are supported; if the selection expires the bar falls back to the whole conversation.
 - **Loaded window**: only loaded messages are searched; on long conversations use “Load earlier messages and retry” rather than automatic paging.
 - `Esc` closes the bar and clears highlights; switching conversations, opening the panel or disposing the plugin also cleans up. The global panel handles cross-file/cross-session discovery while the find bar handles per-match navigation in the current conversation; their highlights never stack.
-
 
 ## Tools
 
@@ -496,7 +495,7 @@ DeepSeek Harness
 
 The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memoryLimitMB` knob, where `0` (the default) derives an automatic limit from the machine (25% of RAM clamped to 384–1024 MiB). A 0.20 engine loads a 1.5 M-entry snapshot into ~186 MB of heap and settles around 335 MB RSS with the watcher installed (512 MiB limit); the previous release needed ~700 MB in the same spot. Neither changes the snapshot format. With the content database page cache, the DSH host process sat around 700 MB RSS in the live setup, with idle latency around p50 2 ms.
 
-## 0.22.0 upgrade notes
+## 0.22.1 upgrade notes
 
 - **Default surface is 3+1**: `locator_find` (unified auto/name/body/symbol), `locator_read` (ref/refs/path + meta/excerpt/quote), `locator_status` (brief by default); `locator_admin` (deferLoading) handles rebuild/reindex/export. Legacy tools stay registered but deferred, so they no longer tax the initial prompt.
 - **One contract**: envelopes carry `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`; opaque cursors; 12 closed error codes (`retryable/remediation/nextTools`); empty workspace pages widen once and echo the fallback; the budget counts item characters.

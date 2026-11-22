@@ -1,5 +1,3 @@
-> होस्ट संगतता: DeepSeek Harness `dsh-v0.2.2-rc.4` (2026-11-18 को सत्यापित)।
-
 <div align="center">
 
 <picture>
@@ -10,6 +8,8 @@
 # 🔎 dsh-locator
 
 **नाम याद है तो नाम से खोजें, बात याद है तो सामग्री से खोजें; फिर फ़ाइल खोलें या उसी बातचीत पर वापस जाएँ।**
+
+अंतिम सत्यापन: DeepSeek Harness `dsh-v0.2.3-alpha.1` (2026-11-22).
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) के लिए पूरे डिस्क की फ़ाइल खोज, **अपने ही इंडेक्स** के साथ: Everything इंस्टॉल करने की ज़रूरत नहीं, `es.exe` पर निर्भरता नहीं, Windows / macOS / Linux पर एक ही टूल और एक ही पैनल।
 
@@ -104,7 +104,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # संस्करण तय करें
-dsh plugin --profile web add dsh-locator@0.22.0
+dsh plugin --profile web add dsh-locator@0.22.1
 
 # GitHub मुख्य ब्रांच
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -197,7 +197,6 @@ Web GUI में कहीं भी `Ctrl+Shift+F` दबाएँ, या ब
 - **चयन में खोज**: बातचीत में टेक्स्ट चुनकर `Ctrl+F` दबाएँ; बार शुरू में सिर्फ़ उसी चयन में खोजता है और चयन चिप दिखाता है। संदेशों के पार जाने वाला चयन भी चलता है; चयन अमान्य हो जाए तो बार पूरी बातचीत पर लौट आता है।
 - **लोडेड विंडो**: सिर्फ़ लोड हो चुके संदेश खोजे जाते हैं; लंबी बातचीत में “पुराने संदेश लोड कर पुन: प्रयास” दबाएँ — अपने आप लगातार पेजिंग नहीं होती।
 - `Esc` बार बंद करता है और हाइलाइट साफ़ करता है; बातचीत बदलने, पैनल खोलने या प्लगइन अनलोड होने पर भी सफ़ाई हो जाती है। ग्लोबल पैनल फ़ाइलों और सेशनों के पार खोजने का काम करता है, फ़ाइंड बार उसी बातचीत में एक-एक मैच पर जाने का; दोनों के हाइलाइट कभी एक-दूसरे पर नहीं चढ़ते।
-
 
 ## टूल्स
 
@@ -422,7 +421,7 @@ DeepSeek Harness
 
 इंजन एक Go प्रोसेस है; `GOMEMLIMIT`/`GOGC` और `memoryLimitMB` मानता है, जहाँ `0` (डिफ़ॉल्ट) auto सीमा निकालता है (RAM का 25%, 384–1024 MiB)। 0.20 इंजन 1.5 M एंट्री का snapshot ~186 MB heap में लोड करता है और watcher के साथ ~335 MB RSS पर रहता है (512 MiB सीमा); पिछला संस्करण वहीं ~700 MB लेता था। स्नैपशॉट फ़ॉर्मेट नहीं बदलता। कंटेंट DB पेज कैश सहित DSH होस्ट प्रोसेस लाइव सेटअप में ~700 MB RSS और idle देरी p50 2 ms रही।
 
-## 0.22.0 अपग्रेड नोट्स
+## 0.22.1 अपग्रेड नोट्स
 
 - डिफ़ॉल्ट सतह 3+1: `locator_find` (unified), `locator_read`, `locator_status`; `locator_admin` (deferLoading) rebuild/reindex/export के लिए। पुराने tools उपलब्ध रहते हैं पर deferred हैं।
 - एक contract: envelope apiVersion/ok/items/page/cursor/coverage/budget, opaque cursor, 12 error codes remediation के साथ।

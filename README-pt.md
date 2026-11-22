@@ -1,5 +1,3 @@
-> Compatibilidade com o host: DeepSeek Harness `dsh-v0.2.2-rc.4` (verificado em 2026-11-18).
-
 <div align="center">
 
 <picture>
@@ -12,6 +10,8 @@
 **Busque por nome quando lembra do nome e por conteúdo quando lembra da frase; depois abra o arquivo ou volte para a conversa.**
 
 Busca de arquivos em todo o disco para o [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) com **índice próprio**: sem instalar o Everything, sem `es.exe`, com as mesmas ferramentas e o mesmo painel no Windows, macOS e Linux.
+
+Última verificação: DeepSeek Harness `dsh-v0.2.3-alpha.1` (2026-11-22).
 
 [![npm version](https://img.shields.io/npm/v/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-locator)](https://www.npmjs.com/package/dsh-locator)
@@ -104,7 +104,7 @@ Resumindo: a **ideia** do Everything (índice persistente + consultas estruturad
 dsh plugin --profile web add dsh-locator
 
 # fixar uma versão
-dsh plugin --profile web add dsh-locator@0.22.0
+dsh plugin --profile web add dsh-locator@0.22.1
 
 # branch principal do GitHub
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -197,7 +197,6 @@ Pressione `Ctrl+F` numa conversa (ou clique em `⌕` no cabeçalho da sessão) p
 - **Busca na seleção**: selecione texto na conversa e pressione `Ctrl+F`; a barra começa restrita à seleção e mostra um chip com o tamanho da seleção. Seleções que cruzam mensagens também funcionam; se a seleção expirar, a barra volta para a conversa inteira.
 - **Janela carregada**: só as mensagens já carregadas entram na busca; em conversas longas, use “Carregar mensagens anteriores e tentar novamente” em vez de paginação automática.
 - `Esc` fecha a barra e limpa os destaques; trocar de conversa, abrir o painel ou descarregar o plugin também limpam. O painel global cuida da descoberta entre arquivos e sessões; a barra cuida da navegação ocorrência por ocorrência na conversa atual, e os destaques das duas nunca se sobrepõem.
-
 
 ## Ferramentas
 
@@ -422,7 +421,7 @@ DeepSeek Harness
 
 O motor é um único processo Go; respeita `GOMEMLIMIT`/`GOGC` e `memoryLimitMB`, onde `0` (padrão) calcula um limite automático (25% da RAM, 384–1024 MiB). Um motor 0.20 carrega um snapshot de 1,5 M de entradas em ~186 MB de heap e fica em ~335 MB de RSS com o watcher instalado (limite de 512 MiB); a versão anterior precisava de ~700 MB no mesmo ponto. Nenhum altera o formato do snapshot. Com o cache de páginas do banco de conteúdo, o processo anfitrião do DSH ficava por volta de 700 MB de RSS na instalação ao vivo, com latência ociosa de p50 2 ms.
 
-## Notas de atualização 0.22.0
+## Notas de atualização 0.22.1
 
 - Superfície padrão 3+1: `locator_find` unificado, `locator_read`, `locator_status`; `locator_admin` (deferLoading) para rebuild/reindex/export. Tools legacy continuam disponíveis, mas diferidos.
 - Contrato único: envelope apiVersion/ok/items/page/cursor/coverage/budget, cursores opacos, 12 códigos de erro com remediation.
