@@ -7,6 +7,8 @@
 
 # 🔎 dsh-locator
 
+当前版本 `0.22.3`。
+
 **记得名字就搜名字，记得内容就搜内容；找到之后直接打开，或者跳回那次对话。**
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的全盘文件搜索：自带索引，不装 Everything，不依赖 `es.exe`，Windows / macOS / Linux 用同一套工具和同一个面板。

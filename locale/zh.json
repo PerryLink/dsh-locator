@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Locator",
+    "description": "给 DeepSeek Harness 的全盘文件搜索：自带索引，不装 Everything，不依赖 es.exe，Windows / macOS / Linux 用同一套工具和同一个面板。"
+  }
+}

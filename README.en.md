@@ -7,6 +7,8 @@
 
 # 🔎 dsh-locator
 
+Current version `0.22.3`.
+
 **Search names when you remember the name, contents when you remember the phrase — then open the file or jump back to the conversation.**
 
 Whole-disk file search for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) with its **own** index: no Everything install, no `es.exe`, one set of tools and one panel across Windows, macOS and Linux.
