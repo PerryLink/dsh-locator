@@ -14,6 +14,11 @@ import { makeAgentAdminTool } from '../src/agent-admin.ts'
 import type { ContentIndex } from '../src/content.ts'
 import type { LocatorRuntime } from '../src/runtime.ts'
 
+/** Windows may return 8.3 short names; compare canonical forms. */
+const nativePath = (value: string): string => {
+  try { return realpathSync.native(value) } catch { return realpathSync(value) }
+}
+
 const exec = () => ({ agent: { session: { id: 'caller-session', header: { cwd: '/work/a' } } } }) as never
 
 interface AdminView {
@@ -120,7 +125,7 @@ describe('locator_admin rebuild', () => {
     const tool = makeAgentAdminTool({ rt: fakeRuntime(root, calls) })
     const value = await tool.execute({ action: 'rebuild', roots: [root], excludes: ['**/node_modules/**'] }, exec()) as AdminView
     expect(value.ok).toBe(true)
-    expect(calls.roots).toEqual([realpathSync(root)])
+    expect(calls.roots?.map(nativePath)).toEqual([nativePath(root)])
     expect(calls.excludes).toEqual(['**/node_modules/**'])
   })
 

@@ -14,6 +14,11 @@ import type { ContentIndex } from '../src/content.ts'
 import { encodeSessionRef, fileRef, sessionEventRef, urlRef } from '../src/refs.ts'
 import type { LocatorRuntime } from '../src/runtime.ts'
 
+/** Windows may return 8.3 short names; compare canonical forms. */
+const nativePath = (value: string): string => {
+  try { return realpathSync.native(value) } catch { return realpathSync(value) }
+}
+
 function exec(cwd = '/work/a', sessionId = 'caller-session') {
   return { agent: { session: { id: sessionId, header: { cwd } } } } as never
 }
@@ -67,7 +72,7 @@ interface ReadValueView {
 }
 
 const root = mkdtempSync(join(tmpdir(), 'locator-agent-read-'))
-const rootReal = realpathSync(root)
+const rootReal = nativePath(root)
 const doc = join(root, 'doc.md')
 const other = join(root, 'other.md')
 const lines = join(root, 'lines.txt')
@@ -102,7 +107,7 @@ describe('locator_read meta', () => {
     expect(value.items).toHaveLength(1)
     const item = value.items?.[0]
     expect(item).toMatchObject({ kind: 'file', status: 'fresh', ref, permissions: { read: 'allowed' } })
-    expect(item?.provenance?.path).toBe(realpathSync(doc))
+    expect(item?.provenance?.path).toBe(nativePath(doc))
     expect(item?.excerpt).toBeUndefined()
     expect(typeof value.timing?.tookMs).toBe('number')
     expect(validateJsonSchemaValue(schemaOf(tool), value)).toEqual([])
@@ -207,7 +212,7 @@ describe('locator_read quote', () => {
       '',
       '[lines.txt](' + ref + ')',
       '',
-      'fallback: ' + realpathSync(lines),
+      'fallback: ' + nativePath(lines),
     ].join('\n'))
   })
 })
@@ -218,7 +223,7 @@ describe('locator_read path target', () => {
     const value = await tool.execute({ path: doc, line: 3, as: 'excerpt' }, exec()) as ReadValueView
     const item = value.items?.[0]
     expect(item?.kind).toBe('file')
-    expect(item?.path).toBe(realpathSync(doc))
+    expect(item?.path).toBe(nativePath(doc))
     expect(item?.excerpt).toBe('gamma')
     expect(item?.ref).toMatch(/^ref:\/\/file\?path=/)
     expect(item?.status).toBe('fresh')
