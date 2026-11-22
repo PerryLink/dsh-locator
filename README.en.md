@@ -104,7 +104,7 @@ In short: the **idea** behind Everything (persistent index + structured query) i
 dsh plugin --profile web add dsh-locator
 
 # pin a version
-dsh plugin --profile web add dsh-locator@0.21.1
+dsh plugin --profile web add dsh-locator@0.22.0
 
 # GitHub main
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -220,14 +220,14 @@ Press `Ctrl+F` in a conversation (or click `⌕` in the session header) to open 
 
 ### For AI agents
 
-- **Pick the right tool**: names/paths -> `locator_search`; bodies or sessions -> `locator_find`; open question -> `locator_explore`; known symbol -> `locator_symbol` / `locator_outline`; citation check -> `locator_resolve` / `locator_cite`; health/build -> `locator_status`. `mode` on search/find is for count/names/content variants of the same entry; prefer the default mode.
-- **Defaults**: `locator_search` defaults to `limit=10`, `locator_find` to `limit=8`, with an 8,000-character output budget; ask for more with `limit` and/or `budgetChars`. Pagination is honest: `truncation:{reason,dropped,consumed}`, `hasMore` and `nextOffset` never skip budget-dropped rows, so consecutive pages do not lose results.
-- **Compact mode**: agents should usually pass `detail:'compact'` (drops hash/provenance/freshness/permissions, keeps ref/line/snippet); use `detail:'full'` or `evidenceLimit` when the evidence chain matters.
-- **Scope**: default is `workspace` (filtered by the caller cwd); `total` may be all-roots (see `totalAllRoots`/hints). An empty workspace first page returns `workspace-empty` plus a `scope:'all'` hint; `locator_find` names mode also honours cwd/pathPrefix.
-- **Errors and hints**: on failure read `errorInfo:{code,retryable,hint}` (the legacy `error` string is still present); actionable warning hints are in `warningHints`.
-- **Coverage boundary**: content covers file bodies and session messages by default; tool results/reasoning are opt-in (`contentIndexToolResults`/`contentIndexReasoning`), archived sessions are hidden by default; use `locator_status` content/coverage to judge completeness.
-- **CLI/MCP**: `locator-cli` and `locator-mcp` are genuinely read-only - they copy the index state to a temporary directory before starting the engine and never write the live state. Content search returns only files under the configured roots and hides sessions by default (`--allow-sessions` opts in).
-- **Example**: `locator_find{query:'retry policy', detail:'compact', limit:8}`, then follow `nextOffset`; verify key refs with `locator_resolve{ref}`; pass `scope:'all'` explicitly when you need every configured root.
+- **Default surface (0.22)**: `locator_find` (the only search entry: `mode auto|name|body|symbol`, `kinds[]`, `where{pathPrefix,ext,modifiedAfter,minSize}`, `scope workspace|roots|all`, `cursor`, `detail compact|standard|full`, `count`); `locator_read` (`ref` / `refs[]` / `path`, `as meta|excerpt|quote`, `window`, `maxBytes`); `locator_status` (`detail brief|full`, brief by default); `locator_admin` (`deferLoading`: rebuild/reindex/export). Legacy `locator_search`/`explore`/`outline`/`symbol`/`repo_map`/`resolve`/`cite` remain callable but deferred, so they stay out of the initial prompt.
+- **Defaults**: `find` defaults to `limit=10` (max 50), `maxChars=6000`, `detail='compact'`; `read` caps each excerpt at 2,000 bytes by default. Raise `limit`/`maxChars` explicitly for more.
+- **Pagination**: continue with `page.nextCursor` (mutually exclusive with `offset`); `page.more=false` means no nextCursor; cursors are bound to query/scope and return `cursor-invalid` when stale. See `budget`/`coverage.notes` in the envelope.
+- **Errors**: failures carry `error{code,message,retryable,remediation,nextTools}` (12 closed codes); successes use `coverage.notes` for indexing/fallback/degraded context.
+- **Scope**: default `workspace` (filtered by the caller cwd); an empty first page is widened once and echoed in `scope.fallback`/notes; `where` filters before paging.
+- **Coverage boundary**: content covers file bodies and session messages by default; tool results/reasoning are opt-in (`contentIndexToolResults`/`contentIndexReasoning`), archived sessions are hidden by default; use `locator_status` content/coverage.
+- **CLI/MCP**: `locator-cli` and `locator-mcp` are genuinely read-only (state is copied to a temporary directory; the live state is never written); content search is fenced to the configured roots and hides sessions by default (`--allow-sessions` opts in); MCP results carry structuredContent/outputSchema.
+- **Example**: `locator_find{query:'retry policy', mode:'auto', limit:10}`, follow `page.nextCursor`, then `locator_read{ref, as:'excerpt', window:2}`; pass `scope:'all'` explicitly to search every configured root.
 ### CLI and MCP
 
 The npm package also exposes two bins (or run the scripts directly):
@@ -495,6 +495,13 @@ DeepSeek Harness
 ## Memory
 
 The engine is a single Go process; it honours `GOMEMLIMIT`/`GOGC` and the `memoryLimitMB` knob, where `0` (the default) derives an automatic limit from the machine (25% of RAM clamped to 384–1024 MiB). A 0.20 engine loads a 1.5 M-entry snapshot into ~186 MB of heap and settles around 335 MB RSS with the watcher installed (512 MiB limit); the previous release needed ~700 MB in the same spot. Neither changes the snapshot format. With the content database page cache, the DSH host process sat around 700 MB RSS in the live setup, with idle latency around p50 2 ms.
+
+## 0.22.0 upgrade notes
+
+- **Default surface is 3+1**: `locator_find` (unified auto/name/body/symbol), `locator_read` (ref/refs/path + meta/excerpt/quote), `locator_status` (brief by default); `locator_admin` (deferLoading) handles rebuild/reindex/export. Legacy tools stay registered but deferred, so they no longer tax the initial prompt.
+- **One contract**: envelopes carry `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`; opaque cursors; 12 closed error codes (`retryable/remediation/nextTools`); empty workspace pages widen once and echo the fallback; the budget counts item characters.
+- **Declaration budget**: find 2,311B + read 1,325B + status 500B = **4,136B resident** (the old surface was ~18KB); with both capability tools 6,101B.
+- **Migration**: `locator_find` is now the unified search entry (`mode:'auto'` by default); legacy `search`, the old find factory, `explore`, `outline`, `symbol`, `repo_map`, `resolve`, `cite` remain callable but deferred. MCP still exposes its 5 read-only tools (with structuredContent/outputSchema).
 
 ## 0.21.1 upgrade notes
 

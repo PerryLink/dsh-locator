@@ -4,6 +4,7 @@ import type { ContentIndex } from './content.ts'
 
 export function makeReindexTool(content: ContentIndex, ensure?: () => void) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_reindex',
     description: [
       'Rebuild or refresh the dsh-locator content index (file bodies + DSH session messages).',

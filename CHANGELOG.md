@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.22.0 — 2026-11-22
+
+AI-first tool surface. The default agent catalog is now **3+1 tools** (`locator_find`, `locator_read`, `locator_status`, plus the deferred `locator_admin`) with one envelope, opaque cursors and a closed error-code set; the legacy tools remain registered but `deferLoading`, so they no longer tax the initial prompt. Search/coverage/space behaviour is unchanged.
+
+* **`locator_find` (unified search)**: `mode auto|name|body|symbol` (auto = symbol exact -> body -> name), `kinds[]`, `where{pathPrefix,ext,modifiedAfter,minSize}`, `scope workspace|roots|all`, `limit` (10 default, max 50), `cursor`/`offset` (mutually exclusive), `maxChars` (6000 default), `detail compact|standard|full` (compact default), `count`. Results are on one `items` list with `why`, `page{limit,returned,more,nextCursor}`, `counts`, `coverage{indexing,indexTruncated,notes}`, `budget`, `timing`; workspace空页自动放宽一次并回显 `scope.fallback`，分页游标不会丢行/重行。
+* **`locator_read`**: read one ref / 1-20 refs / a path; `as meta|excerpt|quote`, `line`, `window 0-20`, `maxBytes` (2000 default); target line always whole, quote returns markdown + citation link + fallback; per-ref errors stay on the item.
+* **`locator_status`**: `detail brief` (default, ≤600 chars: index/content/scope/timing) or `full` (all legacy fields).
+* **`locator_admin`** (`deferLoading`): `action rebuild|reindex|export` with the legacy parameters, uniform errors; intentionally absent from the initial prompt.
+* **Unified contract** (`src/agent-core.ts`): `apiVersion 2026-11`, success/failure envelopes, 12 closed error codes with `retryable/remediation/nextTools`, opaque base64url cursors (`v/queryHash/offset/scope`), detail presets and item-budget accounting, cursor-invalid/scope-empty-workspace/budget-too-small handling.
+* **Declaration budget**: measured `JSON.stringify(name+description+parameters)` = find **2,311 B** + read **1,325 B** + status **500 B** = **4,136 B resident** for the locator tools (previous legacy surface ~18 KB); including both capability adapter tools the resident total is 6,101 B. `locator_admin` and all legacy tools are deferred.
+* **Legacy compatibility**: `locator_search`, the old `locator_find` factory, `resolve`, `cite`, `explore`, `outline`, `symbol`, `repo_map`, `rebuild`, `reindex`, `export` keep their names/behaviour (deferred); the plugin registers the new `locator_find`/`locator_status` in their place and adds `locator_read`/`locator_admin`. CLI/MCP keep their 5 read-only tools; MCP results already carry `structuredContent` + `outputSchema` and `isError`.
+* **Tests**: 26 files / **674 tests** (agent-core/find/read/status/admin + legacy/plugin suites); six engines rebuilt at 0.22.0.
+
 ## 0.21.1 — 2026-11-21
 
 AI-contract and safety release. 0.21.1 is the first published release after 0.20.2 and includes the 0.21.0 content/coverage work below plus a set of fixes that make the tools predictable for AI agents.

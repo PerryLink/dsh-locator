@@ -103,7 +103,7 @@ dsh plugin --profile web add dsh-locator
 dsh plugin --profile web add dsh-locator
 
 # 指定版本
-dsh plugin --profile web add dsh-locator@0.21.1
+dsh plugin --profile web add dsh-locator@0.22.0
 
 # GitHub 主仓
 dsh plugin --profile web add github:PerryLink/dsh-locator
@@ -219,14 +219,14 @@ Everything 风格的查询语法，返回路径、大小、修改时间、扩展
 
 ### 给 AI agent 的调用指南
 
-- **工具选择**：名字/路径 → `locator_search`；正文或会话 → `locator_find`；开放式问题 → `locator_explore`；已知符号 → `locator_symbol` / `locator_outline`；引用验证 → `locator_resolve` / `locator_cite`；状态/构建 → `locator_status`。`locator_search`/`locator_find` 的 `mode` 只用于同一入口的 count/names/content 变体，优先用默认 mode。
-- **默认值**：`locator_search` 默认 `limit=10`、`locator_find` 默认 `limit=8`，输出预算 8000 字符；需要更多结果请显式加 `limit` 和/或 `budgetChars`。结果里的 `truncation:{reason,dropped,consumed}`、`hasMore`、`nextOffset` 是分页契约：`nextOffset` 不会跳过被预算丢弃的行，连续翻页不会丢结果。
-- **compact 模式**：agent 一般用 `detail:'compact'`（去掉 hash/provenance/freshness/permissions，保留 ref/line/snippet），需要证据链时再用 `detail:'full'` 或 `evidenceLimit`。
-- **scope**：默认 `workspace`（按调用方 cwd 裁剪）；`total` 可能是全局计数（看 `totalAllRoots`/提示），workspace 首屏为空时会返回 `workspace-empty` + 建议 `scope:'all'`；`locator_find` 的 names 模式也遵守 cwd/pathPrefix。
-- **错误与提示**：失败时看 `errorInfo:{code,retryable,hint}`（旧 `error` 字符串仍保留）；`warnings` 的可操作提示在 `warningHints`。
-- **覆盖边界**：内容索引默认只收文件正文和 session 消息；tool 结果/reasoning 默认不入索引（`contentIndexToolResults`/`contentIndexReasoning` 可开），归档会话默认隐藏；用 `locator_status` 的 `content`/`coverage` 判断是否完整。
-- **CLI/MCP**：`locator-cli`/`locator-mcp` 是真正只读的——它们把索引状态复制到临时目录再启动 engine，不会写 live state；content 搜索默认只返回配置 roots 内文件、默认不含 session（`--allow-sessions` 显式开）。
-- **示例**：先 `locator_find{query:'retry policy', detail:'compact', limit:8}`；拿到 `nextOffset` 再翻页；用 `locator_resolve{ref}` 验证关键引用；需要全仓库范围时显式 `scope:'all'`。
+- **默认工具面（0.22）**：`locator_find`（唯一检索入口：`mode auto|name|body|symbol`、`kinds[]`、`where{pathPrefix,ext,modifiedAfter,minSize}`、`scope workspace|roots|all`、`cursor`、`detail compact|standard|full`、`count`）；`locator_read`（`ref` / `refs[]` / `path`，`as meta|excerpt|quote`，`window`、`maxBytes`）；`locator_status`（`detail brief|full`，brief 默认）；`locator_admin`（`deferLoading`，rebuild/reindex/export）。旧 `locator_search`/`explore`/`outline`/`symbol`/`repo_map`/`resolve`/`cite` 等仍可调用，但已 defer，不再进入初始 prompt。
+- **默认值**：`find` 默认 `limit=10`（max 50）、`maxChars=6000`、`detail='compact'`；`read` 每段默认 `maxBytes=2000`。需要更多结果显式加 `limit`/`maxChars`。
+- **分页**：用 `page.nextCursor` 续页（与 `offset` 互斥）；`page.more=false` 时没有 nextCursor；cursor 与 query/scope 绑定，不匹配返回 `cursor-invalid`。budget/dropped 见信封里的 `budget`/`coverage.notes`。
+- **错误**：失败看 `error{code,message,retryable,remediation,nextTools}`（12 个闭合码）；成功时 `coverage.notes` 说明索引构建/放宽/降级。
+- **scope**：默认 `workspace`（按 cwd 裁剪）；首页为空会自动放宽一次并在 `scope.fallback`/notes 回显；`where` 先于分页。
+- **覆盖边界**：内容索引默认只收文件正文和 session 消息；tool 结果/reasoning 默认不入索引（`contentIndexToolResults`/`contentIndexReasoning` 可开），归档会话默认隐藏；用 `locator_status` 的 `content`/`coverage` 判断完整性。
+- **CLI/MCP**：`locator-cli`/`locator-mcp` 真正只读（状态复制到临时目录再启 engine，不写 live state）；content 默认只返回配置 roots 内文件、默认不含 session（`--allow-sessions` 显式开）；MCP 结果带 structuredContent/outputSchema。
+- **示例**：`locator_find{query:'retry policy', mode:'auto', limit:10}` → 用 `page.nextCursor` 续页 → `locator_read{ref, as:'excerpt', window:2}` 读引用原文；需要所有 roots 时显式 `scope:'all'`。
 ### 命令行与 MCP
 
 npm 包同时暴露两个 bin（也可直接 `node scripts/...` 运行）：
@@ -461,6 +461,13 @@ Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 
 ## 内存
 
 引擎是单个 Go 进程，遵循 `GOMEMLIMIT`/`GOGC` 和 `memoryLimitMB` 配置；`0`（默认）表示按机器自动推算上限（取内存的 25%，限制在 384–1024 MiB）。0.20 引擎把 150 万条目的快照载入约 186 MB heap，装好 watcher 后稳态约 335 MB RSS（512 MiB 上限）；上一版在同一场景约需 700 MB。两者都不改变快照格式。把内容库页缓存算上，现场部署中 DSH 宿主进程约 700 MB RSS，空闲延迟约 p50 2ms。
+## 0.22.0 更新
+
+- **默认工具面 3+1**：`locator_find`（统一 auto/name/body/symbol）、`locator_read`（ref/refs/path + meta/excerpt/quote）、`locator_status`（brief 默认）；`locator_admin`（deferLoading）负责 rebuild/reindex/export。旧工具保留但 defer，不再占初始 prompt。
+- **统一契约**：信封含 `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`；opaque cursor；12 个闭合错误码（retryable/remediation/nextTools）；workspace 空页自动放宽并回显；预算按 items 字符计。
+- **声明体积**：find 2,311B + read 1,325B + status 500B = **4,136B 常驻**（旧工具面约 18KB）；加 capability 两工具共 6,101B。
+- **迁移**：`locator_find` 现在是统一检索（`mode:'auto'` 默认），旧的 `search`/旧 find/`explore`/`outline`/`symbol`/`repo_map`/`resolve`/`cite` 仍可按名调用但已 defer；MCP 仍是 5 个只读工具（已带 structuredContent/outputSchema）。
+
 ## 0.21.1 更新
 
 - **AI 契约修复**：分页不再跳过被预算丢弃的行（`truncation/hasMore/nextOffset` 修正）、结果严格 `slice(0,limit)`、默认页大小 search 10/find 8、新增 `budgetChars`、`detail:'compact'`/`evidenceLimit`、`errorInfo`/`warningHints`、只读工具并发安全。

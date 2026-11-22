@@ -312,6 +312,7 @@ export function makeExploreTool(rt: LocatorRuntime, options: ExploreToolOptions)
   const scopeRules = options.scope
   const budgetChars = options.budgetChars ?? DEFAULT_OUTPUT_BUDGET_CHARS
   return defineTool({
+    deferLoading: true,
     name: 'locator_explore',
     description: [
       'Explore one question across the local file-name and content indexes (dsh-locator).',

@@ -19,8 +19,11 @@ const stopEngines: Array<() => void> = []
 async function waitForIndex(statusTool: RegisteredTool | undefined): Promise<void> {
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
-    const status = (await statusTool?.execute({}, { signal: new AbortController().signal })) as { entries?: number; scanning?: boolean }
-    if ((status.entries ?? 0) >= 3 && status.scanning !== true) return
+    const status = (await statusTool?.execute({}, { signal: new AbortController().signal })) as {
+      entries?: number; scanning?: boolean; index?: { entries?: number; scanning?: boolean }
+    }
+    const index = status.index ?? status
+    if ((index.entries ?? 0) >= 3 && index.scanning !== true) return
     await new Promise(resolve => setTimeout(resolve, 50))
   }
   throw new Error('initial scan did not finish')
@@ -91,7 +94,11 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       for (const dispose of disposers.reverse()) dispose()
     })
 
-    expect(tools.map(tool => tool.name).sort()).toEqual(['capability_preflight', 'capability_search', 'locator_cite', 'locator_explore', 'locator_export', 'locator_rebuild', 'locator_resolve', 'locator_search', 'locator_status'])
+    expect(tools.map(tool => tool.name).sort()).toEqual([
+      'capability_preflight', 'capability_search', 'locator_admin', 'locator_cite', 'locator_explore', 'locator_export',
+      'locator_find', 'locator_read', 'locator_rebuild', 'locator_resolve',
+      'locator_search', 'locator_status',
+    ].sort())
     const statusTool = tools.find(tool => tool.name === 'locator_status')
     await waitForIndex(statusTool)
     const search = tools.find(tool => tool.name === 'locator_search')
@@ -164,20 +171,17 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       expect(existsSync(join(state, 'content.db'))).toBe(false)
       const find = tools.find(tool => tool.name === 'locator_find') as RegisteredTool
       await find.execute({ query: 'LAZYCONTENTMARK', limit: 5 }, { signal: new AbortController().signal })
-      let value = { state: { building: false, files: 0 } }
+      let content: { building?: boolean; files?: number } = { building: false, files: 0 }
       const deadline = Date.now() + 20_000
       while (Date.now() < deadline) {
-        const next = (await find.execute({ query: 'LAZYCONTENTMARK', limit: 5 }, { signal: new AbortController().signal })) as {
-          hits: Array<{ path: string }>
-          state: { building: boolean; files: number }
-        }
-        value = next as never
-        if (!next.state.building && next.state.files > 0) break
+        const status = (await statusTool.execute({}, { signal: new AbortController().signal })) as { content?: { building?: boolean; files?: number } }
+        content = status.content ?? content
+        if (content.building === false && (content.files ?? 0) > 0) break
         await new Promise(resolve => setTimeout(resolve, 100))
       }
-      expect(value.state.files).toBeGreaterThan(0)
-      const hits = (value as unknown as { hits: Array<{ path: string }> }).hits
-      expect(hits[0]?.path).toBe(join(root, 'notes.md'))
+      expect(content.files).toBeGreaterThan(0)
+      const value = (await find.execute({ query: 'LAZYCONTENTMARK', limit: 5 }, { signal: new AbortController().signal })) as { items?: Array<{ path: string }> }
+      expect(value.items?.[0]?.path).toBe(join(root, 'notes.md'))
     } finally {
       if (previousHome === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = previousHome
@@ -255,8 +259,9 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
       const find = tools.find(tool => tool.name === 'locator_find') as RegisteredTool
       const deadline = Date.now() + 15_000
       while (Date.now() < deadline) {
-        const value = (await find.execute({ query: 'timer', limit: 5 }, { signal: new AbortController().signal })) as { state?: { building?: boolean; files?: number } }
-        if (value.state?.building === false && (value.state?.files ?? 0) > 0) break
+        const status = (await statusTool.execute({}, { signal: new AbortController().signal })) as { content?: { building?: boolean; files?: number } }
+        if (status.content?.building === false && (status.content?.files ?? 0) > 0) break
+        await find.execute({ query: 'timer', limit: 5 }, { signal: new AbortController().signal })
         await new Promise(resolve => setTimeout(resolve, 100))
       }
       expect(timeoutDelays).toEqual([1500])

@@ -8,9 +8,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Config as ConfigSchema, applyResourcePreset, contentLimits, outputBudgetChars } from './config.ts'
 import type { Config } from './config.ts'
 import { ContentIndex } from './content.ts'
+import { makeAgentAdminTool } from './agent-admin.ts'
+import { makeAgentFindTool } from './agent-find.ts'
+import { makeAgentReadTool } from './agent-read.ts'
+import { makeAgentStatusTool } from './agent-status.ts'
 import { makeExploreTool } from './explore.ts'
 import { makeExportTool } from './export.ts'
-import { makeFindTool } from './find.ts'
 import { makeReindexTool } from './reindex.ts'
 import { registerHttp } from './http.ts'
 import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
@@ -18,7 +21,7 @@ import { LocatorRuntime } from './runtime.ts'
 import { makeCapabilityTools, preflightCapabilityCard, searchCapabilityCards, type CapabilitySources } from './capabilities.ts'
 import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
 import { runOcrCommand, scopeFromConfig } from './scope.ts'
-import { makeOutlineTool, makeRebuildTool, makeRepoMapTool, makeSearchTool, makeStatusTool, makeSymbolTool } from './tools.ts'
+import { makeOutlineTool, makeRebuildTool, makeRepoMapTool, makeSearchTool, makeSymbolTool } from './tools.ts'
 
 export { ConfigSchema as Config }
 
@@ -218,7 +221,17 @@ export function apply(ctx: Context, config: Config): void {
     scope,
     budgetChars,
   }))
-  ctx.tools.register(makeStatusTool(rt, content, scope))
+  // 0.22 AI-first surface: three常驻 tools plus a deferred admin tool. The
+  // legacy tools stay registered but deferLoading, so they do not tax the
+  // initial agent prompt while remaining callable by name.
+  ctx.tools.register(makeAgentFindTool(rt, content, ensureContent, {
+    scope,
+    allowCrossWorkspaceSessions: config.allowCrossWorkspaceSessions,
+    maxChars: budgetChars,
+  }))
+  ctx.tools.register(makeAgentReadTool(rt, content))
+  ctx.tools.register(makeAgentStatusTool(rt, content, scope))
+  ctx.tools.register(makeAgentAdminTool({ rt, ...(content === undefined ? {} : { content }), ensure: ensureContent }))
   ctx.tools.register(makeRebuildTool(rt))
   ctx.tools.register(makeExportTool(rt))
   ctx.tools.register(makeResolveTool(rt, content, { urlFreshness: config.urlFreshness === true }))
@@ -247,12 +260,6 @@ export function apply(ctx: Context, config: Config): void {
   }
   for (const tool of makeCapabilityTools(capabilitySources)) ctx.tools.register(tool)
   if (content !== undefined) {
-    ctx.tools.register(makeFindTool(content, ensureContent, roots, config.allowCrossWorkspaceSessions, {
-      rt,
-      scope,
-      budgetChars,
-      ...(config.rerankCommand === undefined ? {} : { rerankCommand: config.rerankCommand }),
-    }))
     ctx.tools.register(makeReindexTool(content, ensureContent))
     // Symbol data layer (P1-2): outline/symbol/repo_map are read-only views over
     // the additive symbols table and share the same scope + budget rules.

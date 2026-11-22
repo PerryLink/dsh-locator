@@ -145,6 +145,7 @@ export function isOwnExportDatabase(sqlite: SqliteModuleLike, target: string): b
 /** Build the locator_export tool. */
 export function makeExportTool(rt: LocatorRuntime) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_export',
     description: [
       'Export the local file index as a read-only SQLite database (dsh-locator).',

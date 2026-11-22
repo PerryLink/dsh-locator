@@ -348,6 +348,7 @@ export function makeSearchTool(rt: LocatorRuntime, options: SearchToolOptions = 
   const scopeRules = options.scope
   const budgetChars = options.budgetChars ?? DEFAULT_OUTPUT_BUDGET_CHARS
   return defineTool({
+    deferLoading: true,
     name: 'locator_search',
     description: SEARCH_DESCRIPTION,
     parameters: {
@@ -945,6 +946,7 @@ function symbolFileRef(path: string): string {
 /** Build locator_outline: every stored symbol for one indexed file. */
 export function makeOutlineTool(content: ContentIndex, ensure?: () => void, roots: readonly string[] = [], scope?: Scope, budgetChars = DEFAULT_OUTPUT_BUDGET_CHARS) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_outline',
     description: [
       'List the code symbols stored for one indexed file (dsh-locator): functions, classes, methods, types, Markdown headings, in declaration order with 1-based lines.',
@@ -1046,6 +1048,7 @@ export function makeOutlineTool(content: ContentIndex, ensure?: () => void, root
 /** Build locator_symbol: find declarations by name across the index. */
 export function makeSymbolTool(content: ContentIndex, ensure?: () => void, scope?: Scope, budgetChars = DEFAULT_OUTPUT_BUDGET_CHARS) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_symbol',
     description: [
       'Find code declarations by symbol name across the local index (dsh-locator): functions, methods, classes, types, headings. Exact names rank before prefix matches, then substrings.',
@@ -1116,6 +1119,7 @@ export function makeSymbolTool(content: ContentIndex, ensure?: () => void, scope
 /** Build locator_repo_map: a token-budgeted repository structure digest. */
 export function makeRepoMapTool(content: ContentIndex, ensure?: () => void, roots: readonly string[] = [], scope?: Scope, budgetChars = DEFAULT_OUTPUT_BUDGET_CHARS) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_repo_map',
     description: [
       'Return a compact repository map from the local index (dsh-locator): the most structural files with their declaration lists, cut to an approximate token budget (characters / 4).',
@@ -1215,6 +1219,7 @@ export function makeRepoMapTool(content: ContentIndex, ensure?: () => void, root
 /** Build the locator_status tool. */
 export function makeStatusTool(rt: LocatorRuntime, content?: ContentIndex, scope?: Scope) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_status',
     description: [
       'Report the local file index behind locator_search (dsh-locator): roots, entry counts, whether the filesystem watcher is active, the state directory and the engine binary.',
@@ -1522,6 +1527,7 @@ const EMPTY_STATUS_SCOPE = new Scope({ notSearchable: [], notReadable: [], notIn
 /** Build the locator_rebuild tool. */
 export function makeRebuildTool(rt: LocatorRuntime) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_rebuild',
     description: [
       'Rebuild the local file index from scratch (dsh-locator). Runs in the background; locator_search keeps answering from the old index until the new one is ready.',

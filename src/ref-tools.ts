@@ -442,6 +442,7 @@ function callerOf(exec: { agent?: { session?: { id?: string; header?: { cwd?: st
 /** Build the locator_resolve tool. */
 export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex, options: ResolveToolOptions = {}) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_resolve',
     description: [
       'Resolve one dsh-locator evidence ref into its metadata (provenance, hash, freshness, permissions, lifecycle status) and, optionally, a bounded excerpt.',
@@ -998,6 +999,7 @@ async function citationDetail(
 /** Build the locator_cite tool. */
 export function makeCiteTool(options: CiteToolOptions = {}) {
   return defineTool({
+    deferLoading: true,
     name: 'locator_cite',
     description: [
       'Render citations for dsh-locator evidence refs. Use it when the answer must point at a file or a session message with a stable reference instead of a bare path.',

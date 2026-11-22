@@ -597,6 +597,7 @@ export function makeFindTool(
 ) {
   const modeLimit = options.rt === undefined ? 100 : Math.max(1, Math.trunc(options.rt.config.maxResults))
   return defineTool({
+    deferLoading: true,
     name: 'locator_find',
     description: [
       'Search the **contents** of text files and DSH session messages (dsh-locator).',
