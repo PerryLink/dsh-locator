@@ -6,8 +6,14 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-const raw = execFileSync(npm, ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+// Let the OS shell resolve npm: on Windows the executable is npm.cmd, and
+// spawning a .cmd directly from Node is EINVAL without a shell.
+const raw = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+  cwd: root,
+  encoding: 'utf8',
+  shell: true,
+  stdio: ['ignore', 'pipe', 'pipe'],
+})
 const parsed = JSON.parse(raw)
 const entry = Array.isArray(parsed) ? parsed[0] : parsed
 const files = new Set((entry.files ?? []).map(file => String(file.path)))
