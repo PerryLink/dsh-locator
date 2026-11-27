@@ -141,7 +141,13 @@ function makeFixture(options: {
 
 /** Run the doctor and return the raw process result. */
 function runDoctor(args: string[]) {
-  const result = spawnSync(process.execPath, [doctorPath, ...args], { encoding: 'utf8', timeout: 90_000 })
+  const result = spawnSync(process.execPath, [doctorPath, ...args], {
+    encoding: 'utf8',
+    timeout: 90_000,
+    // Node 22 prints an ExperimentalWarning for node:sqlite on stderr; the
+    // doctor contract is about its own output, not the runtime banner.
+    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+  })
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 

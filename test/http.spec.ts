@@ -7,7 +7,7 @@
  */
 
 import { Readable } from 'node:stream'
-import { mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -1271,7 +1271,10 @@ describe('/v1 read', () => {
     const body = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: file }))).json()
     expect(body).toMatchObject({ apiVersion: '2026-11', ok: true, tool: 'locator_read' })
     const items = body.items as Array<{ path?: string; excerpt?: string; kind?: string }>
-    expect(items[0]?.path).toBe(file)
+    const canonical = (value: string): string => {
+      try { return realpathSync.native(value) } catch { return realpathSync(value) }
+    }
+    expect(items[0]?.path).toBe(canonical(file))
     expect(items[0]?.excerpt).toContain('hello line')
   })
 
