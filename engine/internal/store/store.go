@@ -10,6 +10,7 @@ import (
 
 	"github.com/PerryLink/dsh-locator/engine/internal/index"
 	"github.com/PerryLink/dsh-locator/engine/internal/scan"
+	"github.com/PerryLink/dsh-locator/engine/internal/statefs"
 )
 
 // SnapshotName and MetaName are the two files in a state directory.
@@ -18,17 +19,48 @@ const (
 	MetaName     = "meta.json"
 )
 
+// IndexStats are the full totals of the index a meta file describes. They are
+// computed from the live index at save time, so a meta that survived a restart
+// (or was rebuilt from a snapshot) always describes the whole index, unlike
+// Stats which only describes the most recent scan/refresh.
+type IndexStats struct {
+	Entries int64 `json:"entries"`
+	Files   int64 `json:"files"`
+	Dirs    int64 `json:"dirs"`
+	Roots   int   `json:"roots"`
+}
+
+// RefreshInfo describes the scan/refresh whose statistics are in Meta.Stats.
+// Keeping the mode and timestamp next to the numbers removes the historical
+// ambiguity where "stats" looked like full index totals after a restart.
+type RefreshInfo struct {
+	At    time.Time  `json:"at"`
+	Mode  string     `json:"mode"`
+	Stats scan.Stats `json:"stats"`
+}
+
 // Meta describes how a snapshot was built.
 type Meta struct {
-	Version  string     `json:"version"`
-	Roots    []string   `json:"roots"`
-	Excludes []string   `json:"excludes"`
-	BuiltAt  time.Time  `json:"builtAt"`
-	Platform string     `json:"platform"`
-	Stats    scan.Stats `json:"stats"`
+	Version  string    `json:"version"`
+	Roots    []string  `json:"roots"`
+	Excludes []string  `json:"excludes"`
+	BuiltAt  time.Time `json:"builtAt"`
+	Platform string    `json:"platform"`
+	// Stats is the statistics of the last scan/refresh (historical field name;
+	// see LastRefresh for the mode and timestamp and IndexStats for the totals).
+	Stats scan.Stats `json:"stats"`
+	// IndexStats are the totals of the whole index this meta describes. Older
+	// engines did not write it; LoadWithInfo derives it from the snapshot.
+	IndexStats *IndexStats `json:"indexStats,omitempty"`
+	// LastRefresh describes the scan/refresh that produced Stats.
+	LastRefresh *RefreshInfo `json:"lastRefresh,omitempty"`
 	// Incomplete marks a snapshot written while the initial scan was still
 	// running; the next start must scan again.
 	Incomplete bool `json:"incomplete,omitempty"`
+	// Rebuilt reports that meta.json was missing or corrupt and LoadWithInfo
+	// reconstructed this value from the snapshot instead of rescanning.
+	// It is never serialized.
+	Rebuilt bool `json:"-"`
 }
 
 // Paths returns the snapshot and meta file names inside dir.
@@ -58,21 +90,64 @@ func Load(dir string) (*index.Index, Meta, error) {
 
 // LoadWithInfo is Load plus the snapshot header/journal facts. The index loader
 // replays index.journal transparently when the base is a v2 snapshot.
+//
+// A missing or corrupt meta.json no longer fails the load: the snapshot itself
+// is authoritative for the entries, roots and build time, so the metadata is
+// reconstructed from it (Meta.Rebuilt is set) instead of forcing a full rescan.
+// A missing or corrupt snapshot is still an error.
 func LoadWithInfo(dir string) (*index.Index, Meta, index.SnapshotInfo, error) {
 	snap, metaPath := Paths(dir)
 	ix, info, err := index.LoadWithInfo(snap)
 	if err != nil {
 		return nil, Meta{}, info, err
 	}
+	if m, err := readMeta(metaPath); err == nil {
+		return ix, m, info, nil
+	}
+	return ix, MetaFromSnapshot(ix, info), info, nil
+}
+
+// readMeta parses one meta.json, returning an error when it is missing,
+// unreadable or not valid JSON.
+func readMeta(path string) (Meta, error) {
 	var m Meta
-	b, err := os.ReadFile(metaPath)
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, Meta{}, info, err
+		return m, err
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, Meta{}, info, err
+		return m, err
 	}
-	return ix, m, info, nil
+	return m, nil
+}
+
+// MetaFromSnapshot reconstructs the metadata of a loaded snapshot. It is used
+// when meta.json is missing/corrupt: every value either comes from the snapshot
+// header or is derived from the loaded index, so no filesystem rescan happens.
+// The caller should persist the rebuilt meta on its next save.
+func MetaFromSnapshot(ix *index.Index, info index.SnapshotInfo) Meta {
+	st := ix.Stats()
+	built := time.Time{}
+	if info.Built > 0 {
+		built = time.Unix(0, info.Built)
+	}
+	m := Meta{
+		Roots:      ix.Roots(),
+		BuiltAt:    built,
+		Platform:   runtime.GOOS + "/" + runtime.GOARCH,
+		IndexStats: indexStatsOf(ix),
+		Rebuilt:    true,
+	}
+	m.Stats = scan.Stats{Entries: int64(st.Entries), Files: int64(st.Files), Dirs: int64(st.Dirs), Roots: st.Roots}
+	m.LastRefresh = &RefreshInfo{At: built, Mode: "snapshot", Stats: m.Stats}
+	m.Incomplete = false
+	return m
+}
+
+// indexStatsOf snapshots the full totals of ix.
+func indexStatsOf(ix *index.Index) *IndexStats {
+	st := ix.Stats()
+	return &IndexStats{Entries: int64(st.Entries), Files: int64(st.Files), Dirs: int64(st.Dirs), Roots: st.Roots}
 }
 
 // SaveOptions controls one snapshot save.
@@ -112,6 +187,7 @@ func Save(dir string, ix *index.Index, m Meta) error {
 func SaveWith(dir string, ix *index.Index, m Meta, opt SaveOptions) (SaveResult, error) {
 	var res SaveResult
 	start := time.Now()
+	builtAtGiven := !m.BuiltAt.IsZero()
 	if m.Platform == "" {
 		m.Platform = runtime.GOOS + "/" + runtime.GOARCH
 	}
@@ -119,7 +195,7 @@ func SaveWith(dir string, ix *index.Index, m Meta, opt SaveOptions) (SaveResult,
 		m.BuiltAt = time.Now()
 	}
 	m.Roots = ix.Roots()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := statefs.MkdirAll(dir); err != nil {
 		return res, err
 	}
 	snap, metaPath := Paths(dir)
@@ -156,13 +232,26 @@ func SaveWith(dir string, ix *index.Index, m Meta, opt SaveOptions) (SaveResult,
 			JournalEntries: jentries,
 		}
 	}
+	// The totals come from the index that is being written, so even a meta kept
+	// from an earlier run describes the whole index rather than one scan.
+	m.IndexStats = indexStatsOf(ix)
+	if m.LastRefresh == nil {
+		// Legacy callers only fill Stats/BuiltAt; record that provenance once.
+		// A caller-supplied BuiltAt means a scan/refresh produced Stats; the
+		// zero-timestamp case is a plain snapshot save.
+		mode := "scan"
+		if !builtAtGiven {
+			mode = "snapshot"
+		}
+		m.LastRefresh = &RefreshInfo{At: m.BuiltAt, Mode: mode, Stats: m.Stats}
+	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return res, err
 	}
 	b = append(b, '\n')
 	tmp := metaPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := statefs.WriteFile(tmp, b); err != nil {
 		return res, err
 	}
 	if err := os.Rename(tmp, metaPath); err != nil {

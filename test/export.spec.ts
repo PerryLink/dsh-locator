@@ -54,6 +54,7 @@ describe.skipIf(!existsSync(binary))('locator_export', () => {
     } as unknown as Context
     const config: Config = {
       enabled: true,
+      legacyTools: true,
       roots: [root],
       excludes: ['node_modules'],
       watch: true,

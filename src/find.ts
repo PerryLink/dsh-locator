@@ -311,6 +311,13 @@ export interface ContentRequest {
   pathPrefix?: string
   /** File documents only: used by the public HTTP API, which has no caller session identity. */
   filesOnly?: boolean
+  /**
+   * Include archived sessions in this query (0.23). Archived session logs stay
+   * indexed; the default false hides them from ordinary results. The config
+   * default (`contentIncludeArchived`) is ORed in by the content layer, so this
+   * flag only widens one query.
+   */
+  includeArchived?: boolean
   /** Hit detail: compact skips evidence enrichment entirely (default full). */
   detail?: HitDetail
   /** Evidence-bearing rows in full mode (default 10). */
@@ -463,6 +470,7 @@ export async function runContentSearchRequest(
     ...(request.count === undefined ? {} : { count: request.count }),
     ...(request.countLimit === undefined ? {} : { countLimit: request.countLimit }),
     ...(request.filesOnly === true ? { excludeSessions: true } : {}),
+    ...(request.includeArchived === true ? { includeArchived: true } : {}),
     ...(offset === 0 ? {} : { offset }),
   }
   const workspacePathPrefix = request.pathPrefix !== undefined && request.pathPrefix !== ''
@@ -606,7 +614,7 @@ export function makeFindTool(
       '',
       'Modes: content (default) searches bodies; names searches the file-name index with the Everything-style query language; count only counts body matches. contextLines adds surrounding source lines to file hits. Every result reports totalCount, truncated, nextOffset and a budget block so a caller can page or narrow instead of guessing.',
       '',
-      'Content is substring search over an FTS5 trigram index: every term must be at least 3 characters. A 2-character query (ai, js, 索引) falls back to a bounded substring scan when the plugin enables contentShortQueryFallback (default on) and returns a shortQueryFallback marker; otherwise it is rejected with content-query-too-short instead of scanning the whole corpus. Text files are capped by contentMaxFileBytes; session logs are decompressed from $DSH_HOME/sessions.',
+      'Content is substring search over an FTS5 trigram index. Terms of 3+ characters drive the matcher; a 2-character term mixed with longer terms is enforced as a post-filter over the matches, and a 1-character term is dropped with a terms-dropped warning when a longer term exists. Only an all-short query (ai, js, 索引) is rejected with content-query-too-short, or answered by the bounded substring fallback when the plugin enables contentShortQueryFallback (default on) with a shortQueryFallback marker. Text files are capped by contentMaxFileBytes; session logs are decompressed from $DSH_HOME/sessions.',
       '',
       'By default it searches the caller workspace: the current session for session hits and files under the caller cwd when that cwd is inside an indexed root. If the cwd is outside every indexed root, file hits cover the indexed roots (there is no workspace subset to restrict to); pass scope "all" to search every indexed file (session hits still stay limited to the caller workspace unless the operator enables cross-workspace session reads). Every returned row carries a citable ref; the first evidenceLimit rows (default 10) also carry provenance, freshness and permissions, and hashing is opt-in via includeHash.',
     ].join('\n'),

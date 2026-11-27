@@ -1,4 +1,4 @@
-import { realpathSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { chmodSync, realpathSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -10,6 +10,7 @@ import {
   autoMemoryLimitMB,
   engineResourceFields,
   engineServeArgs,
+  prepareEngineBinary,
 } from '../src/runtime.ts'
 
 const binary = join(import.meta.dirname, '..', 'bin', `${process.platform}-${process.arch === 'x64' ? 'x64' : process.arch}`, process.platform === 'win32' ? 'indexd.exe' : 'indexd')
@@ -265,6 +266,107 @@ describe('engine status cache', () => {
     })
     expect(fields).not.toHaveProperty('version')
     expect(engineResourceFields(undefined)).toEqual({})
+  })
+})
+
+describe('windows engine copy', () => {
+  /** A throwaway package binary fixture. */
+  function fixture(sourceSize = 1024): { source: string; state: string } {
+    const base = mkdtempSync(join(tmpdir(), 'locator-engine-copy-'))
+    cleanups.push(() => rmSync(base, { recursive: true, force: true }))
+    const source = join(base, 'package', 'indexd.exe')
+    mkdirSync(join(base, 'package'))
+    writeFileSync(source, 'MZ'.repeat(sourceSize / 2))
+    return { source, state: join(base, 'state') }
+  }
+
+  it('is a no-op outside Windows', () => {
+    const { source, state } = fixture()
+    const prepared = prepareEngineBinary(source, state, '0.23.0', 'linux')
+    expect(prepared.path).toBe(source)
+    expect(prepared.copied).toBe(false)
+    expect(prepared.cleaned).toEqual([])
+    expect(prepared.warning).toBeUndefined()
+    expect(existsSync(join(state, 'engine'))).toBe(false)
+  })
+
+  it('copies the binary below the state directory and prunes old versions', () => {
+    const { source, state } = fixture()
+    const oldCopy = join(state, 'engine', '0.22.3', 'indexd.exe')
+    mkdirSync(join(state, 'engine', '0.22.3'), { recursive: true })
+    writeFileSync(oldCopy, 'old')
+
+    const prepared = prepareEngineBinary(source, state, '0.23.0', 'win32')
+    const expected = join(state, 'engine', '0.23.0', 'indexd.exe')
+    expect(prepared.path).toBe(expected)
+    expect(prepared.copied).toBe(true)
+    expect(existsSync(expected)).toBe(true)
+    expect(readFileSync(expected)).toEqual(readFileSync(source))
+    // The previous package version's copy is gone.
+    expect(prepared.cleaned).toContain(join(state, 'engine', '0.22.3'))
+    expect(existsSync(oldCopy)).toBe(false)
+    if (process.platform !== 'win32') expect(statSync(expected).mode & 0o777).toBe(0o755)
+  })
+
+  it('reuses a fresh copy and recopies when the package binary changes', () => {
+    const { source, state } = fixture()
+    const first = prepareEngineBinary(source, state, '0.23.0', 'win32')
+    expect(first.copied).toBe(true)
+    const second = prepareEngineBinary(source, state, '0.23.0', 'win32')
+    expect(second.path).toBe(first.path)
+    expect(second.copied).toBe(false)
+    // A longer package binary means an in-place upgrade; the copy is refreshed.
+    writeFileSync(source, 'MZ'.repeat(4096))
+    const third = prepareEngineBinary(source, state, '0.23.0', 'win32')
+    expect(third.copied).toBe(true)
+    expect(readFileSync(third.path)).toEqual(readFileSync(source))
+  })
+
+  it('keeps a hostile version from escaping the engine directory', () => {
+    const { source, state } = fixture()
+    const prepared = prepareEngineBinary(source, state, '..\\..\\evil', 'win32')
+    expect(prepared.path.startsWith(join(state, 'engine') + '/')).toBe(true)
+    expect(prepared.path).not.toContain('..')
+  })
+
+  it('falls back to the package binary when the source is missing', () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-engine-copy-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }))
+    const missing = join(state, 'missing-indexd.exe')
+    const prepared = prepareEngineBinary(missing, state, '0.23.0', 'win32')
+    expect(prepared.path).toBe(missing)
+    expect(prepared.warning).toMatch(/cannot copy the engine/)
+  })
+})
+
+describe.skipIf(process.platform === 'win32')('state directory permissions at startup', () => {
+  it('tightens an existing state directory before the engine starts', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'locator-perm-state-'))
+    cleanups.push(() => rmSync(state, { recursive: true, force: true }))
+    writeFileSync(join(state, 'meta.json'), '{}')
+    chmodSync(join(state, 'meta.json'), 0o644)
+    chmodSync(state, 0o755)
+
+    const rt = new LocatorRuntime(config(), [], state, join(tmpdir(), 'missing-indexd'), process.cwd())
+    rt.start()
+    await expect(rt.waitReady()).rejects.toThrow(/ENOENT|locator engine/)
+    expect(rt.status.permissions?.fixed).toContain('meta.json')
+    expect(statSync(join(state, 'meta.json')).mode & 0o777).toBe(0o600)
+    expect(statSync(state).mode & 0o777).toBe(0o700)
+    await rt.stop()
+  })
+})
+
+describe('read-only engine status', () => {
+  it('copies the state-directory lock fields off the status payload', async () => {
+    const { rt } = fakeRpcRuntime()
+    Object.assign(rt, {
+      request: async (method: string) => method === 'status' ? statusPayload({ readOnly: true, lockPid: 4242 }) : {},
+    })
+    const engine = await rt.engineStatus()
+    expect(engine).toMatchObject({ readOnly: true, lockPid: 4242 })
+    // They are control fields, not numeric resource metrics.
+    expect(engineResourceFields(engine)).not.toHaveProperty('lockPid')
   })
 })
 

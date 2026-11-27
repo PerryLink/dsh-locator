@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="520" viewBox="0 0 1440 520" role="img" aria-labelledby="t d">
+<title id="t">dsh-locator 0.23.0 overview</title>
+<desc id="d">Search names when you know the name, bodies when you know the phrase.</desc>
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#12111f"/><stop offset="1" stop-color="#1a1830"/>
+  </linearGradient>
+  <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#a99bff"/><stop offset="1" stop-color="#57e0b4"/>
+  </linearGradient>
+</defs>
+<rect width="1440" height="520" rx="28" fill="url(#bg)"/>
+<rect x="1" y="1" width="1438" height="518" rx="27" fill="none" stroke="#37335c"/>
+<g font-family="'Helvetica Neue', 'Segoe UI', 'Noto Sans CJK SC', 'Microsoft YaHei', Arial, sans-serif">
+  <rect x="64" y="48" width="430" height="34" rx="17" fill="#2b2750"/>
+  <text x="84" y="70" font-size="15" fill="#a99bff" letter-spacing="0.4">DeepSeek Harness plugin · whole-disk file search</text>
+  <text x="64" y="150" font-size="66" font-weight="700" fill="#f5f3ff" letter-spacing="-1">dsh-locator</text>
+  <text x="64" y="220" font-size="28" font-weight="700" fill="#f5f3ff">Search names when you know the name,</text>
+  <text x="64" y="260" font-size="28" font-weight="700" fill="#f5f3ff">bodies when you know the phrase.</text>
+  <text x="66" y="330" font-size="19" fill="#b6b2d4">Name index 480k entries · 35 MB snapshot</text>
+  <text x="66" y="362" font-size="19" fill="#b6b2d4">SQLite FTS5 bodies + DSH session messages</text>
+  <text x="66" y="394" font-size="19" fill="#b6b2d4">Panel Ctrl+Shift+F · jump back to the conversation</text>
+  <rect x="64" y="432" width="300" height="3" rx="1.5" fill="url(#accent)"/>
+  <text x="66" y="466" font-size="15" fill="#b6b2d4">3+1 agent tools · 2 capability adapters · one query language</text>
+  <text x="66" y="492" font-size="15" fill="#b6b2d4">Apache-2.0 · PerryLink DSH plugin family</text>
+  <rect x="740" y="44" width="636" height="196" rx="20" fill="#201e3a" stroke="#37335c"/>
+  <text x="768" y="82" font-size="18" font-weight="700" fill="#f5f3ff">Name index · 0.21.1</text>
+  <text x="1348" y="82" text-anchor="end" font-size="13" fill="#57e0b4">measured</text>
+  <text x="768" y="120" font-size="14" fill="#b6b2d4">func</text><text x="960" y="120" font-size="14" text-anchor="end" fill="#c6bcff" font-weight="700">10.7 ms</text><text x="1160" y="120" font-size="13" text-anchor="end" fill="#b6b2d4">was 13 ms</text>
+  <text x="768" y="150" font-size="14" fill="#b6b2d4">go</text><text x="960" y="150" font-size="14" text-anchor="end" fill="#c6bcff" font-weight="700">6.0 ms</text><text x="1160" y="150" font-size="13" text-anchor="end" fill="#b6b2d4">was 16 ms</text>
+  <text x="768" y="180" font-size="14" fill="#b6b2d4">config.*test</text><text x="960" y="180" font-size="14" text-anchor="end" fill="#c6bcff" font-weight="700">~11 ms</text><text x="1160" y="180" font-size="13" text-anchor="end" fill="#b6b2d4">was ~102 ms</text>
+  <text x="768" y="214" font-size="13" fill="#b6b2d4">0.48M entries · cold scan 1.4s · snapshot 35MB</text>
+  <rect x="740" y="262" width="636" height="214" rx="20" fill="#201e3a" stroke="#37335c"/>
+  <text x="768" y="298" font-size="18" font-weight="700" fill="#f5f3ff">3+1 agent surface</text>
+  <text x="1348" y="298" text-anchor="end" font-size="13" fill="#b6b2d4">apiVersion 2026-11 · declarations 4,136B</text>
+  <rect x="762" y="316" width="592" height="28" rx="8" fill="#2b2750"/>
+  <text x="776" y="335" font-size="14" font-weight="700" fill="#c6bcff">locator_find</text>
+  <text x="1000" y="335" font-size="13" fill="#b6b2d4">auto · name · body · symbol</text>
+  <rect x="762" y="352" width="592" height="28" rx="8" fill="#2b2750"/>
+  <text x="776" y="371" font-size="14" font-weight="700" fill="#c6bcff">locator_read</text>
+  <text x="1000" y="371" font-size="13" fill="#b6b2d4">refs · excerpt · quote</text>
+  <rect x="762" y="388" width="592" height="28" rx="8" fill="#2b2750"/>
+  <text x="776" y="407" font-size="14" font-weight="700" fill="#c6bcff">locator_status</text>
+  <text x="1000" y="407" font-size="13" fill="#b6b2d4">brief · full</text>
+  <rect x="762" y="424" width="592" height="28" rx="8" fill="#2b2750"/>
+  <text x="776" y="443" font-size="14" font-weight="700" fill="#c6bcff">locator_admin</text>
+  <text x="1000" y="443" font-size="13" fill="#b6b2d4">deferred · maintenance</text>
+  <rect x="762" y="466" width="120" height="2" fill="url(#accent)"/>
+</g>
+</svg>

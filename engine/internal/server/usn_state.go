@@ -6,6 +6,11 @@ import (
 )
 
 func (s *Server) saveUSNState(st scan.USNState) {
+	// A read-only instance must not write the resumable cursor either: the owning
+	// engine advanced it and this scan's view could move it backwards.
+	if s.isReadOnly() {
+		return
+	}
 	_ = usnstate.Save(s.opt.StateDir, st)
 }
 
@@ -14,5 +19,8 @@ func (s *Server) loadUSNStates() []scan.USNState {
 }
 
 func (s *Server) clearUSNStates() {
+	if s.isReadOnly() {
+		return
+	}
 	_ = usnstate.Clear(s.opt.StateDir)
 }

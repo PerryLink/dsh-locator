@@ -1,0 +1,63 @@
+# dsh-locator
+
+> Whole-disk, millisecond file and content search for DeepSeek Harness with its own cross-platform index: no Everything, no `es.exe`. Windows, macOS and Linux. Read-only: the plugin never modifies, moves or deletes indexed files.
+
+Current version: 0.23.0 (2026-11-27). License: Apache-2.0. Repository: https://github.com/PerryLink/dsh-locator
+
+## What it is
+
+- A DSH plugin with a native Go name index (snapshot + watcher) and a host-side SQLite FTS5 content index over file bodies, extracted documents (PDF/DOCX/XLSX/PPTX/EPUB) and DSH session messages.
+- One query language for file names (Everything-style `ext:`/`size:`/`dm:`/`path:` filters) and one envelope for agents.
+- A Web panel (`Ctrl+Shift+F`), a read-only CLI (`dsh-locator`) and a read-only MCP stdio server (`dsh-locator-mcp`).
+
+## Default agent surface (0.23.0): 3 + 1
+
+- `locator_find` — the single search entry point: `mode auto|name|body|symbol`, `kinds[]`, `where{}`, `scope`, `cursor`, `detail`, `count`, `includeArchived`. `mode: 'auto'` merges name/body/symbol sources and dedupes by identity.
+- `locator_read` — read a ref / `refs[]` / path as `meta|excerpt|quote`, with `line`, `window`, `maxBytes`.
+- `locator_status` — index/content/scope status; brief by default (includes engine warnings).
+- `locator_admin` — deferred maintenance (`rebuild`, `reindex`, `export`).
+- Pre-0.22 tool names (`locator_search`, `locator_rebuild`, `locator_resolve`, ...) are **not registered** unless the profile sets `legacyTools: true`.
+
+## API contract
+
+All agent answers use the `apiVersion: "2026-11"` envelope: `{apiVersion, ok, tool, items, page{limit,returned,more,nextCursor}, counts, coverage{indexing,indexTruncated,notes}, budget, timing}`; failures carry `error{code,message,retryable,remediation,nextTools}` with 12 closed codes.
+
+- Opaque cursors: v2 (per-source offsets) for `auto`, v1 for single-source modes.
+- Defaults: `limit` 10 (max 50), `maxChars` 6000, `detail` compact, `scope` workspace (HTTP: roots).
+- `notReadable` is a hard read fence: `locator_read`/`locator_resolve`/`locator_cite` answer `scope-denied` without returning bytes.
+
+## HTTP
+
+`POST /dsh-locator/v1/find`, `/v1/read`, `/v1/status` answer the same envelope behind the host trust fence. `/v1` is files-only (session rows hidden, only file refs readable). `/dsh-locator/search` is unchanged; `/dsh-locator/content` and `/content/rebuild` are deprecated in 0.23.0 and removed in 0.24.0.
+
+## CLI and MCP
+
+- `npx dsh-locator find "query" --api=2026-11` (also `read`, `status`); the legacy CLI (`search`/`find`/`status`/`resolve`/`cite`) remains the default.
+- `npx dsh-locator-mcp --api=2026-11` exposes find/read/status over MCP; the default legacy face (5 tools) stays frozen. MCP protocol `2025-11-25` (and older) supported. `locator_admin` is never exposed.
+- Both are genuinely read-only: engine state is copied to a temporary directory, content databases are opened immutable.
+
+## Install
+
+```sh
+dsh plugin --profile web add dsh-locator@0.23.0
+```
+
+Release day: pin the exact version — `@latest` may resolve to the previous release under `minimumReleaseAge` policies. GitHub Releases attach the tarball and `sha256sums.txt` for offline installs. The index is local: no network calls, no telemetry, no uploads.
+
+## Documentation
+
+- [Install and verify](docs/install.md)
+- [Upgrade, profile reset, Windows lock](docs/upgrade.md)
+- [Configuration reference](docs/config.md)
+- [Agent tool contract](docs/agent.md)
+- [CLI and MCP](docs/cli-mcp.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Performance and resources](docs/performance.md)
+- [Changelog](CHANGELOG.md)
+
+## Key defaults
+
+- State directory: platform cache dir (`%LOCALAPPDATA%\dsh-locator`, `~/Library/Application Support/dsh-locator`, `~/.cache/dsh-locator`); created `0700`, files `0600` on POSIX.
+- Content index: lazy, 1.6 GB body budget / 200k files / 1000 sessions; first full build ~4–5 minutes on a large home directory.
+- Excluded by default: `node_modules`, `.git`, virtualenvs and toolchain caches.
+- Security fences: `notIndexed` (credentials), `notSearchable`, `notReadable` (hard read fence).

@@ -53,6 +53,32 @@ const TOOL = 'locator_admin'
 export const ADMIN_ACTIONS = ['rebuild', 'reindex', 'export'] as const
 type AdminAction = (typeof ADMIN_ACTIONS)[number]
 
+/** Declared parameters (action excluded); unknown keys are never routed. */
+const ADMIN_PARAMS = ['roots', 'excludes', 'full', 'path', 'overwrite', 'allowOutsideStateDir', 'pageSize'] as const
+
+/** Parameters each action consumes; every other provided parameter is reported as ignored. */
+const APPLICABLE_PARAMS: Readonly<Record<AdminAction, readonly string[]>> = {
+  rebuild: ['roots', 'excludes'],
+  reindex: ['full'],
+  export: ['path', 'overwrite', 'allowOutsideStateDir', 'pageSize'],
+}
+
+/** How to verify/act after a successful action (the tool never polls by itself). */
+const ACTION_HINTS: Readonly<Record<AdminAction, { hint: string; nextTools: string[] }>> = {
+  rebuild: {
+    hint: 'Poll locator_status (detail:"brief") until scanning is false; searches keep using the old index meanwhile.',
+    nextTools: ['locator_status'],
+  },
+  reindex: {
+    hint: 'Poll locator_status until content.building is false; searches keep answering while it runs.',
+    nextTools: ['locator_status'],
+  },
+  export: {
+    hint: 'The result is a read-only SQLite snapshot on disk; open result.path with any SQLite client. No status polling is needed.',
+    nextTools: [],
+  },
+}
+
 /** Wiring for the admin tool; the plugin passes its runtime/content/ensure hook. */
 export interface AgentAdminToolOptions {
   rt: LocatorRuntime
@@ -79,6 +105,12 @@ const ADMIN_OUTPUT = {
   properties: {
     ...AGENT_SUCCESS_BASE_SCHEMA.properties,
     action: { type: 'string', enum: ADMIN_ACTIONS },
+    /** Parameters that the chosen action does not consume (they were not applied). */
+    ignored: { type: 'array', items: { type: 'string' } },
+    /** One actionable sentence: how to track/verify the action. */
+    hint: { type: 'string' },
+    /** Tools to call next (status tracking). */
+    nextTools: { type: 'array', items: { type: 'string' } },
     result: {
       type: 'object',
       additionalProperties: false,
@@ -181,6 +213,8 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
       'action "reindex": rebuild (full: true) or incrementally refresh the content database behind locator_find content mode. Search keeps working while it runs.',
       'action "export": write a read-only SQLite snapshot of the name index to disk (path/overwrite/allowOutsideStateDir/pageSize). Writes a file and can take tens of seconds on a large index.',
       '',
+      'Parameters the chosen action does not consume are reported in "ignored" and are NOT applied (roots/excludes: rebuild only; full: reindex only; path/overwrite/allowOutsideStateDir/pageSize: export only). On success hint/nextTools say how to track progress with locator_status.',
+      '',
       'Call it only when the user explicitly asks to rescan/rebuild/export, or when locator_status reports a stale or failed index. Never poll these actions: rebuild/reindex run in the background and export writes a file.',
     ].join('\n'),
     parameters: {
@@ -199,6 +233,9 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
         const v = value as {
           ok: boolean
           action?: AdminAction
+          ignored?: string[]
+          hint?: string
+          nextTools?: string[]
           result?: { started?: boolean; full?: boolean; path?: string; rows?: number; bytes?: number; tookMs?: number }
           error?: AgentErrorInfo
         }
@@ -207,16 +244,18 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
           const error = v.error
           return [{ type: 'text', text: 'locator_admin (' + action + ') failed: ' + (error?.code ?? 'internal') + ': ' + (error?.message ?? 'unknown error') + (error?.remediation === undefined ? '' : ' — ' + error.remediation) }]
         }
+        const ignored = v.ignored === undefined || v.ignored.length === 0 ? '' : ' (ignored parameter(s): ' + v.ignored.join(', ') + ')'
+        const tail = (v.hint === undefined ? '' : '\n   → ' + v.hint) + (v.nextTools === undefined || v.nextTools.length === 0 ? '' : '\n   next: ' + v.nextTools.join(', '))
         const result = v.result ?? {}
         if (action === 'export') {
-          return [{ type: 'text', text: 'locator_admin export: ' + String(result.rows ?? 0) + ' row(s) -> ' + (result.path ?? '') + ' (' + formatSize(result.bytes ?? 0) + ', ' + ((result.tookMs ?? 0) / 1000).toFixed(1) + ' s)' }]
+          return [{ type: 'text', text: 'locator_admin export: ' + String(result.rows ?? 0) + ' row(s) -> ' + (result.path ?? '') + ' (' + formatSize(result.bytes ?? 0) + ', ' + ((result.tookMs ?? 0) / 1000).toFixed(1) + ' s)' + ignored + tail }]
         }
         if (action === 'reindex') {
-          if (result.started !== true) return [{ type: 'text', text: 'locator_admin reindex: nothing was started.' }]
-          return [{ type: 'text', text: 'locator_admin reindex: ' + (result.full === true ? 'full' : 'incremental') + ' content rebuild started; searches keep answering while it runs.' }]
+          if (result.started !== true) return [{ type: 'text', text: 'locator_admin reindex: nothing was started.' + ignored }]
+          return [{ type: 'text', text: 'locator_admin reindex: ' + (result.full === true ? 'full' : 'incremental') + ' content rebuild started; searches keep answering while it runs.' + ignored + tail }]
         }
-        if (result.started !== true) return [{ type: 'text', text: 'locator_admin rebuild: nothing was started.' }]
-        return [{ type: 'text', text: 'locator_admin rebuild: started in the background; searches keep using the old index until it finishes.' }]
+        if (result.started !== true) return [{ type: 'text', text: 'locator_admin rebuild: nothing was started.' + ignored }]
+        return [{ type: 'text', text: 'locator_admin rebuild: started in the background; searches keep using the old index until it finishes.' + ignored + tail }]
       },
     },
     deferLoading: true,
@@ -225,6 +264,17 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
       const startedAt = Date.now()
       const timing = makeTiming(startedAt)
       const action: AdminAction = args.action
+      // 0.23.0: a parameter the chosen action does not consume is reported back
+      // instead of being silently dropped, so the model can correct its call.
+      const provided = args as unknown as Record<string, unknown>
+      const applicable = APPLICABLE_PARAMS[action]
+      const ignored = ADMIN_PARAMS.filter(name => !applicable.includes(name) && provided[name] !== undefined)
+      const guidance = ACTION_HINTS[action]
+      const extra = {
+        ...(ignored.length === 0 ? {} : { ignored: [...ignored] }),
+        hint: guidance.hint,
+        ...(guidance.nextTools.length === 0 ? {} : { nextTools: [...guidance.nextTools] }),
+      }
       try {
         if (action === 'rebuild') {
           const value = await rebuildTool.execute({
@@ -232,7 +282,7 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
             ...(args.excludes === undefined ? {} : { excludes: args.excludes }),
           }, exec) as LegacyAdminResult
           if (value.ok !== true) return failed(TOOL, adminErrorOf(value), timing)
-          return succeed(TOOL, adminPayload(action, value), timing)
+          return succeed(TOOL, { ...adminPayload(action, value), ...extra }, timing)
         }
         if (action === 'reindex') {
           if (reindexTool === undefined) {
@@ -245,7 +295,7 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
           }
           const value = await reindexTool.execute({ full: args.full === true }, exec) as LegacyAdminResult
           if (value.ok !== true) return failed(TOOL, adminErrorOf(value), timing)
-          return succeed(TOOL, adminPayload(action, value), timing)
+          return succeed(TOOL, { ...adminPayload(action, value), ...extra }, timing)
         }
         const value = await exportTool.execute({
           ...(args.path === undefined ? {} : { path: args.path }),
@@ -254,7 +304,7 @@ export function makeAgentAdminTool(options: AgentAdminToolOptions) {
           ...(args.pageSize === undefined ? {} : { pageSize: args.pageSize }),
         }, exec) as LegacyAdminResult
         if (value.ok !== true) return failed(TOOL, adminErrorOf(value), timing)
-        return succeed(TOOL, adminPayload(action, value), timing)
+        return succeed(TOOL, { ...adminPayload(action, value), ...extra }, timing)
       } catch (error) {
         return fail(AGENT_ERROR_CODES.internal, error instanceof Error ? error.message : String(error), { tool: TOOL, timing })
       }

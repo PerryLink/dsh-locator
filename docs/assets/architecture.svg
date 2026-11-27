@@ -45,7 +45,7 @@
   <text class="title" x="780" y="86">Query engine</text>
   <text class="body" x="780" y="112">parse Everything-style terms</text>
   <text class="body" x="780" y="134">parallel match · bounded top-K</text>
-  <text class="body" x="780" y="156">25–35 ms over 1.2 M entries</text>
+  <text class="body" x="780" y="156">6–11 ms over 0.48 M entries</text>
 
   <path class="arrow" d="M214 133H250"/>
   <path class="arrow" d="M478 133H514"/>
@@ -54,13 +54,13 @@
   <!-- consumers -->
   <rect class="box" x="258" y="254" width="300" height="88"/>
   <text class="title" x="276" y="282">Agent tools (host side)</text>
-  <text class="mono" x="276" y="306">locator_search · locator_status</text>
-  <text class="mono" x="276" y="326">locator_rebuild · locator_export</text>
+  <text class="mono" x="276" y="306">locator_find · locator_read</text>
+  <text class="mono" x="276" y="326">locator_status · locator_admin</text>
 
   <rect class="box" x="590" y="254" width="362" height="88"/>
   <text class="title" x="608" y="282">Web panel · Ctrl+Shift+F</text>
-  <text class="mono" x="608" y="306">POST /dsh-locator/search · status</text>
-  <text class="mono" x="608" y="326">reveal · open · sort · filters · @file</text>
+  <text class="mono" x="608" y="306">POST /dsh-locator/v1/find</text>
+  <text class="mono" x="608" y="326">read · status · reveal · open · @file</text>
 
   <path class="arrow" d="M600 208V246"/>
   <path class="arrow" d="M700 208V246"/>

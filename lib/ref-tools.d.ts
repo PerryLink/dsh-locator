@@ -12,6 +12,7 @@
  */
 import type { ContentIndex } from './content.ts';
 import type { LocatorRuntime } from './runtime.ts';
+import { type Scope } from './scope.ts';
 /** Extra tool-level knobs for locator_resolve (root wiring passes config here). */
 export interface ResolveToolOptions {
     /**
@@ -23,6 +24,12 @@ export interface ResolveToolOptions {
     urlFreshnessTimeoutMs?: number;
     /** Body-prefix cap hashed for URL revalidation (default 65536, at most 1048576). */
     urlFreshnessMaxBytes?: number;
+    /**
+     * Layered ignore rules. When present, a path matching notReadable is refused
+     * before any bytes are read or hashed: the tool answers content-scope-denied
+     * with permissions.read = "denied" and never returns an excerpt/hash.
+     */
+    scope?: Scope;
 }
 /** Dependencies used by locator_cite detail mode. */
 export interface CiteToolOptions {
@@ -30,6 +37,12 @@ export interface CiteToolOptions {
     content?: ContentIndex;
     /** Configured index roots; file content is only read inside them. */
     roots?: readonly string[];
+    /**
+     * Layered ignore rules. When present, a notReadable file ref makes the whole
+     * call fail with content-scope-denied before any bytes are read; the denied
+     * ref is never cited with a body or an exact text.
+     */
+    scope?: Scope;
 }
 /** Build the locator_resolve tool. */
 export declare function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex, options?: ResolveToolOptions): import("@deepseek-ai/dsh-tools").ToolDefinition;

@@ -9,10 +9,15 @@
  * `ORDER BY rank` statement made a SQLite sorter evaluate it for every match
  * (measured 2.7 s for "the" on a 1 GB corpus; 60 ms with this split).
  *
- * Every unbounded-looking path has an explicit budget: queries shorter than a
- * trigram are rejected instead of degrading into a full-table LIKE/GLOB scan,
- * and the whole-word post-filter stops after a fixed number of rows, body bytes
- * or milliseconds and reports a bounded count.
+ * Every unbounded-looking path has an explicit budget and a short term never
+ * degrades a whole query into a full-table LIKE/GLOB scan (0.23, P0-7): when a
+ * query mixes long terms with 2-codepoint terms the trigram matcher serves the
+ * long ones and the short ones are enforced as a JS post-filter over the
+ * candidates; a 1-codepoint term is dropped with a `terms-dropped` warning
+ * when a long term exists; only an all-short query is rejected or answered by
+ * the bounded short-query fallback. The whole-word/post-filter scan stops after
+ * a fixed number of rows, body bytes or milliseconds and reports a bounded
+ * count.
  *
  * 0.21.0 adapts the query layer to content schema v4: docs_meta identifies a
  * document by (path_id, kind_id) and keeps the path text once in the normalized
@@ -119,14 +124,19 @@ export interface ContentSearchOptions {
    */
   rankAdaptive?: boolean
   /**
-   * Bounded LIKE fallback for 2-codepoint queries (0.20.2, P0-2). The trigram
-   * index cannot serve a 2-character term (ai / js / 索引), so such a query is
+   * Bounded LIKE fallback for queries whose every term is too short for the
+   * trigram index (0.20.2, P0-2; narrowed in 0.23). The trigram index cannot
+   * serve a 2-character term (ai / js / 索引), so an all-short query is
    * normally rejected with 'content-query-too-short'. When this is true the
    * query is answered by a bounded scan instead: file-name (stored path) hits
    * first, then body hits under a fixed wall-clock budget, with a
    * 'content-query-short-fallback' warning and shortQueryFallback: true on the
-   * result. One-codepoint queries stay rejected. Default off for direct
-   * embedders; the plugin turns it on from contentShortQueryFallback.
+   * result. This option never gates a mixed query: with at least one long term
+   * the long terms drive FTS/BM25 and 2-codepoint terms are post-filtered in JS
+   * (P0-7). An all-short query containing a 1-codepoint term stays rejected,
+   * because a single character cannot produce a useful bounded page. Default
+   * off for direct embedders; the plugin turns it on from
+   * contentShortQueryFallback.
    */
   shortQueryFallback?: boolean
   /** Drop session documents entirely (the unknown-session fallback). */
@@ -214,8 +224,10 @@ export const DEGRADED_COUNT_LIMIT = 500
 
 /**
  * Shortest term the bounded short-query fallback accepts (0.20.2, P0-2). One
- * codepoint is still rejected: a single character matches so much of a corpus
- * that even a bounded scan is not worth answering.
+ * codepoint is never served: in a mixed query it is dropped (warning
+ * `terms-dropped`) because a single character matches so much of a corpus
+ * that it cannot be a useful AND term, and in an all-short query it stays
+ * 'content-query-too-short'.
  */
 export const SHORT_TERM_MIN = 2
 
@@ -452,16 +464,28 @@ function splitWords(text: string): string[] {
 /** Result of the query-entry checks shared by searchContent and the panel. */
 export interface ContentQueryCheck {
   ok: boolean
-  /** Literal terms for normal mode; one phrase for extended mode. */
+  /**
+   * Literal terms for the trigram matcher (normal mode); one phrase for
+   * extended mode. Short terms that the matcher cannot serve are kept out of
+   * this list: dropped 1-codepoint terms disappear, 2-codepoint terms move to
+   * {@link postFilterTerms}.
+   */
   terms: string[]
+  /**
+   * 2-codepoint terms of a mixed long/short query (0.23, P0-7). They cannot be
+   * served by the trigram index, but the query still has long terms, so they
+   * are enforced as a JS post-filter over the FTS candidates instead of
+   * degrading the whole query to a bounded LIKE scan. Empty for all-long,
+   * all-short and extended queries.
+   */
+  postFilterTerms: string[]
   phrase: boolean
   warnings: string[]
   error?: string
   /**
-   * True when every term is too short for the trigram index but long enough for
-   * the bounded short-query fallback (2 codepoints). Callers that did not opt
-   * into the fallback get an error instead, so this is only set with
-   * `allowShort`.
+   * True when every term is too short for the trigram index but the bounded
+   * short-query fallback can answer the query (2 codepoints, `allowShort`).
+   * Callers that did not opt into the fallback get an error instead.
    */
   short: boolean
 }
@@ -476,33 +500,77 @@ export interface ContentQueryCheckOptions {
   allowShort?: boolean
 }
 
-/**
- * Decide what to do with terms that the trigram tokenizer cannot index.
- * @returns an entry error, or `short: true` when the caller may fall back.
- */
-function shortTermsStatus(terms: readonly string[], allowShort: boolean): { error?: string; short: boolean } {
-  if (!terms.some(term => codePointCount(term) < TRIGRAM_MIN)) return { short: false }
-  // A one-codepoint term stays rejected even with the fallback: it matches so
-  // much of any real corpus that a bounded scan cannot produce a useful page.
-  if (terms.some(term => codePointCount(term) < SHORT_TERM_MIN)) return { short: false, error: 'content-query-too-short' }
-  if (!allowShort) return { short: false, error: 'content-query-too-short' }
-  return { short: true }
+/** How the entry checks grouped one query's whitespace-separated terms. */
+interface ClassifiedTerms {
+  /** Terms the trigram matcher can serve. */
+  terms: string[]
+  /** 2-codepoint terms enforced by a JS post-filter (mixed queries only). */
+  postFilterTerms: string[]
+  warnings: string[]
+  short: boolean
+  error?: string
 }
 
 /**
- * Validate a content query before it reaches SQL.
+ * Group one query's terms by what the trigram tokenizer can do with them
+ * (0.23, P0-7).
+ *
+ * - every term >= 3 codepoints: the matcher serves the whole query.
+ * - long and short terms mixed: 1-codepoint terms are dropped with a
+ *   `terms-dropped` warning (a single character matches too much of any corpus
+ *   to be a useful AND term) and 2-codepoint terms become JS post-filters, so
+ *   the long terms still get FTS/BM25 instead of degrading the whole query to
+ *   a bounded LIKE scan.
+ * - only short terms: a 1-codepoint term stays a hard error; otherwise the
+ *   caller's `allowShort` option decides between the bounded short-query
+ *   fallback and 'content-query-too-short'.
+ *
+ * @param terms - whitespace-separated terms of a normal-mode query.
+ * @param allowShort - whether the caller opted into the bounded fallback.
+ * @returns the classified terms, warnings or the first entry error.
+ */
+function classifyTerms(terms: readonly string[], allowShort: boolean): ClassifiedTerms {
+  const long: string[] = []
+  const postFilterTerms: string[] = []
+  let dropped = 0
+  for (const term of terms) {
+    const length = codePointCount(term)
+    if (length >= TRIGRAM_MIN) long.push(term)
+    else if (length >= SHORT_TERM_MIN) postFilterTerms.push(term)
+    else dropped++
+  }
+  if (long.length > 0) {
+    return {
+      terms: long,
+      postFilterTerms,
+      warnings: dropped > 0 ? ['terms-dropped'] : [],
+      short: false,
+    }
+  }
+  if (dropped > 0 || !allowShort) {
+    return { terms: [], postFilterTerms: [], warnings: [], short: false, error: 'content-query-too-short' }
+  }
+  return { terms: [...terms], postFilterTerms: [], warnings: [], short: true }
+}
+
+/**
+ * Validate a content query before it reaches SQL (0.23 contract, P0-7).
  *
  * Content search only supports substrings the FTS5 trigram tokenizer can
  * serve. A 1–2 character term used to fall back to a whole-corpus `LIKE` scan,
- * which is both slow and unbounded; it became a hard error in 0.20.0. 0.20.2
- * reintroduces it as an explicit, bounded fallback: callers that pass
- * `allowShort` accept 2-codepoint terms and searchContent answers them with a
- * deadline-bounded scan. The same limits apply after extended-mode escapes are
- * decoded, and lengths are measured in Unicode code points so emoji are not
- * mistaken for long text.
+ * which is both slow and unbounded; it became a hard error in 0.20.0 and a
+ * bounded, opt-in fallback in 0.20.2. 0.23 narrows the fallback to all-short
+ * queries: a mixed long/short query keeps its long terms on the FTS/BM25 path
+ * and enforces the 2-codepoint terms with a bounded JS post-filter, so a single
+ * short term can no longer degrade the whole query. 1-codepoint terms are only
+ * dropped when a long term exists (warning `terms-dropped`); on their own they
+ * stay 'content-query-too-short'. Extended mode is one literal phrase, so its
+ * length is measured over the whole decoded phrase including spaces (the
+ * trigram tokenizer serves any 3+ code-point phrase). Lengths are measured in
+ * Unicode code points so emoji are not mistaken for long text.
  * @param query - raw query text.
  * @param matchMode - `normal` (whitespace-separated terms) or `extended`.
- * @param options - `allowShort` opts into the bounded fallback.
+ * @param options - `allowShort` opts into the bounded all-short fallback.
  * @returns normalized terms, or the first entry error.
  */
 export function checkContentQuery(
@@ -513,45 +581,59 @@ export function checkContentQuery(
   const warnings: string[] = []
   const allowShort = options.allowShort === true
   const text = query.trim()
-  if (text === '') return { ok: true, terms: [], phrase: false, warnings, short: false }
+  if (text === '') return { ok: true, terms: [], postFilterTerms: [], phrase: false, warnings, short: false }
   if (codePointCount(text) > MAX_QUERY_CODEPOINTS) {
-    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-long', short: false }
+    return { ok: false, terms: [], postFilterTerms: [], phrase: false, warnings, error: 'content-query-too-long', short: false }
   }
   if (hasControlChars(text)) {
     // A NUL (or other C0 byte) in the query must never be passed to SQLite:
     // some string paths would stop at it and turn the query into "match
     // everything". Reject it explicitly instead.
-    return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char', short: false }
+    return { ok: false, terms: [], postFilterTerms: [], phrase: false, warnings, error: 'invalid-control-char', short: false }
   }
   if (matchMode === 'extended') {
     const decoded = decodeExtended(text)
     warnings.push(...decoded.warnings)
     if (!decoded.ok) {
-      return { ok: false, terms: [], phrase: false, warnings, error: decoded.error ?? 'invalid-escape', short: false }
+      return { ok: false, terms: [], postFilterTerms: [], phrase: false, warnings, error: decoded.error ?? 'invalid-escape', short: false }
     }
     if (hasControlChars(decoded.text)) {
-      return { ok: false, terms: [], phrase: false, warnings, error: 'invalid-control-char', short: false }
+      return { ok: false, terms: [], postFilterTerms: [], phrase: false, warnings, error: 'invalid-control-char', short: false }
     }
     const words = splitWords(decoded.text)
-    if (words.length === 0) return { ok: true, terms: [], phrase: true, warnings, short: false }
+    if (words.length === 0) return { ok: true, terms: [], postFilterTerms: [], phrase: true, warnings, short: false }
     if (words.length > MAX_QUERY_TERMS) {
-      return { ok: false, terms: [], phrase: true, warnings, error: 'content-query-too-many-terms', short: false }
+      return { ok: false, terms: [], postFilterTerms: [], phrase: true, warnings, error: 'content-query-too-many-terms', short: false }
     }
-    const status = shortTermsStatus(words, allowShort)
-    if (status.error !== undefined) {
-      return { ok: false, terms: [], phrase: true, warnings, error: status.error, short: false }
+    // Extended mode is one literal phrase: the trigram tokenizer serves any
+    // phrase of at least 3 code points, spaces included, so a phrase made of
+    // individually short words (第 7 次重置) is still a valid FTS query.
+    const length = codePointCount(decoded.text)
+    if (length >= TRIGRAM_MIN) {
+      return { ok: true, terms: [decoded.text], postFilterTerms: [], phrase: true, warnings, short: false }
     }
-    return { ok: true, terms: [decoded.text], phrase: true, warnings, short: status.short }
+    if (length < SHORT_TERM_MIN || !allowShort) {
+      return { ok: false, terms: [], postFilterTerms: [], phrase: true, warnings, error: 'content-query-too-short', short: false }
+    }
+    return { ok: true, terms: [decoded.text], postFilterTerms: [], phrase: true, warnings, short: true }
   }
   const terms = splitTerms(text)
   if (terms.length > MAX_QUERY_TERMS) {
-    return { ok: false, terms: [], phrase: false, warnings, error: 'content-query-too-many-terms', short: false }
+    return { ok: false, terms: [], postFilterTerms: [], phrase: false, warnings, error: 'content-query-too-many-terms', short: false }
   }
-  const status = shortTermsStatus(terms, allowShort)
-  if (status.error !== undefined) {
-    return { ok: false, terms: [], phrase: false, warnings, error: status.error, short: false }
+  const classified = classifyTerms(terms, allowShort)
+  warnings.push(...classified.warnings)
+  if (classified.error !== undefined) {
+    return { ok: false, terms: [], postFilterTerms: [], phrase: false, warnings, error: classified.error, short: false }
   }
-  return { ok: true, terms, phrase: false, warnings, short: status.short }
+  return {
+    ok: true,
+    terms: classified.terms,
+    postFilterTerms: classified.postFilterTerms,
+    phrase: false,
+    warnings,
+    short: classified.short,
+  }
 }
 
 /** Whether `index` starts a whole-word occurrence of `length` bytes. */
@@ -798,6 +880,11 @@ interface QueryPlan {
   countParams: Array<string | number>
   /** Literal terms used for whole-word checks and snippet location. */
   terms: string[]
+  /**
+   * 2-codepoint terms of a mixed query, enforced in JS over the matcher's
+   * candidates (0.23, P0-7). Empty unless the query mixed long and short terms.
+   */
+  postFilterTerms: string[]
   caseSensitive: boolean
   wholeWord: boolean
   /** Match the whole phrase as one literal (extended mode). */
@@ -873,6 +960,7 @@ function buildPlan(terms: readonly string[], options: {
   caseSensitive: boolean
   wholeWord: boolean
   phrase: boolean
+  postFilterTerms?: readonly string[]
   sessionPath: string | null
   pathPrefix: string | null
   excludeSessions: boolean
@@ -881,6 +969,7 @@ function buildPlan(terms: readonly string[], options: {
   allowedSessions: readonly string[] | null
 }): QueryPlan | null {
   const { caseSensitive, wholeWord, phrase } = options
+  const postFilterTerms = [...(options.postFilterTerms ?? [])]
   if (terms.length === 0) return null
   const filters: PlanFilters = {
     sessionPath: options.sessionPath,
@@ -909,6 +998,7 @@ function buildPlan(terms: readonly string[], options: {
       countWhere: matchWhere + count.sql,
       countParams: [...matchParams, ...count.params],
       terms: [...terms],
+      postFilterTerms,
       caseSensitive,
       wholeWord,
       phrase,
@@ -1569,28 +1659,33 @@ export function configureSearchConnection(db: DatabaseSync): void {
   }
 }
 
-/** A plan with a whole-word post-filter. */
-interface WholeWordScan {
+/** A plan with a whole-word and/or short-term JS post-filter. */
+interface FilteredScan {
   rowids: number[]
+  /** bm25 scores keyed by rowid; empty when the scan was unranked. */
+  scores: Map<number, number>
   count: ContentCount
   warnings: string[]
   error?: string
 }
 
 /**
- * Scan candidates for whole-word matches under a hard budget.
+ * Scan matcher candidates for post-filtered hits under a hard budget.
  *
- * Reading every candidate body in JS is the only correct way to apply the
- * ASCII word-boundary rule, but a common word in a multi-GB corpus would keep
- * the worker (and the query) busy for minutes. Rows, body bytes and wall clock
+ * Two query shapes need to read candidate bodies in JS because the trigram
+ * index cannot apply the predicate directly: whole-word queries (ASCII word
+ * boundaries) and mixed long/short queries whose 2-codepoint terms are too
+ * short to index (0.23, P0-7). Reading every candidate in a multi-GB corpus
+ * would keep the worker busy for minutes, so rows, body bytes and wall clock
  * are all capped: on any cap the scan stops, keeps the rowids found so far and
  * reports a bounded count plus a `scan-capped` warning. Session-scoped scans go
  * through the same budget, so a huge session cannot run unbounded either.
  *
- * The candidate query never uses bm25: the whole-word post-filter rewrites the
- * result set, so the rank order of the candidates is not the order of the hits.
+ * `rankOrder` asks for the matcher's bm25 order, which only the mixed path can
+ * use (whole-word post-filtering rewrites the result set, so its candidate rank
+ * order is not the order of the hits).
  */
-function scanWholeWord(
+function scanFiltered(
   db: DatabaseSync,
   plan: QueryPlan,
   limit: number,
@@ -1600,10 +1695,18 @@ function scanWholeWord(
   sessionScoped: boolean,
   budget: { maxRows: number; maxBytes: number; maxMs: number },
   isCancelled?: () => boolean,
-): WholeWordScan {
+  rankOrder = false,
+): FilteredScan {
   const warnings = new Set<string>()
   const rowids: number[] = []
-  const iterator = db.prepare(`SELECT rowid AS rowid FROM docs WHERE ${plan.pageWhere}`).iterate(...plan.pageParams)
+  const scores = new Map<number, number>()
+  // Every JS-visible term: the matcher terms are re-checked for whole-word
+  // boundaries, and the 2-codepoint post-filter terms are only checked here.
+  const filterTerms = [...plan.terms, ...plan.postFilterTerms]
+  const sql = rankOrder
+    ? `SELECT rowid AS rowid, rank AS score FROM docs WHERE ${plan.pageWhere} ORDER BY rank`
+    : `SELECT rowid AS rowid FROM docs WHERE ${plan.pageWhere}`
+  const iterator = db.prepare(sql).iterate(...plan.pageParams)
   const bodyStatement = db.prepare('SELECT body FROM docs WHERE rowid = ?')
   const deadline = performance.now() + budget.maxMs
   let count = 0
@@ -1612,7 +1715,7 @@ function scanWholeWord(
   let capped = false
   let exhausted = true
   for (const raw of iterator) {
-    if (isCancelled?.() === true) return { rowids: [], count: { value: 0, kind: 'unknown' }, warnings: ['content-search-cancelled'], error: 'content-search-cancelled' }
+    if (isCancelled?.() === true) return { rowids: [], scores, count: { value: 0, kind: 'unknown' }, warnings: ['content-search-cancelled'], error: 'content-search-cancelled' }
     scannedRows++
     if (scannedRows > budget.maxRows || scannedBytes >= budget.maxBytes || performance.now() > deadline) {
       capped = true
@@ -1624,9 +1727,16 @@ function scanWholeWord(
     const row = bodyStatement.get(rowid) as { body?: string } | undefined
     if (row === undefined || typeof row.body !== 'string') continue
     scannedBytes += row.body.length
-    if (!matchesWholeWord(row.body, plan.terms, plan.caseSensitive)) continue
+    const matched = plan.wholeWord
+      ? matchesWholeWord(row.body, filterTerms, plan.caseSensitive)
+      : containsAllTerms(row.body, filterTerms, plan.caseSensitive, false)
+    if (!matched) continue
     count++
     if (count > offset && rowids.length < limit) rowids.push(rowid)
+    if (rankOrder) {
+      const score = (raw as { score?: number }).score
+      if (typeof score === 'number') scores.set(rowid, score)
+    }
     if (countMode === 'none') {
       if (rowids.length >= limit) {
         // The page is full; no count was requested, so stopping is safe.
@@ -1644,7 +1754,7 @@ function scanWholeWord(
     result = { value: 0, kind: 'unknown' }
   } else if (count > countLimit) {
     // Above the cap: report the known floor, never an exact count we did not
-    // finish. Global whole-word counts are deliberately bounded.
+    // finish. Global post-filter counts are deliberately bounded.
     warnings.add('bounded-count')
     result = { value: countLimit, kind: 'bounded', limit: countLimit }
   } else if (capped || !exhausted) {
@@ -1652,7 +1762,7 @@ function scanWholeWord(
   } else {
     result = { value: count, kind: 'exact' }
   }
-  return { rowids, count: result, warnings: [...warnings] }
+  return { rowids, scores, count: result, warnings: [...warnings] }
 }
 
 /**
@@ -1674,11 +1784,15 @@ function scanWholeWord(
  * re-sorted in page by term frequency/title/depth/line. Narrow sets keep the
  * exact bm25 order unchanged.
  *
- * Short queries (0.20.2, P0-2): with options.shortQueryFallback a 2-codepoint
- * query is answered by the bounded name+body fallback (see
- * shortQueryFallbackSearch) instead of being rejected; the result carries
- * shortQueryFallback: true and a 'content-query-short-fallback' warning.
- * One-codepoint queries stay rejected.
+ * Short queries (0.20.2, P0-2; narrowed in 0.23, P0-7): with
+ * options.shortQueryFallback an all-short 2-codepoint query is answered by the
+ * bounded name+body fallback (see shortQueryFallbackSearch) instead of being
+ * rejected; the result carries shortQueryFallback: true and a
+ * 'content-query-short-fallback' warning. An all-short query containing a
+ * 1-codepoint term stays rejected. A query that mixes long and short terms
+ * never takes the fallback: its long terms drive FTS/BM25 and its 2-codepoint
+ * terms are enforced as a JS post-filter over the candidates (scanFiltered),
+ * while 1-codepoint terms are dropped with a 'terms-dropped' warning.
  *
  * Counting (0.20.0, P1-3): the page uses rowid-subquery filters while the count
  * uses docs-column filters, and wide filtered sets report a bounded count
@@ -1741,6 +1855,7 @@ export function searchContent(
     caseSensitive: options.caseSensitive === true,
     wholeWord: options.wholeWord === true,
     phrase: check.phrase,
+    postFilterTerms: check.postFilterTerms,
     sessionPath: options.sessionPath ?? null,
     pathPrefix,
     excludeSessions: options.excludeSessions === true,
@@ -1751,18 +1866,45 @@ export function searchContent(
   if (plan === null) return { hits: [], count: emptyCount(countMode), warnings }
 
   // The degraded profile keeps the worst query cheap: bounded counting and no
-  // bm25 sort. scanWholeWord already self-limits, so it only needs the count cap.
+  // bm25 sort. The JS post-filter scan already self-limits, so it only needs
+  // the count cap here.
   const effectiveCountLimit = degraded ? Math.min(countLimit, DEGRADED_COUNT_LIMIT) : countLimit
   if (degraded) warnings.push('query-degraded')
 
-  if (plan.wholeWord) {
-    // Only a pure session scope may count without a bound; a workspace/file
-    // prefix still scans a potentially large corpus, so keep counts bounded.
+  // Whole-word and mixed long/short queries need JS post-filtering of the
+  // matcher's candidates (P0-7). Only a pure session scope may count without a
+  // bound; a workspace/file prefix still scans a potentially large corpus, so
+  // counts stay bounded there.
+  if (plan.wholeWord || plan.postFilterTerms.length > 0) {
     const sessionScoped = options.sessionPath != null && pathPrefix === null && options.excludeSessions !== true && options.fileHitsAllRoots !== true
-    const scanned = scanWholeWord(db, plan, capped, offset, countMode, effectiveCountLimit, sessionScoped, resolveScanBudget(options.scanBudget), isCancelled ?? undefined)
+    // Whole-word searches never rank (the post-filter rewrites the result set).
+    // A mixed long/short query keeps bm25 when the adaptive probe says the
+    // match set is narrow, so its long terms still order the page.
+    let filteredRankOrder = false
+    if (!plan.wholeWord && plan.rankCapable) {
+      filteredRankOrder = degraded
+        ? false
+        : options.rankAdaptive === false || matchProbe(db, plan, RANK_ADAPTIVE_THRESHOLD).kind !== 'bounded'
+    }
+    if (cancelled()) return cancelledResult()
+    const scanned = scanFiltered(
+      db,
+      plan,
+      capped,
+      offset,
+      countMode,
+      effectiveCountLimit,
+      sessionScoped,
+      resolveScanBudget(options.scanBudget),
+      isCancelled ?? undefined,
+      filteredRankOrder,
+    )
     for (const warning of scanned.warnings) warnings.push(warning)
     if (scanned.error !== undefined) return { hits: [], count: { value: 0, kind: 'unknown' }, warnings: [...new Set(warnings)], error: scanned.error }
-    const hits = buildHits(db, plan, scanned.rowids, new Map()).hits
+    const built = buildHits(db, plan, scanned.rowids, scanned.scores, !filteredRankOrder)
+    // A whole-word page keeps the candidate (rowid) order it always had; an
+    // unranked mixed page is re-sorted in page by the cheap heuristic.
+    const hits = filteredRankOrder || plan.wholeWord ? built.hits : lightSortHits(built.hits, plan, built.frequency)
     return { hits, count: scanned.count, warnings: [...new Set(warnings)] }
   }
 

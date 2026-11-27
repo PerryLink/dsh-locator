@@ -30,16 +30,27 @@ import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import {
+  AGENT_API_VERSION,
+  AGENT_TOOL_SCHEMAS,
   CliError,
   EXIT_OK,
   EXIT_RUNTIME,
   EXIT_USAGE,
+  agentFailureEnvelope,
+  agentFailureFromThrown,
   asCliError,
   citeRefs,
   createEngineSession,
+  legacyCodeToAgentCode,
+  makeAgentErrorInfo,
+  makeAgentTiming,
   makeSettings,
   parseCliArgs,
+  renderAgentText,
   resolveRef,
+  runAgentFind,
+  runAgentRead,
+  runAgentStatus,
   runFindSearch,
   runNameSearch,
   runStatus,
@@ -47,8 +58,17 @@ import {
   version,
 } from './locator-cli.mjs'
 
-/** MCP protocol versions this server understands (newest first). */
-export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
+/** Newest MCP protocol version this server implements. */
+export const LATEST_PROTOCOL_VERSION = '2025-11-25'
+
+/**
+ * MCP protocol versions this server understands (newest first).
+ *
+ * An unknown/absent requested version negotiates the NEWEST supported version
+ * (not the oldest): clients that predate this server must not silently get a
+ * downgraded tool face.
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS = [LATEST_PROTOCOL_VERSION, '2025-06-18', '2025-03-26', '2024-11-05']
 
 /** Every tool is read-only; the client can trust the annotations. */
 const READ_ONLY_ANNOTATIONS = Object.freeze({
@@ -232,14 +252,71 @@ export const TOOL_DEFINITIONS = Object.freeze([
   },
 ])
 
-/** Look up one tool definition by name. */
+/** Look up one legacy tool definition by name. */
 export function toolByName(name) {
   return TOOL_DEFINITIONS.find(tool => tool.name === name)
 }
 
-/** Pick the newest protocol version both sides understand. */
+/**
+ * The versioned agent-API (2026-11) tool face: locator_find, locator_read and
+ * locator_status only. locator_admin is never exposed by any MCP surface.
+ * Schemas are standard JSON Schema generated from the host DSL by
+ * scripts/gen-agent-schemas.mjs (scripts/locator-cli.mjs materializes them).
+ */
+export const AGENT_TOOL_DEFINITIONS = Object.freeze([
+  {
+    name: 'locator_find',
+    title: 'Find local files by name, body or symbol (read-only, agent API 2026-11)',
+    description: [
+      'One AI-first search entry point over the local dsh-locator indexes (read-only).',
+      '',
+      'mode: auto (symbols/body/name merged), name, body or symbol. kinds: file, dir, symbol (session rows are never returned on this files-only surface). where: pathPrefix/ext/modifiedAfter/minSize. scope: workspace (the server --cwd), roots or all. detail: compact (default), standard or full. count: exact, bounded or none. maxChars caps one page of items (default 6000, 0 = unlimited).',
+      '',
+      'Pages are opaque: pass page.nextCursor back as cursor. Every item carries a citable ref; coverage.notes explains fallbacks. Errors are uniform envelopes with one of 12 closed codes.',
+    ].join('\n'),
+    inputSchema: AGENT_TOOL_SCHEMAS.find.input,
+    outputSchema: AGENT_TOOL_SCHEMAS.find.output,
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'locator_read',
+    title: 'Read evidence refs or files (read-only, agent API 2026-11)',
+    description: [
+      'Read a ref from locator_find, a bounded batch of refs, or a file path under the configured roots (read-only).',
+      '',
+      'Pass exactly one of ref, refs[] (1-20) or path. as: meta (evidence only), excerpt (default, verbatim whole lines) or quote (markdown blockquote + citation link). line targets a 1-based line; window (0-20) adds context lines; maxBytes caps each excerpt (default 2000, max 65536).',
+      '',
+      'Session refs are hidden on this files-only surface. Every item keeps ref/status/freshness; batch failures appear as item.error.',
+    ].join('\n'),
+    inputSchema: AGENT_TOOL_SCHEMAS.read.input,
+    outputSchema: AGENT_TOOL_SCHEMAS.read.output,
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
+    name: 'locator_status',
+    title: 'Report local index health (read-only, agent API 2026-11)',
+    description: [
+      'Report the local index/content-index health read-only (agent API ' + AGENT_API_VERSION + ').',
+      '',
+      'detail: brief (default, compact index/content/scope summary under 600 characters) or full (every legacy status field under status). The engine runs against a temporary read-only state copy; the caller state directory is never written.',
+    ].join('\n'),
+    inputSchema: AGENT_TOOL_SCHEMAS.status.input,
+    outputSchema: AGENT_TOOL_SCHEMAS.status.output,
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+])
+
+/** Tools of one negotiated surface. */
+export function toolsForSurface(surface) {
+  return surface === 'agent' ? AGENT_TOOL_DEFINITIONS : TOOL_DEFINITIONS
+}
+
+/**
+ * Pick the protocol version to answer with: an explicitly supported version is
+ * echoed, anything else (unknown or absent) gets the newest supported version.
+ */
 export function negotiateProtocolVersion(requested) {
-  return typeof requested === 'string' && SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : '2024-11-05'
+  return typeof requested === 'string' && SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : LATEST_PROTOCOL_VERSION
 }
 
 /** A tool-argument problem: reported as an isError tool result, not a JSON-RPC error. */
@@ -359,25 +436,99 @@ export async function callTool(settings, name, args, context = {}) {
   throw new RpcError(-32602, 'unknown tool: ' + name)
 }
 
-/** Render one tool result as an MCP content result (isError follows result.ok). */
-function toolResult(value) {
-  const isError = value !== null && typeof value === 'object' && value.ok === false
+/** Whether a value is a non-array object. */
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && Array.isArray(value) === false
+}
+
+/**
+ * Turn one legacy result whose ok is false into the uniform 2026-11 failure
+ * envelope while keeping every legacy field (hits/warnings/path/permissions/…).
+ * The historical error code is preserved in error.details.legacyCode and the
+ * envelope's own error object replaces the old string/object error field.
+ */
+function legacyFailurePayload(toolName, value, startedAt) {
+  const legacyError = value.error
+  const warnings = Array.isArray(value.warnings) ? value.warnings : []
+  let legacyCode = 'internal'
+  let message = ''
+  if (typeof legacyError === 'string') {
+    legacyCode = legacyError
+    message = legacyError.replace(/-/g, ' ')
+  } else if (isPlainObject(legacyError)) {
+    if (typeof legacyError.code === 'string' && legacyError.code !== '') legacyCode = legacyError.code
+    if (typeof legacyError.message === 'string') message = legacyError.message
+  } else if (warnings.length > 0) {
+    legacyCode = String(warnings[0])
+    message = String(warnings[0]).replace(/-/g, ' ')
+  }
+  const code = legacyCodeToAgentCode(legacyCode)
+  const info = makeAgentErrorInfo(code, message.trim() === '' ? undefined : message, {
+    legacyCode,
+    ...(warnings.length === 0 ? {} : { details: { warnings: warnings.slice(0, 4) } }),
+  })
+  const { error: _legacyError, ok: _legacyOk, ...rest } = value
   return {
-    content: [{ type: 'text', text: JSON.stringify(value) }],
+    ...rest,
+    apiVersion: AGENT_API_VERSION,
+    ok: false,
+    tool: toolName,
+    error: info,
+    timing: makeAgentTiming(startedAt),
+  }
+}
+
+/**
+ * Render one legacy tool result as an MCP content result.
+ *
+ * Success results are byte-identical to the frozen legacy face. Failure
+ * results carry the uniform 2026-11 failure envelope (legacy fields preserved)
+ * so every isError answer has one machine-readable error shape.
+ */
+function toolResult(value, toolName, startedAt = Date.now()) {
+  const isError = value !== null && typeof value === 'object' && value.ok === false
+  const payload = isError ? legacyFailurePayload(toolName, value, startedAt) : value
+  return {
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
     ...(isError || value === null || typeof value !== 'object' ? {} : { structuredContent: value }),
     isError,
   }
 }
 
-/** Render one tool failure as an isError content result. */
-function toolFailure(error) {
-  const failure = error instanceof ToolArgumentError
-    ? { code: 'invalid-arguments', message: error.message }
-    : { code: error && error.code ? error.code : 'tool-failed', message: error instanceof Error ? error.message : String(error) }
+/** Render one thrown legacy failure as an isError content result. */
+function toolFailure(error, toolName, startedAt = Date.now()) {
+  const legacyCode = error instanceof ToolArgumentError
+    ? 'invalid-arguments'
+    : error && typeof error.code === 'string' && error.code !== '' ? error.code : 'internal'
+  const code = legacyCodeToAgentCode(legacyCode)
+  const message = error instanceof Error ? error.message : String(error)
+  const envelope = agentFailureEnvelope(toolName, makeAgentErrorInfo(code, message, { legacyCode }), startedAt)
   return {
-    content: [{ type: 'text', text: JSON.stringify({ ok: false, error: failure }) }],
+    content: [{ type: 'text', text: JSON.stringify(envelope) }],
     isError: true,
   }
+}
+
+/**
+ * Render one 2026-11 tool result as an MCP content result: human-readable text
+ * plus structuredContent that validates against the tool's published
+ * outputSchema (success and failure envelopes both validate).
+ */
+function agentToolResult(envelope) {
+  return {
+    content: [{ type: 'text', text: renderAgentText(envelope) }],
+    structuredContent: envelope,
+    isError: envelope === null || typeof envelope !== 'object' || envelope.ok !== true,
+  }
+}
+
+/** Execute one tool of the 2026-11 agent surface. */
+export async function callAgentTool(settings, name, args, context = {}) {
+  const toolContext = context.engine === undefined ? {} : { engine: context.engine }
+  if (name === 'locator_find') return await runAgentFind(settings, args, toolContext)
+  if (name === 'locator_read') return await runAgentRead(settings, args)
+  if (name === 'locator_status') return await runAgentStatus(settings, args, toolContext)
+  throw new RpcError(-32602, 'unknown tool: ' + name)
 }
 
 /**
@@ -410,11 +561,17 @@ export async function handleMessage(message, context) {
       } catch (error) {
         context.engineError = error instanceof Error ? error.message : String(error)
       }
+      const surface = context.surface === 'agent' ? 'agent' : 'legacy'
       const instructions = [
+        'Server build: dsh-locator ' + version + ' (npm dsh-locator@' + version + '), agent API version ' + AGENT_API_VERSION + ', MCP protocol version ' + context.protocolVersion + '.',
+        surface === 'agent'
+          ? 'Active surface: agent API ' + AGENT_API_VERSION + ' (locator_find / locator_read / locator_status); locator_admin is never exposed and session rows/refs are hidden (files-only).'
+          : 'Active surface: legacy tools (locator_search / locator_find / locator_status / locator_resolve / locator_cite). Start with --api=' + AGENT_API_VERSION + ' for the versioned find/read/status surface.',
         "Read-only local evidence search. Roots are fixed at server start (" + context.settings.roots.join(", ") + "); no tool can write files, change the index or widen the roots.",
         "The engine runs against a temporary read-only copy of the state directory; the caller state directory is never written.",
-        "Every hit carries a citable ref; search/find report truncated, nextOffset and a budget block.",
-        "Session-log body hits are excluded unless a tool call passes allowSessions.",
+        surface === 'agent'
+          ? "Every result is a uniform " + AGENT_API_VERSION + " envelope: success results carry outputSchema-validated structuredContent, failures use one of 12 closed error codes with retryable/remediation."
+          : "Every hit carries a citable ref; search/find report truncated, nextOffset and a budget block. Session-log body hits are excluded unless a tool call passes allowSessions.",
       ].join(" ")
       return {
         jsonrpc: '2.0',
@@ -439,20 +596,29 @@ export async function handleMessage(message, context) {
       return undefined
     }
     if (method === 'ping') return { jsonrpc: '2.0', id, result: {} }
-    if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: TOOL_DEFINITIONS } }
+    if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: toolsForSurface(context.surface) } }
     if (method === 'tools/call') {
       const name = params.name
       if (typeof name !== 'string' || name === '') throw new RpcError(-32602, 'tools/call requires a tool name')
       const args = params.arguments === undefined || params.arguments === null ? {} : params.arguments
       if (typeof args !== 'object' || Array.isArray(args)) throw new RpcError(-32602, 'tools/call arguments must be an object')
       if (context.shuttingDown === true) throw new RpcError(-32600, 'server is shutting down')
+      const startedAt = Date.now()
+      const agentSurface = context.surface === 'agent'
       try {
         const toolContext = context.engine === undefined ? {} : { engine: context.engine }
+        if (agentSurface) {
+          const result = await callAgentTool(context.settings, name, args, toolContext)
+          return { jsonrpc: '2.0', id, result: agentToolResult(result) }
+        }
         const result = await callTool(context.settings, name, args, toolContext)
-        return { jsonrpc: '2.0', id, result: toolResult(result) }
+        return { jsonrpc: '2.0', id, result: toolResult(result, name, startedAt) }
       } catch (error) {
         if (error instanceof RpcError) throw error
-        return { jsonrpc: '2.0', id, result: toolFailure(error) }
+        if (agentSurface) {
+          return { jsonrpc: '2.0', id, result: agentToolResult(agentFailureFromThrown(name, error, startedAt)) }
+        }
+        return { jsonrpc: '2.0', id, result: toolFailure(error, name, startedAt) }
       }
     }
     if (method === 'shutdown') {
@@ -483,7 +649,10 @@ export function startServer(options = {}) {
   const output = options.output ?? process.stdout
   const settings = options.settings ?? makeSettings({})
   const engine = options.engine ?? createEngineSession(settings)
-  const context = { settings, engine, protocolVersion: '2024-11-05', initialized: false, shuttingDown: false }
+  const surface = options.surface === 'agent' || options.surface === 'legacy'
+    ? options.surface
+    : settings.api === AGENT_API_VERSION ? 'agent' : 'legacy'
+  const context = { settings, engine, surface, protocolVersion: LATEST_PROTOCOL_VERSION, initialized: false, shuttingDown: false }
   const send = value => {
     if (value === undefined) return
     output.write(JSON.stringify(value) + '\n')
@@ -538,13 +707,19 @@ export function startServer(options = {}) {
 /** Usage text for --help. */
 export function usage() {
   return [
-    'dsh-locator MCP server ' + version + ' (read-only, stdio JSON-RPC)',
+    'dsh-locator MCP server ' + version + ' (read-only, stdio JSON-RPC, agent API ' + AGENT_API_VERSION + ')',
     '',
-    'Usage: node scripts/locator-mcp.mjs [--root DIR]... [--state DIR] [--bin FILE] [--timeout MS]',
+    'Usage: node scripts/locator-mcp.mjs [--root DIR]... [--state DIR] [--bin FILE] [--timeout MS] [--cwd DIR] [--api legacy|' + AGENT_API_VERSION + ']',
     '',
     "Roots are fixed at startup and no tool can widen them. One long-lived engine runs",
-    "against a temporary read-only copy of the state directory and is stopped on shutdown/EOF. Tools:",
+    "against a temporary read-only copy of the state directory and is stopped on shutdown/EOF.",
+    '--state without --root reads the roots recorded in <state>/meta.json (no full rescan).',
+    '',
+    'Default legacy surface (' + String(TOOL_DEFINITIONS.length) + ' tools):',
     ...TOOL_DEFINITIONS.map(tool => '  ' + tool.name + ' — ' + tool.description.split('.')[0]),
+    '',
+    'Versioned agent API surface (--api=' + AGENT_API_VERSION + ', ' + String(AGENT_TOOL_DEFINITIONS.length) + ' tools, admin never exposed):',
+    ...AGENT_TOOL_DEFINITIONS.map(tool => '  ' + tool.name + ' — ' + tool.description.split('\n')[0]),
     '',
     'Environment: DSH_LOCATOR_ROOTS (path-separator separated), DSH_LOCATOR_STATE, DSH_LOCATOR_BIN.',
     'Exit codes: 0 clean EOF, 1 unexpected error, 2 usage error.',
@@ -568,7 +743,8 @@ export async function main(argv = process.argv.slice(2)) {
     process.stderr.write(failure.message + '\n')
     return failure.exitCode === EXIT_OK ? EXIT_OK : (failure.exitCode ?? EXIT_USAGE)
   }
-  process.stderr.write('locator-mcp: serving ' + String(TOOL_DEFINITIONS.length) + ' read-only tools (roots: ' + settings.roots.join(', ') + ')\n')
+  const surface = settings.api === AGENT_API_VERSION ? 'agent' : 'legacy'
+  process.stderr.write('locator-mcp: serving ' + String(toolsForSurface(surface).length) + ' read-only ' + surface + ' tool(s) (roots: ' + settings.roots.join(', ') + ')\n')
   const server = startServer({ settings })
   const stop = exitCode => {
     void server.close().finally(() => { process.exitCode = exitCode })

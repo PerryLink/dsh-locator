@@ -325,6 +325,13 @@ export interface ContentRequest {
     pathPrefix?: string;
     /** File documents only: used by the public HTTP API, which has no caller session identity. */
     filesOnly?: boolean;
+    /**
+     * Include archived sessions in this query (0.23). Archived session logs stay
+     * indexed; the default false hides them from ordinary results. The config
+     * default (`contentIncludeArchived`) is ORed in by the content layer, so this
+     * flag only widens one query.
+     */
+    includeArchived?: boolean;
     /** Hit detail: compact skips evidence enrichment entirely (default full). */
     detail?: HitDetail;
     /** Evidence-bearing rows in full mode (default 10). */

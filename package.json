@@ -1,6 +1,6 @@
 {
   "name": "dsh-locator",
-  "version": "0.22.3",
+  "version": "0.23.0",
   "description": "Whole-disk, millisecond file search for DeepSeek Harness without Everything: a self-built cross-platform index, an Everything-style query language, agent tools and a Web search panel (Ctrl+Shift+F). Windows, macOS and Linux.",
   "author": "PerryLink contributors",
   "repository": {
@@ -40,11 +40,17 @@
     "README-es.md",
     "README-pt.md",
     "README-hi.md",
-    "docs/assets",
     "scripts/locator-cli.mjs",
     "scripts/locator-mcp.mjs",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "docs",
+    "examples",
+    "llms.txt",
+    "scripts/doctor.mjs",
+    "scripts/gen-agent-schemas.mjs",
+    "scripts/pack-check.mjs",
+    "scripts/eval-ai.mjs"
   ],
   "sideEffects": false,
   "dsh": {
@@ -100,7 +106,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "verify": "node scripts/verify.mjs",
-    "check": "pnpm typecheck && pnpm test && node scripts/verify.mjs"
+    "check": "pnpm typecheck && pnpm test && node scripts/gen-agent-schemas.mjs --check && node scripts/pack-check.mjs && node scripts/verify.mjs",
+    "gen:agent-schemas": "node scripts/gen-agent-schemas.mjs --check",
+    "pack-check": "node scripts/pack-check.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "eval:ai": "node scripts/eval-ai.mjs"
   },
   "license": "Apache-2.0",
   "bin": {

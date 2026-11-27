@@ -270,6 +270,9 @@ describe('HTTPS fail-closed registration', () => {
       '/dsh-locator/reveal',
       '/dsh-locator/search',
       '/dsh-locator/status',
+      '/dsh-locator/v1/find',
+      '/dsh-locator/v1/read',
+      '/dsh-locator/v1/status',
     ])
   })
 })
@@ -1038,5 +1041,398 @@ describe('search 0.21.1 contract', () => {
     const body = (await callRoute(harness, '/dsh-locator/status', fakeRequest({}))).json()
     expect(body.content).toMatchObject({ enabled: true, building: true, files: 5, messages: 2 })
     expect((body.content as { progress?: { indexed?: number } }).progress?.indexed).toBe(12)
+  })
+})
+
+
+/* ------------------------------------------------------------------------- */
+/* 0.23.0 versioned /v1 AI-first API                                         */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Fake content store for the /v1 body-mode tests: it records the search
+ * options and only hides its session row when the store is asked to.
+ */
+function v1Content(options: { file: string; calls?: Array<Record<string, unknown>> }): ContentIndex {
+  const state = { building: false, files: 1, sessions: 1, messages: 1, truncated: false, error: '', warnings: [], updatedAt: 1 }
+  const fileHit = { kind: 'file', path: options.file, title: 'notes.md', snippet: 'needle body', line: 1, score: 1 }
+  const sessionHit = {
+    kind: 'session',
+    path: '/sessions/s1/events.jsonl',
+    title: 's1',
+    snippet: 'needle session',
+    line: 1,
+    score: 2,
+    sessionId: 's1',
+    messageId: 'm1',
+  }
+  return {
+    status: () => state,
+    authorizedSessionIds: () => new Set(['s1']),
+    indexedMtime: () => 1_000,
+    sessionEventRefs: () => new Map(),
+    findSymbols: () => [],
+    async search(_query: string, limit: number, searchOptions: Record<string, unknown> = {}) {
+      options.calls?.push(searchOptions)
+      const hits = searchOptions.excludeSessions === true ? [fileHit] : [sessionHit, fileHit]
+      return { hits: hits.slice(0, limit), count: { value: hits.length, kind: 'exact' as const }, warnings: [] }
+    },
+  } as unknown as ContentIndex
+}
+
+/** Register the plugin with the panel connection present. */
+function registerV1(rt: LocatorRuntime, content?: ContentIndex): FakeHarness {
+  const harness = fakeHarness({ connection: new FakeConnection() })
+  registerHttp(harness.ctx, rt, content)
+  return harness
+}
+
+function errorOf(body: Record<string, unknown>): { code?: string; message?: string; retryable?: boolean } {
+  const error = body.error
+  return typeof error === 'object' && error !== null ? error as { code?: string; message?: string; retryable?: boolean } : {}
+}
+
+describe('/v1 find', () => {
+  it('answers the agent-core envelope for a name search', async () => {
+    const root = tempDir('locator-http-v1-find-')
+    const file = join(root, 'alpha.ts')
+    writeFileSync(file, 'export const alpha = 1\n')
+    const harness = registerV1(fakeRuntime([root], [httpHit(file)]))
+    const response = await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'alpha', mode: 'name' }))
+    expect(response.statusCode).toBe(200)
+    expect(response.headers.get('content-type')).toContain('application/json')
+    const body = response.json()
+    expect(body).toMatchObject({ apiVersion: '2026-11', ok: true, tool: 'locator_find', mode: 'name', resolvedMode: 'name' })
+    expect(body.detail).toBe('compact')
+    expect(body.scope).toMatchObject({ requested: 'roots', effective: 'roots' })
+    const items = body.items as Array<Record<string, unknown>>
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ kind: 'file', path: file })
+    expect(body.page).toMatchObject({ limit: 10, returned: 1, more: false })
+  })
+
+  it('is files-only: session documents are never searched or returned', async () => {
+    const root = tempDir('locator-http-v1-session-')
+    const file = join(root, 'notes.md')
+    writeFileSync(file, 'needle body\n')
+    const calls: Array<Record<string, unknown>> = []
+    const harness = registerV1(fakeRuntime([root], [], { config: { outputBudgetChars: 8000 } }), v1Content({ file, calls }))
+    const body = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'needle', mode: 'body' }))).json()
+    expect(body.ok).toBe(true)
+    expect(body.resolvedMode).toBe('body')
+    const items = body.items as Array<Record<string, unknown>>
+    expect(items.length).toBeGreaterThan(0)
+    expect(items.every(item => item.kind !== 'session')).toBe(true)
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every(call => call.excludeSessions === true)).toBe(true)
+  })
+
+  it('keeps the default auto mode files-only', async () => {
+    const root = tempDir('locator-http-v1-auto-')
+    const file = join(root, 'notes.md')
+    writeFileSync(file, 'needle body\n')
+    const calls: Array<Record<string, unknown>> = []
+    const harness = registerV1(fakeRuntime([root], [httpHit(file)], { config: { outputBudgetChars: 8000 } }), v1Content({ file, calls }))
+    const body = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'needle' }))).json()
+    expect(body.ok).toBe(true)
+    const items = body.items as Array<Record<string, unknown>>
+    expect(items.length).toBeGreaterThan(0)
+    expect(items.every(item => item.kind !== 'session')).toBe(true)
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.every(call => call.excludeSessions === true)).toBe(true)
+  })
+
+  it('rejects session kinds, workspace scope, bad pathPrefix and unknown arguments', async () => {
+    const root = tempDir('locator-http-v1-deny-')
+    const harness = registerV1(fakeRuntime([root], [httpHit(join(root, 'a.md'))]))
+    const session = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'x', kinds: ['file', 'session'] }))).json()
+    expect(session).toMatchObject({ apiVersion: '2026-11', ok: false, tool: 'locator_http' })
+    expect(errorOf(session).code).toBe('invalid-argument')
+    expect(String(errorOf(session).message)).toContain('session')
+
+    const workspace = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'x', scope: 'workspace' }))).json()
+    expect(errorOf(workspace).code).toBe('invalid-argument')
+    expect(String(errorOf(workspace).message)).toContain('roots')
+
+    const combinedPrefix = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'x', pathPrefix: root, where: { pathPrefix: root } }))).json()
+    expect(errorOf(combinedPrefix).code).toBe('invalid-argument')
+
+    const unknown = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'x', sessionId: 's1' }))).json()
+    expect(unknown).toMatchObject({ ok: false, tool: 'locator_http' })
+    expect(errorOf(unknown).code).toBe('invalid-argument')
+    expect(String(errorOf(unknown).message)).toContain('sessionId')
+  })
+
+  it('honours an explicit pathPrefix inside the roots in both spellings', async () => {
+    const root = tempDir('locator-http-v1-prefix-')
+    const sub = join(root, 'sub')
+    mkdirSync(sub)
+    const harness = registerV1(fakeRuntime([root], [httpHit(join(root, 'a.md')), httpHit(join(sub, 'b.md'))]))
+    const topLevel = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'b', mode: 'name', pathPrefix: sub }))).json()
+    expect(topLevel.ok).toBe(true)
+    expect((topLevel.items as Array<{ path: string }>).map(item => item.path)).toEqual([join(sub, 'b.md')])
+    const viaWhere = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'b', mode: 'name', where: { pathPrefix: sub } }))).json()
+    expect(viaWhere.ok).toBe(true)
+    expect((viaWhere.items as Array<{ path: string }>).map(item => item.path)).toEqual([join(sub, 'b.md')])
+  })
+
+  it('reports a missing content index inside the envelope', async () => {
+    const root = tempDir('locator-http-v1-nocontent-')
+    const harness = registerV1(fakeRuntime([root], []))
+    const body = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'needle', mode: 'body' }))).json()
+    expect(body).toMatchObject({ apiVersion: '2026-11', ok: false, tool: 'locator_find' })
+    expect(errorOf(body).code).toBe('index-unavailable')
+    expect(errorOf(body).retryable).toBe(true)
+  })
+
+  it('answers scope-denied for a pathPrefix outside every root', async () => {
+    const root = tempDir('locator-http-v1-root-')
+    const outside = tempDir('locator-http-v1-outside-')
+    const harness = registerV1(fakeRuntime([root], [httpHit(join(root, 'a.md'))]))
+    const response = await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'a', pathPrefix: outside }))
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.ok).toBe(false)
+    expect(errorOf(body).code).toBe('scope-denied')
+  })
+
+  it('keeps tool-level failures as invalid-argument envelopes', async () => {
+    const harness = registerV1(fakeRuntime())
+    const empty = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({}))).json()
+    expect(empty).toMatchObject({ apiVersion: '2026-11', ok: false, tool: 'locator_find' })
+    expect(errorOf(empty).code).toBe('invalid-argument')
+    const wrongType = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 42 }))).json()
+    expect(wrongType).toMatchObject({ ok: false, tool: 'locator_find' })
+    expect(errorOf(wrongType).code).toBe('invalid-argument')
+    expect((wrongType.error as { details?: { violations?: string[] } }).details?.violations?.length).toBeGreaterThan(0)
+  })
+
+  it('answers wire-format failures with the same envelope shape', async () => {
+    const harness = registerV1(fakeRuntime())
+    const method = await callRoute(harness, '/dsh-locator/v1/find', fakeRequest('', {}, 'GET'))
+    expect(method.statusCode).toBe(405)
+    expect(method.headers.get('allow')).toBe('POST')
+    expect(method.json()).toMatchObject({ apiVersion: '2026-11', ok: false, tool: 'locator_http', error: { code: 'invalid-argument' } })
+
+    const media = await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({}, { 'content-type': 'text/plain' }))
+    expect(media.statusCode).toBe(415)
+    expect(media.json()).toMatchObject({ ok: false, tool: 'locator_http' })
+
+    const malformed = await callRoute(harness, '/dsh-locator/v1/find', fakeRequest('{not json'))
+    expect(malformed.statusCode).toBe(400)
+    expect(errorOf(malformed.json()).code).toBe('invalid-argument')
+  })
+
+  it('pages through the opaque envelope cursor', async () => {
+    const root = tempDir('locator-http-v1-page-')
+    const hits = ['alpha.ts', 'beta.ts', 'gamma.ts'].map(name => httpHit(join(root, name)))
+    const harness = registerV1(fakeRuntime([root], hits))
+    const first = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'a', mode: 'name', limit: 1 }))).json()
+    expect(first.ok).toBe(true)
+    expect((first.items as unknown[]).length).toBe(1)
+    expect(first.page).toMatchObject({ limit: 1, returned: 1, more: true })
+    const cursor = (first.page as { nextCursor?: string }).nextCursor
+    expect(typeof cursor).toBe('string')
+    const second = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'a', mode: 'name', limit: 1, cursor }))).json()
+    expect(second.ok).toBe(true)
+    const firstPath = (first.items as Array<{ path: string }>)[0]?.path
+    const secondPath = (second.items as Array<{ path: string }>)[0]?.path
+    expect(secondPath).toBeDefined()
+    expect(secondPath).not.toBe(firstPath)
+    const bad = (await callRoute(harness, '/dsh-locator/v1/find', fakeRequest({ query: 'a', mode: 'name', cursor: 'not-a-cursor' }))).json()
+    expect(bad.ok).toBe(false)
+    expect(errorOf(bad).code).toBe('cursor-invalid')
+  })
+
+  it('sits behind the same connection trust fence', async () => {
+    const harness = fakeHarness()
+    registerHttp(harness.ctx, fakeRuntime())
+    const response = await callRoute(harness, '/dsh-locator/v1/status', fakeRequest({}))
+    expect(response.statusCode).toBe(503)
+  })
+
+  it('never exposes an admin route and requires host auth', () => {
+    const harness = registerV1(fakeRuntime())
+    const paths = harness.routes.map(route => route.path)
+    expect(paths.some(path => path.toLowerCase().includes('admin'))).toBe(false)
+    expect(paths).toEqual(expect.arrayContaining(['/dsh-locator/v1/find', '/dsh-locator/v1/read', '/dsh-locator/v1/status']))
+    for (const route of harness.routes.filter(candidate => candidate.path.startsWith('/dsh-locator/v1/'))) {
+      expect(route.auth).toBe('required')
+    }
+  })
+})
+
+describe('/v1 read', () => {
+  it('reads an absolute file path inside the roots', async () => {
+    const root = tempDir('locator-http-v1-read-')
+    const file = join(root, 'hello.md')
+    writeFileSync(file, 'hello line\nworld line\n')
+    const harness = registerV1(fakeRuntime([root]))
+    const body = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: file }))).json()
+    expect(body).toMatchObject({ apiVersion: '2026-11', ok: true, tool: 'locator_read' })
+    const items = body.items as Array<{ path?: string; excerpt?: string; kind?: string }>
+    expect(items[0]?.path).toBe(file)
+    expect(items[0]?.excerpt).toContain('hello line')
+  })
+
+  it('rejects relative paths and every non-file ref', async () => {
+    const root = tempDir('locator-http-v1-read-deny-')
+    const harness = registerV1(fakeRuntime([root]))
+    const relative = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: 'notes.md' }))).json()
+    expect(relative).toMatchObject({ ok: false, tool: 'locator_read' })
+    expect(errorOf(relative).code).toBe('invalid-argument')
+
+    const empty = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ ref: '' }))).json()
+    expect(empty).toMatchObject({ ok: false, tool: 'locator_read' })
+    expect(errorOf(empty).code).toBe('invalid-argument')
+
+    for (const body of [
+      { ref: 'dsh-session:abc' },
+      { ref: 'ref://spill?path=' + encodeURIComponent(join(root, 'spill.txt')) },
+      { refs: ['ref://attachment?sha256=abc'] },
+      { ref: 'ref://url?url=' + encodeURIComponent('http://example.test/') + '&sha256=abc' },
+    ]) {
+      const response = await callRoute(harness, '/dsh-locator/v1/read', fakeRequest(body))
+      expect(response.statusCode).toBe(200)
+      const value = response.json()
+      expect(value).toMatchObject({ ok: false, tool: 'locator_read' })
+      expect(errorOf(value).code).toBe('scope-denied')
+    }
+  })
+
+  it('refuses a path outside every configured root', async () => {
+    const root = tempDir('locator-http-v1-read-root-')
+    const outside = tempDir('locator-http-v1-read-outside-')
+    const secret = join(outside, 'secret.txt')
+    writeFileSync(secret, 'nope\n')
+    const harness = registerV1(fakeRuntime([root]))
+    const body = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: secret }))).json()
+    expect(body.ok).toBe(false)
+    expect(errorOf(body).code).toBe('scope-denied')
+  })
+
+  it('applies the layered notReadable fence and never returns its bytes', async () => {
+    const root = tempDir('locator-http-v1-read-scope-')
+    const file = join(root, 'secret.md')
+    writeFileSync(file, 'secret body line\n')
+    const scope = new Scope({ notSearchable: [], notReadable: ['secret.md'], notIndexed: [] }, false)
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([root]), undefined, undefined, {}, undefined, scope)
+    const body = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: file }))).json()
+    expect(body.ok).toBe(false)
+    expect(errorOf(body).code).toBe('scope-denied')
+    expect(JSON.stringify(body)).not.toContain('secret body line')
+  })
+
+  it('refuses file refs and symlinks that resolve outside the roots', async () => {
+    const root = tempDir('locator-http-v1-read-outside-ref-')
+    const outside = tempDir('locator-http-v1-read-outside-target-')
+    const secret = join(outside, 'secret.txt')
+    writeFileSync(secret, 'outside secret body\n')
+    const harness = registerV1(fakeRuntime([root]))
+    const ref = 'ref://file?path=' + encodeURIComponent(secret)
+    const refBody = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ ref }))).json()
+    expect(refBody.ok).toBe(false)
+    expect(errorOf(refBody).code).toBe('scope-denied')
+    expect(JSON.stringify(refBody)).not.toContain('outside secret body')
+    const link = join(root, 'innocent.txt')
+    try {
+      symlinkSync(secret, link, 'file')
+    } catch {
+      return // Symbolic links need privileges on some Windows runners.
+    }
+    const linkBody = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: link }))).json()
+    expect(linkBody.ok).toBe(false)
+    expect(errorOf(linkBody).code).toBe('scope-denied')
+    expect(JSON.stringify(linkBody)).not.toContain('outside secret body')
+  })
+
+  it('rejects unknown read arguments', async () => {
+    const root = tempDir('locator-http-v1-read-extra-')
+    const harness = registerV1(fakeRuntime([root]))
+    const body = (await callRoute(harness, '/dsh-locator/v1/read', fakeRequest({ path: join(root, 'a.md'), filesOnly: true }))).json()
+    expect(body).toMatchObject({ ok: false, tool: 'locator_http' })
+    expect(errorOf(body).code).toBe('invalid-argument')
+    expect(String(errorOf(body).message)).toContain('filesOnly')
+  })
+})
+
+describe('/v1 status', () => {
+  const engineStatus = async () => ({
+    version: '0.23.0-test',
+    platform: 'test',
+    roots: ['/v1-root'],
+    entries: 12,
+    files: 10,
+    dirs: 2,
+    watching: true,
+  })
+
+  it('answers the brief envelope by default', async () => {
+    const harness = registerV1(fakeRuntime([], [], { engineStatus }))
+    const response = await callRoute(harness, '/dsh-locator/v1/status', fakeRequest({}))
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body).toMatchObject({ apiVersion: '2026-11', ok: true, tool: 'locator_status', detail: 'brief' })
+    expect(typeof body.summary).toBe('string')
+    expect(body.index).toMatchObject({ running: false, entries: 12, files: 10, dirs: 2, watching: true, roots: 1 })
+    expect(body.content).toMatchObject({ enabled: false })
+  })
+
+  it('serves the full legacy status on request', async () => {
+    const harness = registerV1(fakeRuntime([], [], { engineStatus }))
+    const body = (await callRoute(harness, '/dsh-locator/v1/status', fakeRequest({ detail: 'full' }))).json()
+    expect(body).toMatchObject({ ok: true, tool: 'locator_status', detail: 'full' })
+    const status = body.status as Record<string, unknown>
+    expect(status.ok).toBe(true)
+    expect(status.roots).toEqual(['/v1-root'])
+    expect(status.entries).toBe(12)
+  })
+
+  it('rejects unknown fields and invalid detail', async () => {
+    const harness = registerV1(fakeRuntime())
+    const unknown = (await callRoute(harness, '/dsh-locator/v1/status', fakeRequest({ admin: true }))).json()
+    expect(unknown).toMatchObject({ ok: false, tool: 'locator_http' })
+    expect(errorOf(unknown).code).toBe('invalid-argument')
+    const badDetail = (await callRoute(harness, '/dsh-locator/v1/status', fakeRequest({ detail: 'everything' }))).json()
+    expect(badDetail).toMatchObject({ ok: false, tool: 'locator_status' })
+    expect(errorOf(badDetail).code).toBe('invalid-argument')
+  })
+})
+
+describe('legacy route deprecation (0.23.0)', () => {
+  it('marks /content deprecated in both response header and body', async () => {
+    const content = fakeContent({ hits: [contentHttpHit('/tmp/deprecated.md')] })
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime(), content)
+    const response = await callRoute(harness, '/dsh-locator/content', fakeRequest({ query: 'needle' }))
+    expect(response.statusCode).toBe(200)
+    expect(response.headers.get('deprecation')).toBe('true')
+    expect(String(response.headers.get('warning'))).toContain('/dsh-locator/content')
+    expect(response.json()).toMatchObject({ ok: true, deprecated: true, replacement: '/dsh-locator/v1/find' })
+  })
+
+  it('marks /content/rebuild deprecated in both response header and body', async () => {
+    const base = fakeContent() as unknown as Record<string, unknown>
+    const content = { ...base, refreshNow: () => true, rebuild: () => true } as unknown as ContentIndex
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime(), content)
+    const response = await callRoute(harness, '/dsh-locator/content/rebuild', fakeRequest({ full: false }))
+    expect(response.statusCode).toBe(200)
+    expect(response.headers.get('deprecation')).toBe('true')
+    expect(String(response.headers.get('warning'))).toContain('locator_admin')
+    expect(response.json()).toMatchObject({ ok: true, deprecated: true, replacement: 'locator_admin' })
+  })
+
+  it('keeps /search and the panel routes undeprecated', async () => {
+    const harness = fakeHarness({ connection: new FakeConnection() })
+    registerHttp(harness.ctx, fakeRuntime([], [httpHit('/root/a.md')]))
+    const response = await callRoute(harness, '/dsh-locator/search', fakeRequest({ query: 'a' }))
+    expect(response.statusCode).toBe(200)
+    expect(response.headers.get('deprecation')).toBeUndefined()
+    expect(response.json()).toMatchObject({ ok: true, mode: 'names' })
+    for (const path of ['/dsh-locator/status', '/dsh-locator/combined', '/dsh-locator/open', '/dsh-locator/reveal']) {
+      expect(harness.routes.some(route => route.path === path)).toBe(true)
+    }
   })
 })

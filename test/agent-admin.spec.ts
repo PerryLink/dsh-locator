@@ -26,6 +26,9 @@ interface AdminView {
   ok: boolean
   tool?: string
   action?: string
+  ignored?: string[]
+  hint?: string
+  nextTools?: string[]
   result?: { started?: boolean; full?: boolean; path?: string; rows?: number; bytes?: number; tookMs?: number }
   timing?: { tookMs: number }
   error?: { code?: string; retryable?: boolean; message?: string }
@@ -103,6 +106,61 @@ describe('locator_admin registration contract', () => {
     expect(tool.description).toMatch(/reindex/i)
     expect(tool.description).toMatch(/export/i)
     expect(Object.keys(tool.parameters.properties ?? {})).toEqual(expect.arrayContaining(['action', 'roots', 'excludes', 'full', 'path', 'overwrite', 'allowOutsideStateDir', 'pageSize']))
+  })
+})
+
+describe('locator_admin guidance and ignored parameters (0.23.0)', () => {
+  it('reports a parameter the action does not consume instead of dropping it silently', async () => {
+    const root = tempDir('locator-admin-ignored-')
+    const calls: RebuildCalls = { count: 0 }
+    const tool = makeAgentAdminTool({ rt: fakeRuntime(root, calls) })
+    const value = await tool.execute({ action: 'rebuild', roots: [root], full: true }, exec()) as AdminView
+    expect(value.ok).toBe(true)
+    // full belongs to reindex only: it was NOT applied, and the payload says so.
+    expect(value.ignored).toEqual(['full'])
+    expect(calls.count).toBe(1)
+    expect(value.hint).toContain('locator_status')
+    expect(value.nextTools).toEqual(['locator_status'])
+    expect(validateJsonSchemaValue(schemaOf(tool), value)).toEqual([])
+    const text = render(tool, { action: 'rebuild' }, value).map(block => block.text ?? '').join('\n')
+    expect(text).toContain('ignored parameter(s): full')
+    expect(text).toContain('next: locator_status')
+  })
+
+  it('names every inapplicable parameter for export and points at the written file', async () => {
+    const root = tempDir('locator-admin-ignored-export-')
+    const stateDir = join(root, 'state')
+    const tool = makeAgentAdminTool({ rt: fakeExportRuntime(stateDir) })
+    const value = await tool.execute({ action: 'export', path: 'snap.sqlite', roots: [root], full: true }, exec()) as AdminView
+    expect(value.ok).toBe(true)
+    expect(value.ignored).toEqual(['roots', 'full'])
+    expect(value.hint).toContain('SQLite')
+    expect(value.nextTools).toBeUndefined()
+    expect(validateJsonSchemaValue(schemaOf(tool), value)).toEqual([])
+    const text = render(tool, { action: 'export' }, value).map(block => block.text ?? '').join('\n')
+    expect(text).toContain('ignored parameter(s): roots, full')
+  })
+
+  it('reports export-only parameters as ignored for reindex', async () => {
+    const root = tempDir('locator-admin-ignored-reindex-')
+    const calls: ReindexCalls = { rebuild: 0, refresh: 0 }
+    const tool = makeAgentAdminTool({ rt: fakeRuntime(root), content: fakeContent(calls) })
+    const value = await tool.execute({ action: 'reindex', path: 'x.db', overwrite: true }, exec()) as AdminView
+    expect(value.ok).toBe(true)
+    expect(value.ignored).toEqual(['path', 'overwrite'])
+    expect(value.nextTools).toEqual(['locator_status'])
+    expect(validateJsonSchemaValue(schemaOf(tool), value)).toEqual([])
+  })
+
+  it('omits ignored when every provided parameter applies', async () => {
+    const root = tempDir('locator-admin-applicable-')
+    const calls: RebuildCalls = { count: 0 }
+    const tool = makeAgentAdminTool({ rt: fakeRuntime(root, calls) })
+    const value = await tool.execute({ action: 'rebuild', roots: [root], excludes: ['**/node_modules/**'] }, exec()) as AdminView
+    expect(value.ok).toBe(true)
+    expect(value.ignored).toBeUndefined()
+    expect(value.hint).toBeDefined()
+    expect(validateJsonSchemaValue(schemaOf(tool), value)).toEqual([])
   })
 })
 

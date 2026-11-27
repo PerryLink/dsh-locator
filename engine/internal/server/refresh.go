@@ -245,7 +245,7 @@ func (s *Server) periodicRefresh(ctx context.Context) refreshOutcome {
 	if changed {
 		// Rescanning changes the meta a snapshot must carry; an unchanged tick
 		// deliberately leaves meta and dirty state alone.
-		s.noteRescanMeta(ix, st)
+		s.noteRescanMeta(ix, st, scanModeRefresh)
 		s.markDirty()
 	}
 	s.logf("periodic refresh: rescanned %d entries under %d root(s) in %s (added %d, removed %d, changed %v)",
@@ -322,13 +322,15 @@ func (s *Server) scanOptions(roots []string) scan.Options {
 
 // noteRescanMeta records the scan statistics of a changed incremental refresh
 // without rebuilding the whole meta by hand.
-func (s *Server) noteRescanMeta(ix *index.Index, st scan.Stats) {
+func (s *Server) noteRescanMeta(ix *index.Index, st scan.Stats, mode string) {
+	at := time.Now()
 	s.mu.Lock()
 	s.meta.Version = s.opt.Version
 	s.meta.Roots = ix.Roots()
 	s.meta.Excludes = s.opt.Excludes
-	s.meta.BuiltAt = time.Now()
+	s.meta.BuiltAt = at
 	s.meta.Stats = st
+	s.meta.LastRefresh = &store.RefreshInfo{At: at, Mode: mode, Stats: st}
 	s.mu.Unlock()
 }
 

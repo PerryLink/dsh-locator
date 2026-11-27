@@ -8,6 +8,8 @@ import {
   AGENT_DEFAULT_MAX_CHARS,
   AGENT_ERROR_CODES,
   AGENT_MIN_BUDGET_CHARS,
+  CURSOR_VERSION,
+  CURSOR_VERSION_V2,
   agentFailure,
   agentSuccess,
   applyItemBudget,
@@ -15,6 +17,7 @@ import {
   cursorMatches,
   decodeCursor,
   encodeCursor,
+  encodeCursorV2,
   estimateItemChars,
   makeCoverage,
   makeError,
@@ -41,9 +44,11 @@ const fullItem: AgentItem = {
   hash: 'a'.repeat(64),
   permissions: { read: 'allowed', visibility: 'workspace', reason: 'inside roots' },
   provenance: { origin: 'index', path: '/tmp/project/a.ts', indexedAt: 900 },
+  sources: ['body'],
   sessionId: 'session-1',
   messageId: 'message-1',
   seq: 7,
+  eventRef: 'ref://session-event?sid=abc&seq=7',
   size: 4_096,
   mtime: 2_000,
   ext: 'ts',
@@ -105,7 +110,11 @@ describe('agent-core envelope', () => {
 describe('agent-core detail presets', () => {
   it('compact keeps only the cheap identity fields and trims the snippet', () => {
     const compact = trimItem(fullItem, 'compact')
-    expect(Object.keys(compact).sort()).toEqual(['kind', 'line', 'path', 'ref', 'score', 'snippet', 'title', 'why'])
+    expect(Object.keys(compact).sort()).toEqual(['eventRef', 'kind', 'line', 'path', 'ref', 'score', 'seq', 'snippet', 'sources', 'title', 'why'])
+    // 0.23: a compact session row must stay readable through locator_read.
+    expect(compact.eventRef).toBe(fullItem.eventRef)
+    expect(compact.seq).toBe(7)
+    expect(compact.sources).toEqual(['body'])
     expect(Array.from(compact.snippet ?? '').length).toBe(160)
     expect(compact.freshness).toBeUndefined()
     expect(compact.sessionId).toBeUndefined()
@@ -120,6 +129,8 @@ describe('agent-core detail presets', () => {
     expect(standard.sessionId).toBeUndefined()
     expect(standard.provenance).toBeUndefined()
     expect(standard.size).toBeUndefined()
+    expect(standard.seq).toBe(7)
+    expect(standard.eventRef).toBe(fullItem.eventRef)
   })
 
   it('full keeps identity, permissions and provenance', () => {
@@ -135,6 +146,8 @@ describe('agent-core detail presets', () => {
       mtime: 2_000,
       ext: 'ts',
       name: 'parseConfig',
+      eventRef: fullItem.eventRef,
+      sources: ['body'],
     })
     expect(Array.from(full.snippet ?? '').length).toBe(320)
   })
@@ -221,6 +234,73 @@ describe('agent-core cursor', () => {
     expect(one).toMatch(/^[0-9a-f]{16}$/)
     expect(queryHashOf({ query: 'x', mode: 'name', scope: 'workspace' })).toBe(one)
     expect(queryHashOf({ query: 'x', mode: 'name', scope: 'roots' })).not.toBe(one)
+  })
+})
+
+describe('agent-core cursor v2 (auto cross-source)', () => {
+  const payload = {
+    v: 2 as const,
+    mode: 'auto' as const,
+    queryHash: 'abc123',
+    offsets: { name: 4, body: 9, symbol: 2 },
+    scope: 'roots' as const,
+    generation: 7,
+    kinds: ['file', 'symbol'] as const,
+    includeArchived: true,
+  }
+
+  it('exposes both contract versions', () => {
+    expect(CURSOR_VERSION).toBe(1)
+    expect(CURSOR_VERSION_V2).toBe(2)
+  })
+
+  it('round-trips the parity payload shape of scripts/locator-cli.mjs', () => {
+    const token = encodeCursorV2({ ...payload, kinds: [...payload.kinds] })
+    expect(token).toMatch(/^[A-Za-z0-9_-]+$/)
+    expect(decodeCursor(token)).toEqual({ ...payload, kinds: ['file', 'symbol'] })
+  })
+
+  it('omits scope/generation/kinds/includeArchived when absent', () => {
+    const token = encodeCursorV2({ v: 2, mode: 'auto', queryHash: 'h', offsets: { body: 3 } })
+    const decoded = decodeCursor(token)
+    expect(decoded).toEqual({ v: 2, mode: 'auto', queryHash: 'h', offsets: { body: 3 } })
+    expect(decoded !== undefined && 'scope' in decoded).toBe(false)
+  })
+
+  it('clamps negative offsets and round-trips an empty offsets object', () => {
+    const decoded = decodeCursor(encodeCursorV2({ v: 2, mode: 'auto', queryHash: 'h', offsets: { name: -2 } }))
+    expect(decoded).toEqual({ v: 2, mode: 'auto', queryHash: 'h', offsets: { name: 0 } })
+    const empty = decodeCursor(encodeCursorV2({ v: 2, mode: 'auto', queryHash: 'h', offsets: {} }))
+    expect(empty).toEqual({ v: 2, mode: 'auto', queryHash: 'h', offsets: {} })
+  })
+
+  it('round-trips the bounded cross-page dedupe memory', () => {
+    const token = encodeCursorV2({ v: 2, mode: 'auto', queryHash: 'h', offsets: { name: 3 }, seen: ['deadbeef', 'cafebabe'] })
+    expect(decodeCursor(token)).toEqual({ v: 2, mode: 'auto', queryHash: 'h', offsets: { name: 3 }, seen: ['deadbeef', 'cafebabe'] })
+    const tooMany = Array.from({ length: 97 }, (_, index) => index.toString(16).padStart(8, '0'))
+    expect(decodeCursor(encodeCursorV2({ v: 2, mode: 'auto', queryHash: 'h', offsets: {}, seen: tooMany }))).toBeUndefined()
+  })
+
+  it('rejects malformed v2 payloads', () => {
+    const bad = [
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"h"}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"h","offsets":{"nope":1}}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"h","offsets":{"name":-1}}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"invented","queryHash":"h","offsets":{}}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"","offsets":{}}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"h","offsets":{},"kinds":["nope"]}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"h","offsets":{},"seen":["zzz"]}').toString('base64url'),
+      Buffer.from('{"v":2,"mode":"auto","queryHash":"h","offsets":{},"seen":"deadbeef"}').toString('base64url'),
+    ]
+    for (const value of bad) expect(decodeCursor(value)).toBeUndefined()
+  })
+
+  it('binds v2 cursors to the query and mode like v1 does', () => {
+    const decoded = decodeCursor(encodeCursorV2({ v: 2, mode: 'auto', queryHash: 'hash-1', offsets: { name: 1 } }))!
+    expect(cursorMatches(decoded, { queryHash: 'hash-1' })).toBe(true)
+    expect(cursorMatches(decoded, { queryHash: 'hash-1', mode: 'auto' })).toBe(true)
+    expect(cursorMatches(decoded, { queryHash: 'hash-2' })).toBe(false)
+    expect(cursorMatches(decoded, { queryHash: 'hash-1', mode: 'body' })).toBe(false)
   })
 })
 

@@ -40,6 +40,7 @@ import {
 } from './refs.ts'
 import type { LocatorRuntime } from './runtime.ts'
 import { resolveWithinRoots } from './reveal.ts'
+import { readableDenial, type Scope } from './scope.ts'
 
 /** Extra tool-level knobs for locator_resolve (root wiring passes config here). */
 export interface ResolveToolOptions {
@@ -52,6 +53,12 @@ export interface ResolveToolOptions {
   urlFreshnessTimeoutMs?: number
   /** Body-prefix cap hashed for URL revalidation (default 65536, at most 1048576). */
   urlFreshnessMaxBytes?: number
+  /**
+   * Layered ignore rules. When present, a path matching notReadable is refused
+   * before any bytes are read or hashed: the tool answers content-scope-denied
+   * with permissions.read = "denied" and never returns an excerpt/hash.
+   */
+  scope?: Scope
 }
 
 /** Dependencies used by locator_cite detail mode. */
@@ -60,6 +67,12 @@ export interface CiteToolOptions {
   content?: ContentIndex
   /** Configured index roots; file content is only read inside them. */
   roots?: readonly string[]
+  /**
+   * Layered ignore rules. When present, a notReadable file ref makes the whole
+   * call fail with content-scope-denied before any bytes are read; the denied
+   * ref is never cited with a body or an exact text.
+   */
+  scope?: Scope
 }
 
 /** Read at most maxBytes from the head of one file (text excerpt helper). */
@@ -528,6 +541,19 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex, opti
             permissions: { read: 'denied' as const, visibility: 'roots' as const, reason: 'path is outside every indexed root' },
           }
         }
+        // Security fence (0.23.0 P0-1): refuse a notReadable path before the
+        // file is stat'ed/hashed/read; the refusal must not leak bytes or size.
+        const denial = options.scope === undefined ? undefined : readableDenial(options.scope, authorized.path)
+        if (denial !== undefined) {
+          return {
+            ok: false as const,
+            ref: parsed.ref,
+            kind: 'file' as const,
+            error: 'content-scope-denied',
+            warnings: ['path-not-readable'],
+            permissions: { read: 'denied' as const, visibility: 'roots' as const, reason: denial },
+          }
+        }
         const indexedAt = content?.indexedMtime('file', authorized.path)
         const snapshot: FileSnapshot = {
           ...(parsed.mtime === undefined ? {} : { mtime: parsed.mtime }),
@@ -591,6 +617,18 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex, opti
         if (content === undefined) return { ok: false as const, ref: parsed.ref, kind: 'spill' as const, error: 'content-index-unavailable' }
         const occurrences = authorizedOccurrences(content, parsed.ref, caller.cwd, caller.sessionId)
         if (occurrences.length === 0) return deniedResult(parsed, 'spill')
+        // Scope fence: a notReadable spill path is refused before stat/read.
+        const denial = options.scope === undefined ? undefined : readableDenial(options.scope, parsed.path)
+        if (denial !== undefined) {
+          return {
+            ok: false as const,
+            ref: parsed.ref,
+            kind: 'spill' as const,
+            error: 'content-scope-denied',
+            warnings: ['path-not-readable'],
+            permissions: { read: 'denied' as const, visibility: 'session' as const, reason: denial },
+          }
+        }
         if (refMarkedMissing(occurrences)) {
           // A previous resolve already proved this path missing: answer from the
           // stored marker instead of re-statting it on every call.
@@ -658,6 +696,18 @@ export function makeResolveTool(rt: LocatorRuntime, content?: ContentIndex, opti
           }
         }
         const found = attachmentCandidates(parsed.sha256).find(candidate => existsSync(candidate.path))
+        // Scope fence: no bytes from a notReadable attachment object.
+        const denial = options.scope === undefined || found === undefined ? undefined : readableDenial(options.scope, found.path)
+        if (denial !== undefined) {
+          return {
+            ok: false as const,
+            ref: parsed.ref,
+            kind: 'attachment' as const,
+            error: 'content-scope-denied',
+            warnings: ['path-not-readable'],
+            permissions: { read: 'denied' as const, visibility: 'session' as const, reason: denial },
+          }
+        }
         const excerpt = mode === 'excerpt' && found !== undefined && found.kind === 'file' ? readHead(found.path, maxBytes) : undefined
         if (found === undefined) persistRefMissing(content, parsed.ref)
         return {
@@ -787,6 +837,19 @@ interface CitationDetailFields {
 interface CitationDetailResult {
   fields: CitationDetailFields
   warnings: string[]
+  /** Set when a scope rule refuses this ref: the whole call fails, no body leaks. */
+  denied?: { path: string; reason: string }
+}
+
+/**
+ * Path a file ref would cite: the canonical path inside the roots when it
+ * resolves there, else the raw ref path (a notReadable rule still refuses it,
+ * even when the ref is outside the roots).
+ */
+function citePathOf(parsed: ParsedRef, options: CiteToolOptions): string | undefined {
+  if (parsed.kind !== 'file') return undefined
+  if (options.roots === undefined) return parsed.path
+  return resolveWithinRoots(parsed.path, options.roots)?.path ?? parsed.path
 }
 
 /** Extract the human text of one session-event JSON line. */
@@ -854,6 +917,13 @@ async function citationDetail(
       fields.status = 'unknown'
       warnings.push('path-outside-roots')
       return { fields, warnings }
+    }
+    // Scope fence: refuse before inspectFileRef hashes or reads the bytes.
+    const denial = options.scope === undefined ? undefined : readableDenial(options.scope, authorized.path)
+    if (denial !== undefined) {
+      fields.status = 'unknown'
+      warnings.push('path-not-readable')
+      return { fields, warnings, denied: { path: authorized.path, reason: denial } }
     }
     const indexedAt = options.content?.indexedMtime('file', authorized.path)
     const snapshot: FileSnapshot = {
@@ -946,6 +1016,13 @@ async function citationDetail(
       warnings.push('ref-not-authorized')
       return { fields, warnings }
     }
+    // Scope fence: refuse before stat/firstLineExcerpt reads any bytes.
+    const denial = options.scope === undefined ? undefined : readableDenial(options.scope, parsed.path)
+    if (denial !== undefined) {
+      fields.status = 'unknown'
+      warnings.push('path-not-readable')
+      return { fields, warnings, denied: { path: parsed.path, reason: denial } }
+    }
     fields.checkedAt = observedAt
     let exists = false
     try { exists = statSync(parsed.path).isFile() } catch { exists = false }
@@ -983,6 +1060,13 @@ async function citationDetail(
     fields.status = 'missing'
     warnings.push('attachment-missing')
     return { fields, warnings }
+  }
+  // Scope fence: no bytes from a notReadable attachment object.
+  const denial = options.scope === undefined ? undefined : readableDenial(options.scope, found.path)
+  if (denial !== undefined) {
+    fields.status = 'unknown'
+    warnings.push('path-not-readable')
+    return { fields, warnings, denied: { path: found.path, reason: denial } }
   }
   fields.status = 'fresh'
   fields.fallback = found.path
@@ -1038,12 +1122,21 @@ export function makeCiteTool(options: CiteToolOptions = {}) {
       for (const raw of refs) {
         const parsed = parseRef(raw.trim())
         if (parsed === undefined) return { ok: false as const, format, citations: [], error: 'invalid-ref: ' + raw.slice(0, 80) }
+        // Scope fence: a notReadable file ref is never cited, in any detail mode.
+        const citationPath = citePathOf(parsed, options)
+        const denial = citationPath === undefined || options.scope === undefined ? undefined : readableDenial(options.scope, citationPath)
+        if (denial !== undefined) {
+          return { ok: false as const, format, citations: [], error: 'content-scope-denied', warnings: ['path-not-readable'] }
+        }
         const base = compactCitation(parsed)
         if (detail === 'compact') {
           citations.push(base)
           continue
         }
         const enriched = await citationDetail(parsed, base, observedAt, maxBytes, options, caller)
+        if (enriched.denied !== undefined) {
+          return { ok: false as const, format, citations: [], error: 'content-scope-denied', warnings: ['path-not-readable'] }
+        }
         for (const warning of enriched.warnings) warnings.push(warning)
         const markdown = renderCitationMarkdown(base, enriched.fields)
         citations.push({ ...base, ...enriched.fields, markdown })

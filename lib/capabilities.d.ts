@@ -26,6 +26,12 @@ export interface CapabilityCard {
     };
     state: 'available' | 'unknown';
     source: 'tools' | 'skills';
+    /**
+     * 0.23.0: the host asked to defer this tool's schema (legacy surface). Deferred
+     * cards rank below resident ones and their keyword matches weigh less, so the
+     * 3+1 AI-first tools stay on top without hiding real maintenance tools.
+     */
+    deferred: boolean;
 }
 /** One snapshot of the live capability surface. */
 export interface CapabilitySnapshot {
@@ -45,8 +51,22 @@ export interface CapabilitySources {
 }
 /** Tokenize one intent/name for the lexical scorer (letters, digits, CJK). */
 export declare function tokenize(text: string): string[];
-/** Infer risk/permission from a tool name, description and parameter schema. */
-export declare function inferRisk(name: string, description: string, parameters?: Record<string, unknown>): CapabilityCard['risk'] & {
+/**
+ * Infer risk/permission from a tool name and parameter schema.
+ *
+ * 0.23.0 P0-9: the description no longer feeds the exec/write keyword match.
+ * Descriptions legitimately NAME dangerous things as the thing a read-only tool
+ * replaces ("use it instead of shell cat/head") or warns against ("do not
+ * install image libraries"), which made locator_read look exec and read_image
+ * look write. Only the name (and the declared schema) can declare side effects;
+ * the description still feeds discovery keywords/tags. The parameter is kept
+ * for API compatibility and future heuristics.
+ * @param name - tool name; the only keyword source for exec/write inference.
+ * @param _description - accepted for compatibility; not used for risk keywords.
+ * @param parameters - declared parameter schema (JSON-Schema shape).
+ * @returns risk level/actions/basis plus the approval/sandbox permission echo.
+ */
+export declare function inferRisk(name: string, _description: string, parameters?: Record<string, unknown>): CapabilityCard['risk'] & {
     permission: CapabilityCard['permission'];
 };
 /** Build one capability snapshot from the live host services. */

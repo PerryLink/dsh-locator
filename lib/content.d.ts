@@ -123,6 +123,12 @@ export interface ContentCoverage {
     evictedDocs: number;
     sessions: number;
     messages: number;
+    /**
+     * Up to 20 paths of indexable candidates the last complete full build/sweep
+     * could not store because of the body/file budget (0.23). A bounded sample,
+     * never the whole miss list: status output must stay small.
+     */
+    missSamples?: string[];
 }
 /**
  * Cheap, read-only observability payload for `locator_status` and the HTTP
@@ -179,6 +185,23 @@ export interface ContentDiagnostics {
      * event happened after the database was rebuilt.
      */
     warningCounts?: Record<string, number>;
+    /** Archived session ids known to the workspace registry (indexed but hidden by default). */
+    archivedSessions: number;
+    /** Rows in the additive `symbols` table (0 when symbol indexing is off). */
+    symbols: number;
+    /**
+     * Bounded sample paths per warning code (0.23): at most 20 per code, and
+     * only paths the indexable scope accepts. Present only for warnings this
+     * process observed with a path, so status stays a small object.
+     */
+    warningSamples?: Record<string, string[]>;
+    /**
+     * The last incremental refresh skipped a destructive cap-driven rebuild
+     * because the effective body cap shrank below the stored bodies and looks
+     * like a reset profile block (0.23 config-drift guard). Run an explicit
+     * content reindex (full) to force the rebuild.
+     */
+    configResetSuspected?: boolean;
 }
 export interface ContentOptions {
     stateDir: string;
@@ -299,6 +322,29 @@ export interface ContentOptions {
      * done instead of extending the build (default false = inline, chunked).
      */
     optimizeInIdle?: boolean;
+    /**
+     * Platform default body caps a missing configuration block resolves to
+     * (0.23 config-drift guard). The plugin/profile schema defaults are 1.6 GB
+     * and 200k files; tests (and embedders with a different platform default)
+     * pass small numbers so a cap shrink can be recognised as "back to default"
+     * without materialising gigabytes.
+     */
+    configDriftDefaults?: {
+        maxTotalBytes?: number;
+        maxFiles?: number;
+    };
+    /**
+     * Test/embedder seam: bytes free on the volume holding `stateDir`. Default
+     * reads statfs(2); returning undefined means "unknown, skip the preflight".
+     */
+    diskFreeBytes?: (path: string) => number | undefined;
+    /** Bytes that must remain free after a full rebuild (default 256 MiB). */
+    diskReserveBytes?: number;
+    /**
+     * Test seam: override the bytes a full rebuild is estimated to need. The
+     * production estimate is the current database size plus headroom.
+     */
+    rebuildRequiredBytes?: number;
 }
 /** One symbol search hit from the additive `symbols` table. */
 export interface SymbolMatch {
@@ -377,6 +423,16 @@ export declare class ContentIndex {
     private candidateFiles;
     /** Documents evicted from the body budget since this instance opened. */
     private evictedDocs;
+    /** Bounded sample of indexable candidates the last full pass could not store. */
+    private coverageMissSamples;
+    /** Archived session ids known to the workspace registry (diagnostics count). */
+    private knownArchivedSessions;
+    /** Rows in the additive symbols table; loaded/persisted so diagnostics stays O(1). */
+    private symbolCount;
+    /** Bounded sample paths per warning code (0.23 diagnostics; at most 20 each). */
+    private readonly warningSamples;
+    /** The last caps check was skipped by the config-drift guard (0.23). */
+    private configResetSuspectedFlag;
     private dbBytes;
     private walBytes;
     /** Live database bytes and free-list bytes, cached by measureDatabase(). */
@@ -530,6 +586,12 @@ export declare class ContentIndex {
      * even though the log itself is in memory only; 0.20.2 P1-8).
      */
     private addWarning;
+    /**
+     * Record one bounded sample path for a warning code. Paths the indexable scope
+     * rejects are never sampled: a warning must not turn a notIndexed token file
+     * into visible status output.
+     */
+    private addWarningSample;
     /** Terminate every search worker and fail the requests waiting on them. */
     private stopWorker;
     /** Effective search worker count: default 2, clamped to 1..4. */
@@ -576,6 +638,60 @@ export declare class ContentIndex {
      * written before the counters existed pays one scan.
      */
     private capsSatisfied;
+    /** Current effective caps, as persisted in the drift fingerprint. */
+    private currentCaps;
+    /** The small JSON fingerprint path (next to content.db, never live data). */
+    private effectiveStatePath;
+    /**
+     * Read the last effective caps/body fingerprint (0.23 config-drift guard).
+     * Missing, malformed or foreign files mean "no history"; the guard then only
+     * acts when the current body cap is the platform default.
+     */
+    private readEffectiveState;
+    /**
+     * Persist the last effective caps plus a sticky high-water body mark (0.23).
+     * `suspected` survives restarts while the same shrunken cap is still in
+     * effect, so a host restart loop cannot turn into a rebuild loop.
+     */
+    private saveEffectiveState;
+    /**
+     * Whether an over-budget store looks like a reset profile block rather than
+     * an explicit cap change (0.23 config-drift guard).
+     *
+     * The 0.22 live incident: the profile's config block vanished, the effective
+     * `contentMaxTotalBytes` fell back to the 1.6 GB schema default while the
+     * database held more, and the caps check deleted + re-read a 5.5 GB index.
+     * A destructive rebuild is never the right answer to a suspected reset:
+     * keep the database, warn, and let explicit maintenance force it. The same
+     * rule protects an operator who lowered the cap by hand — eviction converges
+     * non-destructively and `locator_admin reindex` remains the explicit force.
+     */
+    private configResetSuspected;
+    /** Count the additive symbol rows (used by diagnostics and finish()). */
+    private countSymbolRows;
+    /**
+     * Bounded sample of indexable candidates the last complete pass could not
+     * store (body/file budget). Paths the indexable scope rejects are never
+     * sampled, and the list never exceeds {@link MAX_SAMPLE_PATHS}.
+     */
+    private recordCoverageMisses;
+    /** Bytes free on the volume holding one path; undefined when unknown. */
+    private freeDiskBytes;
+    /**
+     * Estimated bytes a full rebuild needs on the state volume (0.23 preflight).
+     * A rebuild rewrites the same corpus, so the open database's live pages are
+     * the best estimate; a missing database means there is nothing to protect and
+     * the check is skipped.
+     */
+    private estimateRebuildBytes;
+    /**
+     * Disk-space preflight for a full rebuild: estimated database bytes plus the
+     * configured reserve must fit on the state volume, otherwise the destructive
+     * rebuild is deferred instead of failing halfway with a full disk.
+     */
+    private rebuildSpaceProblem;
+    /** Short "N MiB" form for the deferred-rebuild error message. */
+    private formatMiB;
     private readFlag;
     private writeFlag;
     /**

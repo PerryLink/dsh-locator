@@ -845,3 +845,88 @@ describe('search worker protocol (protocol 2)', () => {
     second.close()
   })
 })
+
+describe('mixed long/short query contract (0.23 P0-7)', () => {
+  it('keeps long terms on FTS/BM25 and post-filters the 2-codepoint term', () => {
+    const index = createIndex([
+      { body: 'retry policy go: use the backoff', title: 'go.md' },
+      { body: 'retry policy only, no short token', title: 'no-short.md' },
+      { body: 'go elsewhere', title: 'short-only.md' },
+    ])
+    const result = searchContent(index.db, 'retry policy go', 10)
+    expect(result.error).toBeUndefined()
+    expect(titles(result)).toEqual(['go.md'])
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+    expect(result.shortQueryFallback).toBeUndefined()
+    expect(result.warnings).not.toContain('content-query-short-fallback')
+    expect(typeof result.hits[0]?.score).toBe('number')
+  })
+
+  it('drops 1-codepoint terms only when a long term exists', () => {
+    const check = checkContentQuery('第 7 次重置', 'normal')
+    expect(check.ok).toBe(true)
+    expect(check.terms).toEqual(['次重置'])
+    expect(check.postFilterTerms).toEqual([])
+    expect(check.warnings).toContain('terms-dropped')
+    expect(check.short).toBe(false)
+    // All-short queries keep the 0.20 contract: a hard error when they contain a
+    // single character, the bounded fallback when every term is 2 codepoints.
+    const short = checkContentQuery('第 7', 'normal', { allowShort: true })
+    expect(short.ok).toBe(false)
+    expect(short.error).toBe('content-query-too-short')
+    const fallback = checkContentQuery('索引 内容', 'normal', { allowShort: true })
+    expect(fallback.ok).toBe(true)
+    expect(fallback.short).toBe(true)
+    // Mixed queries carry the short term as a post-filter, never as fallback.
+    const mixed = checkContentQuery('retry policy go', 'normal')
+    expect(mixed.ok).toBe(true)
+    expect(mixed.terms).toEqual(['retry', 'policy'])
+    expect(mixed.postFilterTerms).toEqual(['go'])
+    expect(mixed.short).toBe(false)
+    expect(mixed.warnings).toEqual([])
+  })
+
+  it('matches a CJK mixed query through its long term', () => {
+    const index = createIndex([
+      { body: '这里讨论第 7 次重置的方案', title: 'cjk.md' },
+      { body: '另一个第 8 次重置记录', title: 'other.md' },
+      { body: '完全无关的正文', title: 'nomatch.md' },
+    ])
+    const result = searchContent(index.db, '第 7 次重置', 10)
+    expect(result.error).toBeUndefined()
+    expect(result.warnings).toContain('terms-dropped')
+    expect(titles(result).sort()).toEqual(['cjk.md', 'other.md'])
+  })
+
+  it('works without the bounded short-query fallback option', () => {
+    const index = createIndex([
+      { body: 'retry go now', title: 'ok.md' },
+      { body: 'retry only', title: 'no.md' },
+    ])
+    const result = searchContent(index.db, 'retry go', 10)
+    expect(result.error).toBeUndefined()
+    expect(titles(result)).toEqual(['ok.md'])
+    expect(result.shortQueryFallback).toBeUndefined()
+  })
+
+  it('applies whole-word semantics to post-filtered short terms', () => {
+    const index = createIndex([
+      { body: 'retry policy go now', title: 'whole.md' },
+      { body: 'retry policy going now', title: 'partial.md' },
+    ])
+    const result = searchContent(index.db, 'retry policy go', 10, { wholeWord: true })
+    expect(result.error).toBeUndefined()
+    expect(titles(result)).toEqual(['whole.md'])
+  })
+
+  it('treats an extended-mode CJK phrase by its full decoded length', () => {
+    const index = createIndex([{ body: '这里讨论第 7 次重置的方案', title: 'ext.md' }])
+    const result = searchContent(index.db, '第 7 次重置', 10, { matchMode: 'extended' })
+    expect(result.error).toBeUndefined()
+    expect(titles(result)).toEqual(['ext.md'])
+    const check = checkContentQuery('第 7 次重置', 'extended')
+    expect(check.ok).toBe(true)
+    expect(check.short).toBe(false)
+    expect(check.terms).toEqual(['第 7 次重置'])
+  })
+})

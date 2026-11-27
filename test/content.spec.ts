@@ -11,7 +11,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { adaptivePressure, ContentIndex } from '../src/content.ts'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import type { ContentOptions, ContentProgress } from '../src/content.ts'
-import { CONTENT_STATE_SCHEMA } from '../src/find.ts'
+import { CONTENT_STATE_SCHEMA, runContentSearchRequest } from '../src/find.ts'
 import type { LocatorRuntime, DumpPage } from '../src/runtime.ts'
 
 const cleanups: Array<() => void> = []
@@ -669,19 +669,61 @@ describe('advanced content search', () => {
     expect(legacy[0]?.path).toBe(result.hits[0]?.path)
   })
 
-  it('rejects mixed long/short terms instead of an unbounded LIKE scan', async () => {
+  it('serves a mixed long/short query with FTS plus a JS post-filter instead of a bounded LIKE scan', async () => {
     const { content } = await makeAdvancedIndex([
       { name: 'a.md', body: 'sql ab together' },
       { name: 'b.md', body: 'sql only' },
     ])
+    // 0.23 P0-7: the long term drives the trigram matcher and the 2-codepoint
+    // term is enforced over the candidates. Before 0.23 the whole query became
+    // 'content-query-too-short' and then a bounded LIKE page.
     const result = await content.search('sql ab', 5, {})
-    expect(result.hits).toEqual([])
-    expect(result.error).toBe('content-query-too-short')
-    expect(result.count).toEqual({ value: 0, kind: 'unknown' })
-    // The short term is not silently ignored to make the long term match.
-    expect((await content.search('sql ab', 5)).length).toBe(0)
-    // A valid two-term query still works.
-    expect((await content.search('sql together', 5)).map(hit => hit.title)).toEqual(['a.md'])
+    expect(result.error).toBeUndefined()
+    expect(result.hits.map(hit => hit.title)).toEqual(['a.md'])
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+    expect(result.shortQueryFallback).toBeUndefined()
+    expect(result.warnings).not.toContain('content-query-short-fallback')
+    // The short term is still significant: it filters the matcher's candidates.
+    expect((await content.search('sql ab', 5)).length).toBe(1)
+    // The legacy hit-array form is unchanged.
+    expect((await content.search('sql ab', 5)).map(hit => hit.title)).toEqual(['a.md'])
+  })
+
+  it('drops 1-codepoint terms of a mixed query with a terms-dropped warning', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'cjk.md', body: '系统会记录第 7 次重置的完整原因' },
+      { name: 'other.md', body: '另一个第 8 次重置记录' },
+      { name: 'nomatch.md', body: '完全无关的正文' },
+    ])
+    const result = await content.search('第 7 次重置', 5, {})
+    expect(result.error).toBeUndefined()
+    expect(result.warnings).toContain('terms-dropped')
+    // Only the 3-codepoint term drove the matcher; the two dropped 1-codepoint
+    // terms no longer filter (other.md has 第/次重置 but not 7).
+    expect(result.hits.map(hit => hit.title).sort()).toEqual(['cjk.md', 'other.md'])
+    // A query made only of short terms is still rejected: a single character is
+    // not a useful bounded-fallback query.
+    const short = await content.search('第 7', 5, {})
+    expect(short.error).toBe('content-query-too-short')
+    const single = await content.search('第', 5, { shortQueryFallback: true })
+    expect(single.error).toBe('content-query-too-short')
+  })
+
+  it('post-filters an ASCII 2-codepoint term of a mixed query (retry policy go)', async () => {
+    const { content } = await makeAdvancedIndex([
+      { name: 'both.md', body: 'retry policy go together' },
+      { name: 'no-short.md', body: 'retry policy only, no short token' },
+      { name: 'short-only.md', body: 'go elsewhere' },
+    ])
+    const result = await content.search('retry policy go', 5, {})
+    expect(result.error).toBeUndefined()
+    expect(result.hits.map(hit => hit.title)).toEqual(['both.md'])
+    expect(result.count).toEqual({ value: 1, kind: 'exact' })
+    expect(result.shortQueryFallback).toBeUndefined()
+    expect(result.warnings).not.toContain('content-query-short-fallback')
+    // The mixed query still runs on the matcher (not the bounded fallback), so
+    // it carries a bm25 score.
+    expect(typeof result.hits[0]?.score).toBe('number')
   })
 
   it('matches case exactly through GLOB and reports exact counts', async () => {
@@ -3380,5 +3422,251 @@ describe('0.21.0 idle maintenance', () => {
     expect(diagnostics.lastVacuumBytes).toBeGreaterThan(1_000_000)
     // The measurement is persisted for the next process.
     expect(contentMeta(state).get('last_vacuum_at')).toBe(diagnostics.lastVacuumAt)
+  })
+})
+
+describe('includeArchived request plumbing (0.23)', () => {
+  it('lets runContentSearchRequest include archived sessions per query', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'locator-req-home-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-req-state-'))
+    cleanups.push(
+      () => rmSync(home, { recursive: true, force: true }),
+      () => rmSync(state, { recursive: true, force: true }),
+    )
+    const sessions = join(home, 'sessions')
+    const sessionCases: Array<[string, string]> = [['session-live', 'LIVEREQUEST'], ['session-archived', 'ARCHREQUEST']]
+    for (const [id, marker] of sessionCases) {
+      const dir = join(sessions, '--workspace--', id)
+      mkdirSync(dir, { recursive: true })
+      const line = JSON.stringify({ type: 'user/message', data: { id: id + '-msg', seq: 1, content: [{ type: 'text', text: marker + ' decision record' }] } })
+      writeFileSync(join(dir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(line)))
+    }
+    mkdirSync(join(home, 'storages'), { recursive: true })
+    writeFileSync(join(home, 'storages', 'workspace.json'), JSON.stringify({ unit: { name: 'workspace', version: 2 }, global: { archivedSessionIds: ['session-archived'] }, tables: { workspaces: {} } }))
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    try {
+      const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+      const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1000, maxTotalBytes: 0, maxFiles: 0, maxSessions: 10 })
+      cleanups.push(() => content.close())
+      content.start()
+      await settle(content)
+      const base = { query: 'ARCHREQUEST', limit: 5, offset: 0, scope: 'all' as const }
+      const hidden = await runContentSearchRequest(content, base, [], false, {})
+      expect(hidden.ok).toBe(true)
+      if (hidden.ok) expect(hidden.hits).toEqual([])
+      const shown = await runContentSearchRequest(content, { ...base, includeArchived: true }, [], false, {})
+      expect(shown.ok).toBe(true)
+      if (shown.ok) expect(shown.hits.length).toBeGreaterThan(0)
+      // The default query path still finds the live session.
+      const live = await runContentSearchRequest(content, { ...base, query: 'LIVEREQUEST' }, [], false, {})
+      expect(live.ok).toBe(true)
+      if (live.ok) expect(live.hits.length).toBeGreaterThan(0)
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  })
+})
+
+describe('0.23 content diagnostics', () => {
+  it('reports archived-session and symbol counts and bounded warning samples', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'locator-diag-home-'))
+    const root = mkdtempSync(join(tmpdir(), 'locator-diag-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-diag-state-'))
+    cleanups.push(
+      () => rmSync(home, { recursive: true, force: true }),
+      () => rmSync(root, { recursive: true, force: true }),
+      () => rmSync(state, { recursive: true, force: true }),
+    )
+    const sessions = join(home, 'sessions')
+    const goodDir = join(sessions, '--workspace--', 'session-good')
+    mkdirSync(goodDir, { recursive: true })
+    const goodLine = JSON.stringify({ type: 'user/message', data: { id: 'good-msg', seq: 1, content: [{ type: 'text', text: 'DIAGMARK decision friday' }] } })
+    writeFileSync(join(goodDir, 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(goodLine)))
+    const corruptDir = join(sessions, '--workspace--', 'session-corrupt')
+    mkdirSync(corruptDir, { recursive: true })
+    const corruptPath = join(corruptDir, 'session.v4.jsonl.zstd')
+    writeFileSync(corruptPath, Buffer.from('this is not a zstandard log'))
+    mkdirSync(join(home, 'storages'), { recursive: true })
+    writeFileSync(join(home, 'storages', 'workspace.json'), JSON.stringify({ global: { archivedSessionIds: ['session-archived'] } }))
+    const codePath = join(root, 'app.ts')
+    writeFileSync(codePath, 'export function diagSymbolOne(): number { return 1 }\nexport class DiagClass {}\n')
+    const entries = [{ path: codePath, name: 'app.ts', size: statSync(codePath).size, mtime: Date.now(), ext: 'ts', dir: false }]
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    try {
+      const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+      const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [sessions], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 100, maxSessions: 10 })
+      cleanups.push(() => content.close())
+      content.start()
+      await settle(content)
+      const diagnostics = content.diagnostics()
+      expect(diagnostics.archivedSessions).toBe(1)
+      expect(diagnostics.symbols).toBeGreaterThan(0)
+      expect(diagnostics.warningCounts?.['content-session-log-unreadable']).toBeGreaterThanOrEqual(1)
+      expect(diagnostics.warningSamples?.['content-session-log-unreadable']).toContain(corruptPath)
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  })
+
+  it('never samples a path the indexable scope rejects', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'locator-sample-home-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-sample-state-'))
+    cleanups.push(
+      () => rmSync(home, { recursive: true, force: true }),
+      () => rmSync(state, { recursive: true, force: true }),
+    )
+    const sessions = join(home, 'sessions')
+    const cases: Array<[string, string]> = [['plain-bad', 'bad log one'], ['secret-bad', 'bad log two']]
+    for (const [id, payload] of cases) {
+      const dir = join(sessions, '--workspace--', id)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'session.v4.jsonl.zstd'), Buffer.from(payload))
+    }
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    try {
+      const runtime = { dump: async () => ({ entries: [], next: 0, done: true }) } as unknown as LocatorRuntime
+      const content = new ContentIndex(runtime, {
+        stateDir: state,
+        sessionDirs: [sessions],
+        maxFileBytes: 1000,
+        maxTotalBytes: 0,
+        maxFiles: 0,
+        maxSessions: 10,
+        isIndexable: (path: string) => !path.includes('secret-bad'),
+      })
+      cleanups.push(() => content.close())
+      content.start()
+      await settle(content)
+      const samples = content.diagnostics().warningSamples?.['content-session-log-unreadable'] ?? []
+      expect(samples.some(path => path.includes('plain-bad'))).toBe(true)
+      expect(samples.some(path => path.includes('secret-bad'))).toBe(false)
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  })
+})
+
+describe('0.23 coverage miss samples', () => {
+  it('keeps at most 20 coverage miss paths', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-miss-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-miss-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries = Array.from({ length: 25 }, (_, index) => {
+      const path = join(root, 'doc-' + String(index).padStart(2, '0') + '.md')
+      writeFileSync(path, 'MISS-' + String(index) + ' body')
+      return { path, name: 'doc-' + String(index).padStart(2, '0') + '.md', size: 12, mtime: Date.now() + index, ext: 'md', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    const content = new ContentIndex(runtime, { stateDir: state, sessionDirs: [], maxFileBytes: 1_000_000, maxTotalBytes: 0, maxFiles: 5, maxSessions: 0 })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    const coverage = content.diagnostics().coverage
+    expect(coverage.indexedFiles).toBe(5)
+    expect(coverage.candidateFiles).toBe(25)
+    const samples = coverage.missSamples ?? []
+    expect(samples).toHaveLength(20)
+    expect(samples.every(path => path.startsWith(root))).toBe(true)
+  })
+})
+
+describe('0.23 config-drift guard', () => {
+  it('keeps the database when the body cap shrinks and only an explicit reindex forces it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-drift-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-drift-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const entries = Array.from({ length: 3 }, (_, index) => {
+      const path = join(root, 'cap-' + String(index) + '.md')
+      writeFileSync(path, 'CAP-MARKER ' + String(index) + ' ' + 'x'.repeat(40))
+      return { path, name: 'cap-' + String(index) + '.md', size: 53, mtime: Date.now() + index * 1000, ext: 'md', dir: false }
+    })
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    // diskReserveBytes is pinned to 0 so the explicit-rebuild step does not
+    // depend on how much free space the test machine has.
+    const base = { stateDir: state, sessionDirs: [], maxFileBytes: 1000, maxFiles: 100, maxSessions: 0, diskReserveBytes: 0 }
+    const first = new ContentIndex(runtime, { ...base, maxTotalBytes: 0 })
+    cleanups.push(() => first.close())
+    first.start()
+    await settle(first)
+    expect(first.status().files).toBe(3)
+    first.close()
+
+    // Reopen with a shrunken body cap that looks like the reset schema default.
+    // Before 0.23 the caps check deleted and re-read the whole database here.
+    const guarded = new ContentIndex(runtime, { ...base, maxTotalBytes: 100, configDriftDefaults: { maxTotalBytes: 100 } })
+    guarded.boot()
+    await settle(guarded)
+    expect(guarded.status().error).toBe('')
+    expect(guarded.status().files).toBe(3)
+    expect(guarded.status().warnings).toContain('content-config-reset-suspected')
+    expect(guarded.diagnostics().configResetSuspected).toBe(true)
+    guarded.close()
+
+    // A host restart must not turn the guard into a rebuild loop.
+    const restarted = new ContentIndex(runtime, { ...base, maxTotalBytes: 100, configDriftDefaults: { maxTotalBytes: 100 } })
+    cleanups.push(() => restarted.close())
+    restarted.boot()
+    await settle(restarted)
+    expect(restarted.status().files).toBe(3)
+    expect(restarted.status().warnings).toContain('content-config-reset-suspected')
+
+    // An explicit full reindex is the force the warning points at.
+    expect(restarted.rebuild()).toBe(true)
+    await settle(restarted)
+    expect(restarted.status().files).toBe(1)
+    expect(restarted.diagnostics().lastRefreshMode).toBe('full')
+    expect(restarted.status().warnings).not.toContain('content-config-reset-suspected')
+    expect(restarted.diagnostics().configResetSuspected).toBeUndefined()
+  })
+})
+
+describe('0.23 rebuild disk preflight', () => {
+  it('defers a full rebuild on a nearly full volume and retries after space frees', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'locator-disk-root-'))
+    const state = mkdtempSync(join(tmpdir(), 'locator-disk-state-'))
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }), () => rmSync(state, { recursive: true, force: true }))
+    const path = join(root, 'notes.md')
+    writeFileSync(path, 'disk preflight marker')
+    const entries = [{ path, name: 'notes.md', size: statSync(path).size, mtime: Date.now(), ext: 'md', dir: false }]
+    const runtime = { dump: async () => ({ entries, next: entries.length, done: true }) } as unknown as LocatorRuntime
+    let free = 1_000_000_000
+    const content = new ContentIndex(runtime, {
+      stateDir: state,
+      sessionDirs: [],
+      maxFileBytes: 1_000_000,
+      maxTotalBytes: 0,
+      maxFiles: 100,
+      maxSessions: 0,
+      rebuildRequiredBytes: 1_000,
+      diskReserveBytes: 0,
+      diskFreeBytes: () => free,
+    })
+    cleanups.push(() => content.close())
+    content.start()
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.status().files).toBe(1)
+
+    free = 10
+    expect(content.rebuild()).toBe(true)
+    await settle(content)
+    expect(content.status().building).toBe(false)
+    expect(content.status().error).toContain('content rebuild deferred')
+    expect(content.status().warnings).toContain('content-disk-space-low')
+    expect(content.diagnostics().lastRefreshMode).toBe('deferred')
+    expect(content.status().files).toBe(1)
+
+    free = 1_000_000_000
+    expect(content.rebuild()).toBe(true)
+    await settle(content)
+    expect(content.status().error).toBe('')
+    expect(content.diagnostics().lastRefreshMode).toBe('full')
+    expect(content.status().files).toBe(1)
   })
 })

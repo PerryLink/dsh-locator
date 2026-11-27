@@ -143,12 +143,20 @@ func cmdScan(args []string) error {
 	})
 	fmt.Fprintln(os.Stderr)
 	if st.Entries > 0 {
+		at := time.Now()
 		m := store.Meta{
 			Version:  version,
 			Excludes: excludes,
-			BuiltAt:  time.Now(),
+			BuiltAt:  at,
 			Platform: runtime.GOOS + "/" + runtime.GOARCH,
 			Stats:    st,
+			IndexStats: &store.IndexStats{
+				Entries: st.Entries,
+				Files:   st.Files,
+				Dirs:    st.Dirs,
+				Roots:   st.Roots,
+			},
+			LastRefresh: &store.RefreshInfo{At: at, Mode: "scan", Stats: st},
 		}
 		if err := store.Save(*state, ix, m); err != nil {
 			return err
@@ -260,6 +268,16 @@ func cmdStatus(args []string) error {
 	fmt.Printf("built    %s\n", meta.BuiltAt.Format(time.RFC3339))
 	fmt.Printf("platform %s\n", meta.Platform)
 	fmt.Printf("roots    %s\n", strings.Join(meta.Roots, ", "))
+	if meta.IndexStats != nil {
+		fmt.Printf("index    %d entries (%d files, %d dirs) across %d root(s)\n",
+			meta.IndexStats.Entries, meta.IndexStats.Files, meta.IndexStats.Dirs, meta.IndexStats.Roots)
+	}
+	if meta.LastRefresh != nil {
+		fmt.Printf("refresh  %s at %s: %d entries in %s (%d errors)\n",
+			meta.LastRefresh.Mode, meta.LastRefresh.At.Format(time.RFC3339),
+			meta.LastRefresh.Stats.Entries, meta.LastRefresh.Stats.Took.Round(time.Millisecond),
+			meta.LastRefresh.Stats.Errors)
+	}
 	fmt.Printf("scan     %d entries in %s (%d errors)\n", meta.Stats.Entries, meta.Stats.Took.Round(time.Millisecond), meta.Stats.Errors)
 	return nil
 }

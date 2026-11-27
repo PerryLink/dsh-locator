@@ -129,6 +129,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
+      - name: Assert lib/ is fresh (github installs use the committed lib)
+        shell: bash
+        run: git diff --exit-code -- lib
+      - name: Assert the generated agent schemas are in sync
+        run: node scripts/gen-agent-schemas.mjs --check
       - name: Download the engines built from this commit
         uses: actions/download-artifact@v4
         with:
@@ -164,6 +169,8 @@ jobs:
           # macOS cgo/FSEvents build, never the kqueue fallback.
           DSH_LOCATOR_REQUIRE_DARWIN_CGO: '1'
         run: node scripts/verify.mjs
+      - name: Pack-check the published tarball
+        run: node scripts/pack-check.mjs
       - name: Run tests and write a machine-readable report
         run: pnpm exec vitest run --reporter=default --reporter=json --outputFile=vitest-report.json
       - name: Assert the real-engine suites actually ran

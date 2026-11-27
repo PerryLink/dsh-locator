@@ -9,6 +9,22 @@
  *   POST /dsh-locator/status   {}
  *   POST /dsh-locator/combined { query, limit, contentLimit, compact, ... }
  *
+ * 0.23.0 adds a versioned AI-first face that answers the shared agent-core
+ * envelope (apiVersion/ok/tool/items/page/error) and shares the same trust
+ * fence:
+ *
+ *   POST /dsh-locator/v1/find   { query, mode, kinds, where, scope, limit, cursor, ... }
+ *   POST /dsh-locator/v1/read   { ref | refs[] | path, line, window, as, maxBytes }
+ *   POST /dsh-locator/v1/status { detail: brief|full }
+ *
+ * The /v1 handlers are thin adapters over the exact tool factories the host
+ * registers (makeAgentFindTool / makeAgentReadTool / makeAgentStatusTool), so
+ * there is no second search implementation. The HTTP API has no caller
+ * session identity: find is files-only and hides session rows, read accepts
+ * only file refs and absolute paths, and admin is never exposed. The legacy
+ * /search route is unchanged; /content and /content/rebuild are deprecated
+ * (removed in 0.24.0).
+ *
  * **Method contract, per route.** `/dsh-locator/search` accepts both POST and
  * GET on purpose: the panel keeps the POST JSON-body contract, while scripts and
  * other tools get a plain, citable GET query API (Everything-style HTTP) behind

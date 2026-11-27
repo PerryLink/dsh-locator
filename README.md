@@ -1,13 +1,13 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-zh-dark.webp">
-  <img src="docs/assets/dsh-locator-hero-zh-light.webp" width="100%" alt="dsh-locator：记得名字就搜名字，记得原话就搜正文——右侧是 0.20.2 名称索引实测延迟（func 10.7ms、go 6.0ms、正则约 11ms），下方是 locator_search 与 locator_find 两族工具">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-hero-zh-dark.svg">
+  <img src="docs/assets/dsh-locator-hero-zh-light.svg" width="100%" alt="dsh-locator 0.23.0：记得名字就搜名字，记得原话就搜正文；默认 3+1 agent 工具面（locator_find、locator_read、locator_status，另加延后加载的 locator_admin），右侧为 0.21.1 名称索引实测延迟">
 </picture>
 
 # 🔎 dsh-locator
 
-当前版本 `0.22.3`。
+当前版本 `0.23.0`。
 
 **记得名字就搜名字，记得内容就搜内容；找到之后直接打开，或者跳回那次对话。**
 
@@ -29,7 +29,7 @@
 [简体中文](README.md) · [English](README.en.md) · [Español](README-es.md) · [Português](README-pt.md) · [हिन्दी](README-hi.md)
 
 ```sh
-dsh plugin --profile web add dsh-locator
+dsh plugin --profile web add dsh-locator@0.23.0
 ```
 
 </div>
@@ -42,10 +42,9 @@ dsh plugin --profile web add dsh-locator
 - [和 Everything / Spotlight / grep 有什么不同](#和-everything--spotlight--grep-有什么不同)
 - [安装](#安装)
 - [第一次运行](#第一次运行)
-- [两种搜索](#两种搜索)
+- [3+1 agent 工具面](#31-agent-工具面)
 - [Web 面板](#web-面板)
 - [在会话中查找（Ctrl+F）](#在会话中查找ctrlf)
-- [工具一览](#工具一览)
 - [查询语法](#查询语法)
 - [配置](#配置)
 - [性能与资源](#性能与资源)
@@ -56,6 +55,7 @@ dsh plugin --profile web add dsh-locator
 - [限制](#限制)
 - [安全与隐私](#安全与隐私)
 - [版本与兼容性](#版本与兼容性)
+- [0.23.0 升级说明](#0230-升级说明)
 - [路线图](#路线图)
 - [许可证](#许可证)
 
@@ -66,24 +66,25 @@ dsh plugin --profile web add dsh-locator
 - **记得名字，不记得位置。** `glob`/`grep` 每次都要重新遍历；文件在 `~/Downloads` 还好，只记得半个文件名时就很难受。
 - **记得某句话、某个结论、某段代码，想不起在哪个文件、哪次对话里。** 这时只搜文件名没有用，而 DSH 的会话日志本身也是一等公民。
 
-`dsh-locator` 把两件事放进同一个插件：
+`dsh-locator` 把两件事放进同一个插件、同一个信封：
 
 | 能力 | 怎么用 |
 |---|---|
-| 文件名 / 路径搜索 | `locator_search`，或面板默认模式 |
-| 文件正文搜索 | `locator_find`，或面板的“内容”范围（默认开启） |
-| DSH 会话内容搜索 | 同上；命中带 `sessionId` / `messageId`，可直接跳回那次对话 |
+| 文件名 / 路径搜索 | `locator_find`（`mode: 'name'` 或 `'auto'`），或面板默认模式 |
+| 文件正文搜索 | `locator_find`（`mode: 'body'`/`'auto'`），或面板的“内容”范围（默认开启） |
+| DSH 会话内容搜索 | 同一套工具；命中带 `sessionId`/`messageId`/`eventRef`，面板可跳回对话，agent 可直接 `locator_read` |
+| 代码符号 | `locator_find`（`mode: 'symbol'`/`'auto'`）；`legacyTools: true` 时还有 `locator_outline`/`locator_repo_map` |
 | 打开 / 定位 | 工具返回路径；面板双击在文件管理器定位，`Ctrl+O` 打开，`Ctrl+Enter` 把 `@"路径"` 插进输入框 |
-| 外部工具消费 | `locator_export` 导出只读 SQLite |
+| 程序化访问 | 只读 HTTP `/dsh-locator/v1/*`、`dsh-locator` CLI 与 `dsh-locator-mcp` |
 
 索引完全在本地：不联网、不上传、不埋点；插件不会修改、移动或删除被索引的文件。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dsh-locator-flow-v5-dark.svg">
-  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="dsh-locator 结构图：根目录经扫描与监听生成 35MB 名称快照（Go 引擎），locator_search 查名字；宿主侧 SQLite FTS5 索引为 locator_find 提供文件正文与 DSH 会话消息；两者共同供工具、Ctrl+Shift+F 面板、CLI 与 MCP 使用，所有结果只读">
+  <img src="docs/assets/dsh-locator-flow-v5-light.svg" width="100%" alt="dsh-locator 结构图：根目录经扫描与监听生成 35MB 名称快照（Go 引擎）；locator_find 合并名称、正文与符号命中；宿主侧 SQLite FTS5 索引提供文件正文与会话消息；locator_read 与 locator_status 补齐 3+1，共同供工具、Ctrl+Shift+F 面板、CLI、MCP 与 HTTP /v1 使用，所有结果只读">
 </picture>
 
-*结构：扫描/监听 → 35MB 名称快照（Go）与宿主侧 FTS5 正文索引 → `locator_search` / `locator_find` → 12 个工具、`Ctrl+Shift+F` 面板、CLI 与 MCP。图内只出现真实工具名、字段名与配置名，五语共用同一张结构图；真实界面截图见 `docs/assets/panel-en.png` 与 `docs/assets/panel-zh.png`。*
+*结构：扫描/监听 → 35MB 名称快照（Go）与宿主侧 FTS5 正文索引 → `locator_find` / `locator_read` / `locator_status` → 3+1 agent 工具面、`Ctrl+Shift+F` 面板、CLI、MCP 与 HTTP `/v1`。图内只出现真实工具名、字段名与配置名。*
 
 ## 和 Everything / Spotlight / grep 有什么不同
 
@@ -91,9 +92,9 @@ dsh plugin --profile web add dsh-locator
 |---|---|---|---|---|
 | 平台 | Windows / macOS / Linux / WSL | Windows | macOS | 跨平台 |
 | 索引形态 | 常驻索引（自建） | 常驻索引（NTFS USN） | 系统元数据/内容索引 | 每次调用重新遍历 |
-| 按正文搜索 | 文本文件 + DSH 会话消息 | 默认只搜文件名 | 支持，可用性因系统而异 | 支持，但无索引 |
-| 会话跳转 | 命中带 `sessionId` / `messageId`，可跳回 | 无 | 无 | 无 |
-| 给 agent 用 | 12 个 locator 工具 + 2 个 capability 适配，查询语法一致 | 需另装 CLI/服务 | 需另接脚本 | 原生工具，无持久索引 |
+| 按正文搜索 | 文本文件、抽取文档 + DSH 会话消息 | 默认只搜文件名 | 支持，可用性因系统而异 | 支持，但无索引 |
+| 会话跳转 | 命中带 `sessionId` / `messageId` / `eventRef`，可跳回 | 无 | 无 | 无 |
+| 给 agent 用 | 3+1 个 locator 工具（+2 个 capability 适配），同一套信封与查询语法 | 需另装 CLI/服务 | 需另接脚本 | 原生工具，无持久索引 |
 | Windows 速度 | 接近 Everything（USN 可选） | 最快最轻 | 不适用 | 慢于索引方案 |
 
 一句话：Everything 的**思路**（常驻索引 + 结构化查询）被独立实现成了跨平台版本，并补上了 DSH 会话这一层；不是 Everything 的封装。
@@ -101,165 +102,88 @@ dsh plugin --profile web add dsh-locator
 ## 安装
 
 ```sh
-# npm（推荐）
-dsh plugin --profile web add dsh-locator
-
-# 指定版本
-dsh plugin --profile web add dsh-locator@0.22.2
-
-# GitHub 主仓
-dsh plugin --profile web add github:PerryLink/dsh-locator
-
-# 从源码
-pnpm install
-pnpm build
-pnpm build:engine        # 当前平台的 Go 引擎
-dsh plugin --profile web add /绝对路径/dsh-locator
-
-# 从 tarball（npm pack 产物；替换成实际版本号）
-npm pack
-dsh plugin --profile web add /绝对路径/dsh-locator-0.7.6.tgz
+dsh plugin --profile web add dsh-locator@0.23.0
 ```
 
-- 包里已经带了六个平台的预编译引擎：`linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`、`darwin-x64`、`darwin-arm64`，装完不需要本机 Go。
-- 国内 npm 镜像偶尔滞后：如果 `latest` 不是新版本，加 `--registry=https://registry.npmjs.org` 再装。
-- 装进**正在运行**的 Web profile 后，刷新一下页面（F5）：宿主工具通常会热挂载，但浏览器面板是页面加载时从 boot graph 里取的。headless / TUI profile 只有工具，没有面板。
-- 升级：`dsh plugin --profile web add dsh-locator@latest`，然后 F5；内容库结构变化时只重建一次。
-- 卸载：`dsh plugin --profile web remove dsh-locator`；想临时关掉但保留配置，设 `enabled: false`。
+- 发版当天请**钉住具体版本**：如果 npm 侧启用了 `minimumReleaseAge` 或镜像滞后，`@latest` 可能仍解析到上一版。
+- 其他安装方式（GitHub 主仓、带 `sha256sums.txt` 的 GitHub Release tarball、源码构建）与完整校验清单见 [docs/install.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/install.md)。
+- 装进**正在运行**的 Web profile 后刷新页面（F5）：宿主工具通常会热挂载，但浏览器面板是页面加载时从 boot graph 里取的。headless / TUI profile 只有工具，没有面板。
+- 卸载：`dsh plugin --profile web remove dsh-locator`；状态目录是缓存、**不会**被删除，见 [docs/troubleshooting.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/troubleshooting.md#uninstall-residue)。
 
 ## 第一次运行
 
-默认索引你的主目录，快照和内容库放在系统缓存目录：
+首次挂载时引擎索引配置的根目录（默认主目录），快照与内容库写到系统缓存目录：
 
-| 平台 | 默认位置 |
+| 平台 | 默认状态目录 |
 |---|---|
 | Windows | `%LOCALAPPDATA%\dsh-locator` |
 | macOS | `~/Library/Application Support/dsh-locator` |
 | Linux | `$XDG_CACHE_HOME/dsh-locator` 或 `~/.cache/dsh-locator` |
 
-第一次扫描要读盘；之后启动直接加载快照。扫描期间搜索照常可用：返回已索引的部分，并带 `indexing: true`，面板底栏也会提示“索引构建中”。
+第一次名称扫描期间搜索照常可用：返回已索引的部分并带 `indexing: true`，面板底栏提示“索引构建中”。默认跳过 `node_modules`、`.git`、`.hg`、`.svn`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`（按名称匹配，`excludes` 可改）。
 
-默认跳过 `node_modules`、`.git`、`.hg`、`.svn`、`.cache`、`__pycache__`、`.venv`、`venv`、`.next`（按名称匹配，`excludes` 可改）。
+内容索引是**惰性**的：第一次内容搜索才开始后台构建。大主目录首次全量构建约需 **4–5 分钟**，内容库可能达到**数 GB**（约为正文预算的 3 倍：实测 1.74GB 正文对应 5.45GB `content.db`）。0.23.0 增加了重建前的磁盘余量预检，放不下时会延后重建而不是把磁盘写满。详见 [docs/install.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/install.md#first-content-build-expect-minutes-and-several-gb)。
 
-可以这样试：
+## 3+1 agent 工具面
 
-```text
-帮我找上周改过的 PDF
-哪里讨论过 “contentRefreshMs”？
-看看哪个会话里定过这个方案
-```
+0.23.0 注册四个 locator 工具：三个常驻，一个延后加载：
 
-## 两种搜索
+| 工具 | 常驻 | 作用 |
+|---|---|---|
+| `locator_find` | 是 | 唯一检索入口：`mode auto|name|body|symbol`、`kinds[]`、`where{pathPrefix,ext,modifiedAfter,minSize}`、`scope workspace|roots|all`、`cursor`、`detail compact|standard|full`、`count`、`includeArchived`；`auto` 跨源合并并按身份去重。 |
+| `locator_read` | 是 | 读取 `ref` / `refs[]` / `path`，`as meta|excerpt|quote`，支持 `line`、`window`、`maxBytes`；会话命中可用 `eventRef` 直接读。 |
+| `locator_status` | 是 | 索引/内容/范围状态；默认 brief，包含引擎 warning 与内容 `truncated`。 |
+| `locator_admin` | 否（deferLoading） | `rebuild`、`reindex`、`export`，按需加载。 |
 
-### 按名字找：`locator_search`
+- **同一个信封**：`apiVersion 2026-11`、`ok`、`items`、`page`/`nextCursor`、`counts`、`coverage`、`budget`、`timing`；失败用 12 个闭合错误码，带 `retryable`/`remediation`/`nextTools`。
+- **默认值**：`limit=10`（最大 50）、`maxChars` 取 profile 的 `outputBudgetChars`（默认 8,000；schema 兜底 6,000）、`detail='compact'`、`scope='workspace'`；workspace 首页为空会自动放宽一次并在 `scope.fallback` 回显。
+- **不再为旧工具付 prompt 税**：旧工具（`locator_search`、`locator_rebuild`、`locator_resolve`、`locator_cite`、`locator_explore`、`locator_outline`、`locator_symbol`、`locator_repo_map` 等）默认**不再注册**；需要时在 profile 里设 `legacyTools: true`（仍以 defer 方式加载）。
+- 完整契约见 [docs/agent.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/agent.md)。
 
-Everything 风格的查询语法，返回路径、大小、修改时间、扩展名、类型。适合“我记得文件名里有 report”“找上周改过的 PDF”“找 50MB 以上的视频”这类问题。
-
-查询语法见[下方](#查询语法)。排序、分页、`limit`/`offset` 都由宿主引擎完成，25.8 万条记录的常见查询在几十毫秒内。
-
-### 按内容找：`locator_find`
-
-在文本文件和 DSH 会话消息里搜正文，返回命中片段和来源：
-
-- 文件命中带路径，可以直接打开或定位；
-- 会话命中带 `sessionId` 和 `messageId`，可以跳回那次对话并尽量滚动到命中的那句话；
-- 中文和英文子串都能搜（trigram 分词），不要求分词正确。
-
-内容索引的行为：
-
-- **惰性启动**：插件启动时什么都不建；第一次搜内容（`locator_find` 或面板的“内容”范围）才开始后台构建，`contentLazy: false` 可恢复启动即建。第一次查询会立刻返回 `building: true`，不会让你干等或误以为没结果。
-- **重启复用**：有内容库时只做一次增量刷新，不重读全部正文；只有库不存在、结构版本不兼容、上次构建没完成或损坏时才全量重建（先会话、后文件正文）。
-- **增量刷新**：默认每 5 分钟检查一次，只重读 mtime 变化的文件/会话；`contentRefreshMs` 可调，0 关闭。
-- **归档与活动会话**：已归档会话**始终索引**，但普通搜索结果里默认隐藏；面板勾选“包含归档会话”或 `contentIncludeArchived: true` 即可搜索它们（切换无需重建）。正在写入的会话等它安静 `contentActiveSessionDelayMs`（默认 2 分钟）后再索引，不会每轮刷新重解压整份日志；已删除的会话随文件消失自动退出索引。
-- **预算与截断**：默认单文件最多 1MB、文件数最多 20 万、内容总量最多 **1.6GB**、最近 **1000** 个会话；全量重建按 mtime 新→旧规划预算，预算满时保留最新内容（`contentEvict` 时增量刷新淘汰最旧）。撞到上限时 `locator_find` 会提示 `content budget reached`，HTTP 状态里是 `truncated: true`；调大 `contentMaxTotalBytes` 或收窄 `contentExcludes` 即可。
-- **依赖目录不读正文**：`node_modules`、`.cargo`、`.bun`、`.pnpm`、`site-packages`、`toolchain` 等默认被 `contentExcludes` 跳过，否则预算会先被库代码吃满；文件名索引不受影响。
-
-内容索引跑在宿主进程里，但文件读取和 zstd 解压都是异步的，构建循环每约 8ms 让出一次事件循环（28.6MB 语料实测最大事件循环阻塞从 968ms 降到约 20ms），所以不会拖慢会话加载/切换。内容**查询**在 worker 线程里用只读连接执行，常见词约 100ms 量级、生僻词几毫秒，不阻塞宿主。
+示例：`locator_find{query:'retry policy', mode:'auto', limit:10}` → 用 `page.nextCursor` 续页 → `locator_read{ref, as:'excerpt', window:2}`。会话命中直接用 `items[n].eventRef`，不必二次搜索。
 
 ## Web 面板
 
-在 Web GUI 里按 `Ctrl+Shift+F`，或者点会话头部的放大镜。面板语言跟随 DSH 界面语言（`<html lang>`），没有有效语言标签时默认中文；可通过 profile 的 `locale` 配置（`preference: zh`）固定。面板通过同源路由工作（`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`），不另起服务、不占额外端口。`/combined` 新增 `matchMode`、`caseSensitive`、`wholeWord`、`sessionId`、`count` 参数，内容组返回 `count`/`warnings`，文件命中带 `line`。
+在 Web GUI 里按 `Ctrl+Shift+F`，或者点会话头部的放大镜。面板语言跟随 DSH 界面语言（`<html lang>`），没有有效语言标签时默认中文；可通过 profile 的 `locale` 配置（`preference: zh`）固定。面板只用同源路由——`search`、`content`、`content/rebuild`、`combined`、`status`、`reveal`、`open`、`capabilities`——不另起服务、不占额外端口。0.23.0 新增给脚本/集成用的版本化 `POST /dsh-locator/v1/{find,read,status}`（files-only；`/content*` 已标记 deprecated，0.24.0 删除）。
 
-- **默认同时搜索三个范围**：内容（正文 + 会话）、文件、目录，三个勾选默认全部打开；取消任一勾选即可缩小范围。结果按“内容 → 文件 → 目录”分组，组头显示数量；内容按相关度排序，文件/目录按排序菜单。
-- **双击或 `Enter` 激活**：会话命中打开对应会话，并把命中的词用半透明琥珀色高亮（随滚动跟随、自动居中、`Esc` 清除）；文件/目录在文件管理器中定位。`Ctrl+Shift+C` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 插入 `@file`，`Alt+1–3` 切换范围。
-- **计数**：组头显示命中数；可精确时显示数字，受上限保护时显示 `≥ N`；头部显示当前选中位置 `3/37`，底栏汇总三组。内容页面路径已改为“先取 rank rowid、再按 rowid 取正文、JS 生成片段/行号”，常见词从约 2.7 秒降到 300 毫秒以内。
-- **查找选项**：工具栏提供模式（普通 / 扩展 / 正则）、`Aa` 大小写、全词、当前会话范围。模式和大小写/全词对文件、目录名生效；内容支持普通/扩展/大小写/全词，**正则模式下内容组自动暂停**（文件/目录仍可正则），避免全库正则扫描。
-- **当前会话范围**：勾选后只查该会话已落定的索引消息（活跃会话约有 2 分钟索引延迟），文件/目录勾选会禁用但保留；实时逐处查找请用下文的 `Ctrl+F` 会话内查找条。
-- 内容查询至少需要 3 个字符；空查询和 1–2 个字符的查询不会启动内容索引构建。构建期间内容组显示进度，文件名/目录结果立即返回；勾选和查找选项会记住。
-- 键盘：`↑`/`↓`、`Home`/`End`、`PageUp`/`PageDown` 移动，`F3`/`Shift+F3` 在结果行间循环，`Enter` 激活，`Esc` 关闭；对话框有焦点陷阱并在关闭时还原。面板文案跟随 `navigator.language`（中/英/西/葡/印地/日/法/德/俄）。
+- **默认同时搜索三个范围**：内容（正文 + 会话）、文件、目录；结果按“内容 → 文件 → 目录”分组并显示组内数量。
+- **双击或 `Enter` 激活**：会话命中打开对应会话并高亮；文件/目录在文件管理器中定位。`Ctrl+Shift+C` 复制路径，`Ctrl+O` 打开，`Ctrl+Enter` 插入 `@file`，`Alt+1–3` 切换范围。
+- **查找选项**：普通 / 扩展 / 正则、`Aa` 大小写、全词、当前会话范围。正则模式下内容组自动暂停（文件/目录仍可正则）；当前会话范围只覆盖已落定索引的消息（活跃会话约 2 分钟延迟）。
+- 面板内容查询至少需要 3 个字符；agent/API 侧另外支持 1–2 个字符的 CJK 混排查询（0.23.0）。键盘 `F3`/`Shift+F3` 循环、`Enter` 激活、`Esc` 关闭；面板文案跟随 `navigator.language`。
 
 ## 在会话中查找（Ctrl+F）
 
 在对话里按 `Ctrl+F`（或点会话头部的 `⌕`）打开非模态查找条，只搜索当前会话**已加载**的消息，不依赖内容索引、没有 2 分钟延迟：
 
-- **计数与导航**：显示 `3/17`；`Enter`/`F3` 下一个，`Shift+Enter`/`Shift+F3` 上一个，循环查找默认开启，到端点会回到另一端并提示。所有命中半透明高亮，当前命中加深并加下划线。
-- **选项**：`Aa` 区分大小写、全词匹配（ASCII `[A-Za-z0-9_]` 边界，中文按非词字符处理）、循环、反向（改变 `Enter` 主方向）；方向按钮始终显式可用。
-- **模式**：普通（字面量）、扩展（支持 `\n` `\r` `\t` `\0` `\xHH` `\\`，未知转义按字面）、正则（JS RegExp，在 Worker 中执行并带 500ms 超时；非法正则内联报错）。正则零宽匹配会跳过，不卡死。
-- **选区查找**：先在会话里选中文本，再按 `Ctrl+F`，查找条默认只在该选区范围内查找，并显示选区 chip；跨消息选区也支持；选区失效会自动回退到整个会话。
-- **已加载窗口**：查找条只覆盖当前已加载的消息；长会话可点“加载更早消息后重试”，不会自动连续翻页。
-- `Esc` 关闭查找条并清除高亮；会话切换、面板打开、插件卸载都会清理。全局面板负责跨文件/跨会话发现，查找条负责当前会话内逐处定位，两者不叠加高亮。
-
-## 工具一览
-
-| 工具 | 作用 |
-|---|---|
-| `locator_search` | 按文件名/路径搜索，支持 `ext:`、`size:`、`dm:`、`path:` 等过滤与排序分页；`mode: names/content/count`，输出 `totalCount`/`nextOffset`/`truncated`/`budget`。 |
-| `locator_find` | 按文件正文和会话内容搜索，返回片段、`contextLines` 上下文、`format`、`refStatus`、可选 `line` 行号与 `sessionId`/`messageId`，并带内容索引状态。 |
-| `locator_status` | 查看根目录、名称索引条目数、监听/增量刷新状态、生效的忽略规则、结果预算、钩子与状态目录。 |
-| `locator_rebuild` | 后台重建名称索引；新索引就绪前搜索继续使用旧的。 |
-| `locator_reindex` | 重建/刷新内容索引：默认增量，`full: true` 全量。 |
-| `locator_export` | 把名称索引导出成只读 SQLite，方便外部工具查询。 |
-| `locator_resolve` | 解析 `ref://` / `dsh-session:` 证据：元数据、hash、freshness、permissions、生命周期 `status` 与有界摘录。 |
-| `locator_cite` | 把 ref 渲染成 markdown / mention / json 引用；`detail: exact` 附带逐字原文、offsets 与 fallback 链接。 |
-| `locator_explore` | 对开放式问题并行发多个名称/正文 query，合并去重后返回摘要 + 可引用 ref（受 token 预算约束）。 |
-| `locator_outline` | 列出某个已索引文件里的符号（函数/类/类型/Markdown 标题，14 种语言）。 |
-| `locator_symbol` | 按符号名跨文件查找声明位置。 |
-| `locator_repo_map` | 按 token 预算生成仓库声明地图（适合先摸清陌生仓库）。 |
-| `capability_search` | 在实时 DSH 工具/MCP/skill 注册表里按意图找能力（不是文件搜索）。 |
-| `capability_preflight` | 调用前校验能力是否存在、参数 schema 是否匹配、风险与审批要求。 |
-
-### 给 AI agent 的调用指南
-
-- **默认工具面（0.22）**：`locator_find`（唯一检索入口：`mode auto|name|body|symbol`、`kinds[]`、`where{pathPrefix,ext,modifiedAfter,minSize}`、`scope workspace|roots|all`、`cursor`、`detail compact|standard|full`、`count`）；`locator_read`（`ref` / `refs[]` / `path`，`as meta|excerpt|quote`，`window`、`maxBytes`）；`locator_status`（`detail brief|full`，brief 默认）；`locator_admin`（`deferLoading`，rebuild/reindex/export）。旧 `locator_search`/`explore`/`outline`/`symbol`/`repo_map`/`resolve`/`cite` 等仍可调用，但已 defer，不再进入初始 prompt。
-- **默认值**：`find` 默认 `limit=10`（max 50）、`maxChars=6000`、`detail='compact'`；`read` 每段默认 `maxBytes=2000`。需要更多结果显式加 `limit`/`maxChars`。
-- **分页**：用 `page.nextCursor` 续页（与 `offset` 互斥）；`page.more=false` 时没有 nextCursor；cursor 与 query/scope 绑定，不匹配返回 `cursor-invalid`。budget/dropped 见信封里的 `budget`/`coverage.notes`。
-- **错误**：失败看 `error{code,message,retryable,remediation,nextTools}`（12 个闭合码）；成功时 `coverage.notes` 说明索引构建/放宽/降级。
-- **scope**：默认 `workspace`（按 cwd 裁剪）；首页为空会自动放宽一次并在 `scope.fallback`/notes 回显；`where` 先于分页。
-- **覆盖边界**：内容索引默认只收文件正文和 session 消息；tool 结果/reasoning 默认不入索引（`contentIndexToolResults`/`contentIndexReasoning` 可开），归档会话默认隐藏；用 `locator_status` 的 `content`/`coverage` 判断完整性。
-- **CLI/MCP**：`locator-cli`/`locator-mcp` 真正只读（状态复制到临时目录再启 engine，不写 live state）；content 默认只返回配置 roots 内文件、默认不含 session（`--allow-sessions` 显式开）；MCP 结果带 structuredContent/outputSchema。
-- **示例**：`locator_find{query:'retry policy', mode:'auto', limit:10}` → 用 `page.nextCursor` 续页 → `locator_read{ref, as:'excerpt', window:2}` 读引用原文；需要所有 roots 时显式 `scope:'all'`。
-### 命令行与 MCP
-
-npm 包同时暴露两个 bin（也可直接 `node scripts/...` 运行）：
-
-```sh
-npx dsh-locator search "handoff ext:md" --json
-npx dsh-locator find "retry policy" --context 2
-npx dsh-locator status --json
-npx dsh-locator resolve "ref://file?..." --excerpt
-npx dsh-locator cite "ref://file?..." --format markdown
-npx dsh-locator-mcp   # 只读 MCP stdio server，供 Claude Code / Cursor 等外部 agent 调用
-```
+- 计数与导航（`3/17`，`Enter`/`F3` 下一个，`Shift+Enter`/`Shift+F3` 上一个，默认循环）；
+- 选项：`Aa` 区分大小写、全词、循环、反向；
+- 模式：普通（字面量）、扩展（`\n` `\r` `\t` `\0` `\xHH` `\\`）、正则（JS RegExp，Worker 内 500ms 超时）；
+- 选区查找：先选中文本再按 `Ctrl+F`，查找条默认只在该选区内查找；只覆盖已加载窗口，长会话需手动“加载更早消息”；
+- `Esc` 关闭并清除高亮；面板与查找条高亮不叠加。
 
 ## 查询语法
 
-```text
-report                  文件名里同时包含这些词
-"two words"             完整短语
-*.go  ?                 通配符
-ext:pdf,docx            按扩展名
-ext:!tmp                排除某类扩展名
-path:src                路径里包含 src
-size:>10mb  1kb..2mb    按大小
-dm:today  dm:thisweek   按修改日期
-folder:  file:          只看目录 / 只看文件
-!tmp                    排除包含 tmp 的
-case:1  wholeword:1     区分大小写 / 全词匹配
-```
+裸词是文件名的 AND 子串匹配，Everything 风格过滤器可叠加：
+
+| 示例 | 含义 |
+|---|---|
+| `report` | 文件名包含 `report` |
+| `report ext:pdf` | …且扩展名为 `pdf` |
+| `ext:ts,js` / `ext:!tmp` | 包含/排除扩展名 |
+| `*.sln` / `?ata` | `*`、`?` 通配 |
+| `"annual report"` | 带空格的短语 |
+| `!archive` | 取反 |
+| `path:src` | 完整路径包含 `src` |
+| `size:>10mb` / `size:1kb..2mb` | 大小比较 |
+| `dm:today` / `dm:thisweek` / `dm:2026-01-01` | 修改时间 |
+| `folder:` / `file:` | 只看目录 / 只看文件 |
+| `case:1` / `wholeword:1` | 区分大小写 / 全词 |
+
+`locator_find` 的 name 模式、面板与 `legacyTools: true` 时的 `locator_search` 共用这套语法。
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 里覆盖，例如：
+在 profile patch 里覆盖 `dsh-locator` 条目：
 
 ```yaml
 - id: dsh-locator
@@ -268,386 +192,156 @@ case:1  wholeword:1     区分大小写 / 全词匹配
     roots: ['/home/me/Documents', '/home/me/notes']
     contentMaxTotalBytes: 2000000000
     contentExcludes: ['node_modules', '.git', '.cargo', 'site-packages']
+    legacyTools: false
 ```
 
-| 配置项 | 默认值 | 说明 |
+| 键 | 默认值 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 总开关；`false` 时不挂工具、不启动引擎。 |
-| `roots` | 主目录 | 要索引的目录，可多选。 |
-| `excludes` | `node_modules` 等 | 名称索引跳过的目录名/路径 glob。 |
-| `watch` | `true` | 是否监听文件系统变化。 |
-| `refreshIntervalMs` | 1800000 | 没有原生监听时的重建周期（kqueue 回退或监听失败时用到）。 |
-| `scanWorkers` | 0 | 扫描并发；0 表示按 CPU 数。 |
-| `includeCaches` | `false` | 是否把已知工具链/包缓存（`~/go/pkg/mod`、`.cargo*`、`.rustup`、`.local/lib`、pnpm store 等）纳入名称索引与监听；默认排除，约可减少 75% 条目。 |
-| `watchMaxDirs` | 120000 | 全部 root 的 watch 目录总上限；超出部分由周期增量刷新覆盖。 |
-| `snapshotCompression` | `'none'` | 快照压缩；`zstd` 约省一半磁盘，但载入/保存各多几百毫秒。 |
-| `prewarm` | `true` | 插件激活时即启动引擎（消除首个请求的冷启动等待）。 |
-| `resourcePreset` | `'balanced'` | 资源档位：`eco`（省内存/延长刷新）、`balanced`、`performance`（更大预算）。 |
-| `windowsUsn` | `false` | Windows 上尝试 USN/MFT 快路径，需要管理员权限。 |
-| `memoryLimitMB` | 0 | 引擎 Go 软堆上限；0 = 自动（按内存 25% clamp 到 384–1024 MiB）；正数固定该值。 |
-| `contentIndex` | `true` | 是否构建正文/会话内容索引；`false` 时只保留名称搜索，开销接近 0。 |
-| `contentLazy` | `true` | 惰性构建：第一次搜内容时才建库；`false` 表示启动后就在后台建。 |
-| `contentMaxFileBytes` | 1000000 | 单个文本文件最多读多少字节。 |
-| `contentMaxTotalBytes` | **1600000000** | 内容库正文总量上限；0 表示不限制。 |
-| `contentMaxFiles` | 200000 | 最多索引多少个文件；0 表示不限制。 |
-| `contentMaxSessions` | **1000** | 最多索引最近多少个会话；0 表示全部。 |
-| `contentRefreshMs` | 300000 | 内容增量刷新周期；0 关闭自动刷新。 |
-| `contentIncludeArchived` | `false` | 是否在普通搜索中包含已归档会话（归档会话始终索引，面板可逐次勾选）。 |
-| `contentIndexToolResults` | `false` | 是否把 `tool/result` 文本作为独立会话文档入索引（切换只重建会话）。 |
-| `allowCrossWorkspaceSessions` | `false` | `scope:"all"` 是否可读其他 workspace 的会话正文（默认按调用方 cwd 授权）。 |
-| `contentActiveSessionDelayMs` | 120000 | 会话日志安静多久后才索引。 |
-| `contentSessionDirs` | `$DSH_HOME/sessions` | 额外的会话目录。 |
-| `contentExcludes` | 依赖/工具链目录 | 内容索引跳过的路径片段/子串；名称索引不受影响。 |
-| `refreshIncremental` | `true` | 周期兜底只重扫 watcher 覆盖不到的 root；`false` 恢复 0.18 全量重建。 |
-| `unwatchedRefreshIntervalMs` | 300000 | 无 watcher 的 root（9p/DrvFs 等）单独刷新周期；backoff 2× 封顶，最坏陈旧 10min。 |
-| `contentIndexReasoning` | `false` | 是否把 assistant 的 reasoning/thinking 并入会话索引（切换只重建会话）。 |
-| `contentExtractDocuments` | `true` | 是否抽取 PDF/Word/Excel/PPT/EPUB 正文（lazy 加载，失败只 warn）。 |
-| `contentExtractMaxBytes` | `8000000` | 交给文档抽取器的单文件上限；抽取在独立 worker 线程内执行（512MB 堆、5s 超时）。 |
-| `contentEvict` | `true` | 正文预算满时按 mtime 淘汰最旧文档，而不是冻结索引（新文件可持续入库）。 |
-| `contentSymbolsPerFile` | 500 | 每个代码文件最多保存的符号数。 |
-| `contentMaxDbBytes` | **8000000000** | content.db 预算（按 live 页而非文件大小判断）；超限时在空闲期重建一次（6h 最多一次）。 |
-| `contentRankAdaptive` | `true` | 宽结果集跳过 bm25 全量排序（对常见词快一个数量级）。 |
-| `contentQueryCacheSize` | 64 | 内容查询结果缓存条数；0 关闭。 |
-| `contentQueryCacheTtlMs` | 60000 | 内容查询缓存 TTL。 |
-| `contentSessionMaxBytes` | 67108864 | 单个会话日志最多读取多少字节；超限只索引头部。 |
-| `contentRefreshAdaptive` | `true` | 机器忙/电池供电时自动减少后台索引工作。 |
-| `contentParallelPrefetch` | 4 | 全量重建时读取/解码/符号抽取的并行 worker 数（1 关闭，最多 8）。 |
-| `contentTextSniff` | `true` | 对无后缀文件做 4KB 文本嗅探，扩大覆盖。 |
-| `contentShortQueryFallback` | `true` | 允许 2 字符查询走有界近似兜底（返回 shortQueryFallback 标记）。 |
-| `contentIndexSymbols` | `true` | 是否建立代码符号表（`locator_outline`/`locator_symbol`/`locator_repo_map`）。 |
-| `contentSymbolMaxBytes` | `524288` | 符号抽取的单文件上限。 |
-| `contentFullIndex` | `false` | 一键全量：把正文/文件 cap 覆盖为 0（不限制）。 |
-| `notIndexed` | 敏感文件默认项 | 不进正文索引的 glob（名称索引仍覆盖）；默认排除 `_key.*`/`发布令牌*`/`.env*`/`*.pem`/`*.key`/`*.p12`/`*.pfx`/`id_rsa*`/`id_ed25519*`。 |
-| `notSearchable` | `[]` | 不作为搜索结果返回的 glob（仍可读）。 |
-| `notReadable` | `[]` | agent 不可读的 glob（正文命中与证据 ref 都会被拒）。 |
-| `outputBudgetChars` | `8000` | 单个 locator 工具结果的字符预算；0 关闭。 |
-| `combinedBudgetChars` | 0 | `/combined` 面板响应预算；0 保持旧行为。 |
-| `combinedEnrichConcurrency` | 8 | `/combined` stat/hash 富化的并发上限。 |
-| `combinedHashMaxHits` | 5 | 每次 `/combined` 最多计算多少个文件哈希；0 关闭。 |
-| `urlFreshness` | `false` | `locator_resolve` 对 URL ref 做有界条件 HTTP 重验（5s、不爬取）。 |
-| `rerankCommand` | `''` | 可选外部重排命令（`rerank/v1` JSON stdin/stdout）。 |
-| `ocrCommand` | `''` | 可选外部 OCR 命令（`ocr/v1` JSON stdin/stdout）。 |
-| `stateDir` | 系统缓存 | 快照和内容库的位置；多个 DSH 进程请用不同目录。 |
+| `roots` | 主目录 | 要索引的目录。 |
+| `contentIndex` | `true` | 是否构建正文/会话索引；`false` 退化为只搜名字。 |
+| `contentLazy` | `true` | 第一次内容搜索时才构建内容索引。 |
+| `contentMaxTotalBytes` | `1600000000` | 正文字节预算；`0` 表示不限。 |
+| `contentMaxFiles` / `contentMaxSessions` | `200000` / `1000` | 单次构建文件上限 / 最近会话日志数。 |
+| `notIndexed` / `notSearchable` / `notReadable` | 凭据 / `[]` / `[]` | 隐私围栏；`notReadable` 是硬读取围栏，由 `locator_read`/`resolve`/`cite` 强制执行。 |
+| `legacyTools` | **`false`** | 重新注册 0.22 之前的旧工具（defer）。 |
+| `stateDir` | 平台缓存目录 | 快照/内容库目录；每个 DSH 进程一个。 |
+| `resourcePreset` | `'balanced'` | `eco` / `balanced` / `performance` 预算预设。 |
 
-> `binaryPath`、`maxResults`、`startupTimeoutMs`、`requestTimeoutMs` 也支持，分别用于自定义引擎、单页上限和超时；一般不需要改。
+全部键、隐私围栏与 config-drift guard 语义见 [docs/config.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/config.md)。
 
 ## 性能与资源
 
-以下数字来自开发机（WSL2，Linux，热页缓存）和真实主目录；你的机器会因磁盘、文件数、缓存和 GC 状态而不同。
+在 WSL2 开发笔记本上实测（页缓存已热）；你的机器会因磁盘、文件数、缓存状态与 GC 不同而不同。最近一次完整测量是 0.21.1/0.22.x（2026-11-21/22）；0.23.0 未改查询路径。
 
-**名称索引**（开发机实测，单个 `/home/yy` root；WSL2 ext4 热页缓存）
+| 关键指标 | 数值 |
+|---|---|
+| 名称快照 | 0.48M 条目仅 **35MB**（0.19.4：207MB / 2.4M 条目） |
+| 冷扫描 | 0.48M 条目 **1.4 秒**（默认排除缓存目录） |
+| 常见名称查询 | func **10.7ms**、go **6.0ms**、`*.go` **4.4ms**、`ext:` **3.3ms** |
+| 内容索引 | 1.74GB 正文 → **5.45GB** `content.db`；覆盖率 **99.9%**（163,791/163,951 文件） |
+| 首次全量内容构建 | 大主目录约 **4–5 分钟** |
+| Agent prompt 成本 | 常驻声明 **4,408B**（CI 门槛 ≤4,500B）；`legacyTools: false` 时总计约 **21KB**（0.23.0 预发布实测；0.22 的 PTC 为 54,764B） |
 
-| 项目 | 0.19.4 | 0.21.1 |
-|---|---|---|
-| 冷扫描（默认排除缓存） | 240 万条目 / 16.4s / 峰值 754MB | **48 万条目 / 1.4s / 164MB**（条目 −80%，快约 12×） |
-| 快照体积 | 207MB | **35MB** |
-| 载入 + 派生 | 143–156ms / heap 268MB | **85–108ms / heap 186MB** |
-| 引擎 ready（含 watcher） | 约 2.4s（同步装 15 万目录 watch） | **约 0.3s**（watcher 异步安装） |
-| 常见查询（`locator_search`） | func 13ms / go 16ms / `*.go` 21ms / `ext:` 6.4ms | **func 10.7 / go 6.0 / `*.go` 4.4 / `ext:` 3.3ms** |
-| 正则查询 | `config.*test` 约 102ms | **约 11ms** |
-| 引擎 RSS（watcher 装好后） | 约 700MB | **约 335MB**（auto 512MB 上限） |
-| 增量保存（1000 处变更） | 全量重写 163MB、写锁 144ms | **70.9KB、0.35–0.5ms**（base 不动） |
-| Compact（约 150 万条目） | 约 0.9s（写锁 864ms）/ 峰值 850MB | **120–190ms（写锁 8–16ms）/ 431MB** |
-
-**内容索引**（真实主目录，1GB 预算上限）
-
-| 项目 | 0.19.4 | 0.21.1 |
-|---|---|---|
-| 常见词查询（`the`，30 条） | 73ms exact / 70ms none | **5.3ms / 1.6ms**（13.8× / 43.7×） |
-| 宽查询（`the`）文件占比 | 0%（全为会话） | **100%**（file-first 分组分页 + 轻量重排） |
-| 2 字查询（`索引`） | 拒绝（too-short） | **可用，约 30ms**（有界兜底 + shortQueryFallback 标记） |
-| `function`（2.7 万命中） | 146ms | **41ms** |
-| 生僻词查询 | 8.8ms | 13ms（绝对差 4ms，无实际影响） |
-| 无变化增量刷新 | 约 12s（dump 150 万条目） | **<0.3s**（engine generation 快路径） |
-| 全量重建 | 约 3.5min（旧版在预算满时提前结束） | **实测 5m31s**（0.21.1：两阶段规划 + 并行预取 + schema v4 + /mnt/d 纳入；16.4 万候选 / 2GB 预算 / 0 淘汰） |
-| 内容库体积 | 约 4.1GB（正文预算的 4.1×） | **实测 5.45GB live**（正文 1.74GB，含 /mnt/d；schema v4 + idle vacuum 后 segments=1、freelist≈0） |
-| 覆盖 | 约 9.3 万文件，预算打满后新文件冻结 | **实测 163,791 / 163,951 文件 = 99.9%**，432 会话 / 4,492 消息（含 /mnt/d 工作区） |
-| 宿主延迟 | 内容查询在 worker，不阻塞 | 不变；`/combined` 富化异步，9p 场景不再阻塞事件循环；实测 HTTP `/content` 常见词 **约 3ms** |
-
-**怎么更省**
-
-- 只要 Everything 式文件名搜索：`contentIndex: false`，内容开销归零。
-- 想保留内容但更省磁盘：调小 `contentMaxTotalBytes`（如 256000000）、`contentMaxFileBytes`，或把 `contentRefreshMs` 调大。
-- 想覆盖更多文件：调大 `contentMaxTotalBytes` / `contentMaxFiles`，并确认 `contentExcludes` 没把真实文档目录排除掉；开 `contentEvict`（默认开）后预算满会淘汰最旧文档而不是冻结。
-- 想连工具链/包缓存也搜：`includeCaches: true`（条目和内存会回到 0.19 量级）；或直接用 `resourcePreset: 'eco' | 'balanced' | 'performance'` 一键切换资源档位。
-- 注意：内容库是缓存，删掉 `stateDir` 后会自动重建，不会影响源文件。
+完整表格、测量方法与复现命令见 [docs/performance.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/performance.md)。内容库是缓存：删除 `stateDir` 只会触发重建，不会动源文件。
 
 ## 平台支持
 
-| 平台 | 扫描 | 实时更新 |
-|---|---|---|
-| Linux | 并行遍历 | inotify，递归监听 |
-| Windows | 并行遍历，或管理员下的 USN/MFT | `ReadDirectoryChangesW`；USN 模式下重启会补日志 |
-| macOS | 并行遍历 | 发布版二进制用 FSEvents；`CGO_ENABLED=0` 构建回退到 kqueue（目录上限 4096） |
+| 平台 | 扫描 + 快照 | 实时更新 | 说明 |
+|---|---|---|---|
+| Linux | 支持 | inotify（递归） | 每个目录一个 watch 描述符；目录特别多时可能碰到内核上限。 |
+| Windows | 支持 | `ReadDirectoryChangesW`（递归） | 不需要管理员权限，也不需要 Everything；可选 USN/MFT 快速路径（提权时）。WSL 写入 `/mnt/<盘>` 可能收不到通知，需重建对应根目录。 |
+| macOS | 支持 | 发布版二进制内 FSEvents（递归、无上限） | `CGO_ENABLED=0` 时退化为 kqueue（上限 4096 个目录），内容变更依赖定时重建。 |
 
-### Windows 与 USN 日志
-
-USN/MFT 快路径默认关闭（`windowsUsn: true`）：需要管理员权限和启用中的卷变更日志，任何一步失败都会回退到普通遍历，不会让搜索不可用。成功扫描后会记下日志游标（`usn-state.json`），重启时先补上停机期间的变更。
-
-它在 Windows CI runner 上做过端到端验证：读取 134 万条 MFT 记录、解析 134 万条路径；`C:\Windows` 下 16.4 万条目用 USN 索引约 7.8 秒、查询 9.6ms。也可以手动探测：
-
-```powershell
-# 管理员 PowerShell
-& ".\bin\win32-x64\indexd.exe" usn-probe --volume C: --root "C:\Windows" --limit 5 --journal 5
-```
-
-USN 记录本身不带大小和修改时间：结果的名字/路径是准确的，`locator_status` 会标记这种索引为 `USN`，返回结果页时再 stat 补齐大小和日期；`size:`/`dm:` 过滤在整库上仍是近似值，直到跑一次元数据补全。日志被覆盖、删除或卷不支持时，自动回退可移植遍历。
+Windows USN/MFT 默认关闭（`windowsUsn: false`），因为卷 ioctl 需要管理员权限；开启后引擎枚举 MFT 并在重启时回放变更日志，任何失败都自动回退到遍历。USN 记录不含大小/修改时间：返回页会补 stat，全库 `size:`/`dm:` 过滤在元数据补齐前是近似值。
 
 ## 故障排查
 
-**装完面板没出现？**
-刷新页面（F5）；确认装的是 `web` profile，且面板从 boot graph 加载。headless/TUI profile 本来就没有面板。
+| 现象 | 第一步 |
+|---|---|
+| 装完没有工具/面板 | 刷新 F5；确认装进 `web` profile；见 [安装校验](https://github.com/PerryLink/dsh-locator/blob/main/docs/install.md#verify-the-install)。 |
+| profile 被重置、bundle 丢失、突然大重建 | **不要删** state；跑只读 doctor（`node scripts/doctor.mjs --print-restore`）并对比 `stateDir/last-good-profile.json`——见 [profile 恢复](https://github.com/PerryLink/dsh-locator/blob/main/docs/upgrade.md#profile-reset-or-lost-bundles)。 |
+| Windows 升级报文件占用 | 0.23.0 已改为按版本复制引擎；旧版本请正常退出 DSH 后再装——见 [说明](https://github.com/PerryLink/dsh-locator/blob/main/docs/upgrade.md#windows-engine-file-lock-during-upgrade)。 |
+| 发版当天 `@latest` 装到旧版 | 钉住具体版本（`dsh-locator@0.23.0`）；见 [minimumReleaseAge](https://github.com/PerryLink/dsh-locator/blob/main/docs/upgrade.md#before-you-upgrade)。 |
+| 卸载后状态目录还在 | 正常：它是缓存。DSH 停止后手动删除即可——见 [卸载残留](https://github.com/PerryLink/dsh-locator/blob/main/docs/troubleshooting.md#uninstall-residue)。 |
+| 首次内容构建很久 / 占盘大 | 约 4–5 分钟、正文预算 3 倍属正常；调小预算或腾出磁盘——见 [首次构建](https://github.com/PerryLink/dsh-locator/blob/main/docs/install.md#first-content-build-expect-minutes-and-several-gb)。 |
 
-**刚创建的文件搜不到？**
-监听可能还没收到通知（WSL 写入 `/mnt/c`、网络盘、部分容器的 overlay 常见）。等几秒，或对相应根目录执行 `locator_rebuild`。USN 模式重启后会补日志。
-
-**搜内容没结果？**
-先看 `locator_find` 返回里的 `building`：第一次搜索会触发惰性构建，构建期间结果可能不全，面板会自动重查。再确认文件扩展名在文本类型内、大小没超过 `contentMaxFileBytes`、没被 `contentExcludes` 排除、会话没归档（归档默认不索引）。
-
-**内容库很大 / 磁盘涨得快？**
-见[性能与资源](#性能与资源)：调小预算或关闭 `contentIndex`；删除 `stateDir` 会触发重建。
-
-**`inotify` 相关警告？**
-目录太多时会碰到内核 watch 上限；索引仍然可用，只是变化依赖定时重建。可调大 `fs.inotify.max_user_watches`，或减少 `roots`。
-
-**升级后行为变了？**
-`dsh plugin --profile web add dsh-locator@latest` 后 F5；内容库结构变化时只重建一次。更新记录见 [CHANGELOG](CHANGELOG.md)。
+完整清单（内容搜不到、CJK 短词、inotify 上限、WSL `/mnt/c`、USN、MCP/CLI 状态、引擎版本不一致）见 [docs/troubleshooting.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/troubleshooting.md)。
 
 ## 从源码构建
 
-需要 Node `^22.19 || >=24.9`、pnpm、Go 1.22+。
+要求：Node `^22.19 || >=24.9`、pnpm、Go 1.22+（仅引擎）。
 
 ```sh
 pnpm install
 pnpm build
-pnpm build:engine:all    # 六个平台的引擎
-pnpm check               # typecheck + 测试 + 打包/安装校验
+pnpm build:engine:all   # 或 build:engine 只构建当前平台
+pnpm check              # typecheck + 测试 + 打包/安装校验
 ```
 
-Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 FSEvents 版本需要 cgo，由 macOS CI 构建。Node 测试在 Linux、Windows、macOS 三个平台的 CI 上运行。
-
-![dsh-locator 测试套件：真实运行 pnpm test —— 20 个测试文件、512 个用例，12.47 秒全部通过](docs/assets/dsh-locator-demo.gif)
-
-*动图是 2026-11-21 在本检出中真实运行的 `pnpm test`：20 个测试文件、512 个用例、12.47 秒，不联网。仓库没有录屏工具，所以这里回放终端真实输出，而不是伪造一段界面动画；仓库中已有的真实界面截图是 `docs/assets/panel-en.png` 与 `docs/assets/panel-zh.png`。*
+Go 引擎在 `engine/` 下，测试用 `cd engine && go test ./...`。macOS 的 FSEvents 版本需要 cgo，由 macOS CI 构建。Node 测试在 Linux 与 Windows 的 CI 上运行，macOS 有一个非阻塞 smoke job；六个发布引擎分别在 `ubuntu-latest` / `macos-latest` 构建。测试数量与耗时每次发版都会变，以 CI 与 [CHANGELOG.md](CHANGELOG.md) 为准（0.23.0：32 个文件 / 831 个用例；0.22.0：26 个文件 / 674 个用例；`docs/assets/dsh-locator-demo.gif` 是 2026-11-21 的真实终端录制，显示的是当天数量）。
 
 ## 设计
 
-![架构：文件系统 → 扫描/监听 → 紧凑快照 → 查询引擎 → agent 工具 / Web 面板](docs/assets/architecture.svg)
+![dsh-locator 架构：文件系统 → 扫描/监听 → 紧凑快照 → 查询引擎 → agent 工具 / Web 面板](docs/assets/architecture.svg)
 
-- **名称索引**：Go 引擎维护紧凑快照；记录只存名字在 arena 里的偏移和父记录 id，完整路径在返回结果时重建；路径表用开放寻址（`id+1` 槽，约 12 字节/条）替代 `map[string]int32`。
-- **并行扫描**：目录读取协程消费有界队列，每个目录批量写入，保证父目录先于子目录；队列满时退化为就地扫描，不阻塞。
-- **查询**：解析一次查询，分片并行匹配，用有界最大堆选出前 `offset+limit` 条，不排序全部命中。
-- **内容索引**：宿主侧 SQLite FTS5 + trigram 分词，支持中文和子串；文件清单来自引擎已有扫描结果，会话日志用 Node 自带 zstd 解压；查询在 worker 线程执行。
-- **持久化**：快照先写临时文件再原子重命名；generation 计数让守护进程只在索引变化时自动保存；删除量超过阈值时压缩墓碑。
-- **跳转**：文件走 `/reveal` 和 `/open`；会话通过 `uiWorkspace.openSession(sessionId)` 打开，再在页面里定位命中文字。
-- **协议**：引擎通过 stdio 上的 NDJSON 通信，不监听端口；Web 面板只走同源宿主路由。
+```text
+DeepSeek Harness
+  └─ dsh-locator（TypeScript 插件）
+       ├─ locator_find / locator_read / locator_status（+ 延后加载的 locator_admin）
+       ├─ 旧工具仅在 legacyTools: true 时注册（search、rebuild、resolve、cite…）
+       ├─ client.js: Ctrl+Shift+F 浮层（shell.overlay slot）
+       ├─ POST /dsh-locator/{search,status,combined,reveal,open,capabilities} + /v1/{find,read,status}
+       ├─ content store: SQLite FTS5（trigram），宿主进程内，查询在 worker 线程
+       └─ 子进程: indexd serve（Go，stdio NDJSON）
+            ├─ scanner: 递归遍历、排除、进度
+            ├─ index:   名称 arena + 定长记录 + 开放寻址路径表
+            ├─ query:   解析器、匹配、top-K 选择、排序、分页
+            ├─ watcher: inotify（Linux）/ ReadDirectoryChangesW（Windows）/ FSEvents（macOS）
+            └─ snapshot: 单文件、mmap 友好、原子重命名
+```
+
+- **并行扫描**：目录读取器从有界队列取任务，每个目录一批刷入，父记录先于子记录入队。
+- **内存布局**：记录只存名称在 arena 中的偏移/长度与父 id，完整路径只在结果页与 `path:` 过滤时重建。
+- **查询引擎**：裸词与过滤器只编译一次，分块并行匹配，再用有界大顶堆归并，不排序百万级命中。
+- **内容索引**：宿主侧 SQLite FTS5 trigram（UTF-8 子串、CJK）；会话日志用 Node zstd 解压。
+- **持久化**：快照写临时文件后原子重命名；generation 计数让守护进程只在索引变化时自动保存。
+- **协议**：stdio 上每行一个 JSON 请求/响应，带 `scan`、`stats`、`warning`、`error`、`rebuilt` 事件；不监听端口、无鉴权面。
+- **只读**：引擎只以元数据方式打开文件，从不写被索引路径。
 
 ## 限制
 
-- 内容索引只处理文本类文件；PDF、Word、图片里的文字暂不提取。
-- 内容预算按扫描顺序消耗，不是按文件重要性排序；达到上限后后面的文件不可搜（`truncated` 为 true）。
-- 名称索引不是文件系统驱动，只覆盖配置的根目录。
+- 内容索引覆盖文本文件、抽取文档（PDF/Word/Excel/PowerPoint/EPUB，默认开启）与 DSH 会话日志；**图片不做文字提取**，除非显式配置 OCR 命令（`ocrCommand`）。
+- 内容预算按文件新旧消耗，不按重要性；超出上限的文件不可搜（`truncated` 为 true）。
+- 索引只覆盖配置的根目录，不是文件系统驱动。
 - Linux inotify 每个目录占一个描述符，目录特别多时可能碰到内核上限；插件会报警，快照仍然可用。
-- 通过 WSL 写入 `/mnt/c` 的文件，Windows 端可能收不到通知，需要重建对应根目录。
+- 通过 WSL 写入 `/mnt/c` 的文件，Windows 端可能收不到通知，需要重建对应根目录或依赖较慢的未监听根刷新。
 - 网络盘只在能作为普通目录访问时才会被扫描，没有 SMB 专用的变更流。
 - 会话内容来自本地日志；如果会话还没落盘，搜不到最新几条消息。
-- 两个 DSH 进程共享同一个 `stateDir` 时，构建锁只能串行化写入；建议各用各的缓存目录。
-- macOS 的发布版二进制用 FSEvents；`CGO_ENABLED=0` 构建只有 kqueue，目录上限 4096，且内容变更依赖定时重建。
-
-- 文件正文命中目前只在文件管理器里定位（在 DSH 内按行预览是下一步；查询结果已带 `line` 行号）；assistant 消息通过 `turn:step` 节点键精确定位，找不到时才退回短语匹配。
-- **全库内容正则 P0 不做**：正则模式会暂停内容组（文件/目录名仍可正则），避免 1GB 级全库扫描和 ReDoS；会话内查找条支持正则。
-- 当前会话范围只覆盖已落定索引的会话消息（活跃会话约 2 分钟延迟）；实时查找用 `Ctrl+F`。会话内查找条只覆盖已加载窗口，更早历史需手动加载。
-- 会话内高亮依赖 CSS Custom Highlight API；不支持它的旧浏览器会退化为整行描边。
-
-## 内存
-
-引擎是单个 Go 进程，遵循 `GOMEMLIMIT`/`GOGC` 和 `memoryLimitMB` 配置；`0`（默认）表示按机器自动推算上限（取内存的 25%，限制在 384–1024 MiB）。0.20 引擎把 150 万条目的快照载入约 186 MB heap，装好 watcher 后稳态约 335 MB RSS（512 MiB 上限）；上一版在同一场景约需 700 MB。两者都不改变快照格式。把内容库页缓存算上，现场部署中 DSH 宿主进程约 700 MB RSS，空闲延迟约 p50 2ms。
-## 0.22.2 更新
-
-- **默认工具面 3+1**：`locator_find`（统一 auto/name/body/symbol）、`locator_read`（ref/refs/path + meta/excerpt/quote）、`locator_status`（brief 默认）；`locator_admin`（deferLoading）负责 rebuild/reindex/export。旧工具保留但 defer，不再占初始 prompt。
-- **统一契约**：信封含 `apiVersion/ok/tool/query/scope/items/page/counts/coverage/budget/timing`；opaque cursor；12 个闭合错误码（retryable/remediation/nextTools）；workspace 空页自动放宽并回显；预算按 items 字符计。
-- **声明体积**：find 2,311B + read 1,325B + status 500B = **4,136B 常驻**（旧工具面约 18KB）；加 capability 两工具共 6,101B。
-- **迁移**：`locator_find` 现在是统一检索（`mode:'auto'` 默认），旧的 `search`/旧 find/`explore`/`outline`/`symbol`/`repo_map`/`resolve`/`cite` 仍可按名调用但已 defer；MCP 仍是 5 个只读工具（已带 structuredContent/outputSchema）。
-
-## 0.21.1 更新
-
-- **AI 契约修复**：分页不再跳过被预算丢弃的行（`truncation/hasMore/nextOffset` 修正）、结果严格 `slice(0,limit)`、默认页大小 search 10/find 8、新增 `budgetChars`、`detail:'compact'`/`evidenceLimit`、`errorInfo`/`warningHints`、只读工具并发安全。
-- **scope/count 修正**：workspace 后置过滤补页 + `workspace-empty` 提示、`totalAllRoots`、find names 应用 cwd/pathPrefix、visibility 按真实 scope、count 字段不再互斥。
-- **explore/capability**：explore 按 BM25 升序（最相关在前）+ `matchedQuery/why`；capability 把 rebuild/reindex/export 判为 write/ask，preflight ok=admitted。
-- **CLI/MCP 只读安全**：engine 状态复制到临时目录、content 默认只返回 roots 内文件且隐藏 session；命中带 ref、search/find 有 budget/nextOffset；MCP 提供 outputSchema/isError，单 engine 长生命周期。**不会再写坏 live 索引快照。**
-- **status**：构建中显示实时 files/messages 与 progress；重建成功后清理 `content-db-*` 陈旧 warning（历史在 `warningCounts`）。
-- **迁移**：schema v4（0.21.0 内容/覆盖/schema 工作）首次启动做一次全量内容重建；`locator_find` 默认不再返回 hash（`includeHash` 可选）；CLI/MCP 默认不含 session。589 tests；六引擎 0.21.1。
-
-## 0.20.2 更新
-
-- **覆盖优先**：`contentMaxTotalBytes` 1GB→**1.6GB**、`contentMaxDbBytes` 5GB→**8GB**（并按 live 页判断）、`contentMaxSessions` 100→**1000**；实测覆盖 69.8%→**99.9%**（142,492/142,613 文件），842 会话/9,154 消息，DB 4.89GB。
-- **全量重建提速**：两阶段规划（只读预算内文件 + fill pass）+ 并行预取（默认 4 worker）；实测 **5m44s**（0.20.1 为 11min，0.20.0 的 buggy 路径约 55min），0 淘汰。
-- **FTS optimize 修复**：旧 `merge=4,32` 语法非法被静默吞掉，`fts_optimized_at` 永远 0、积累约 800MB 死段；改为正确 `(docs, rank) VALUES(merge, N)` 协议、idle 执行、成功/失败可观测，实测 segments=1。
-- **质量修复**：宽查询（the/function/error…）top20 由全会话改为 **100% 文件命中**（file-first 分组分页 + 轻量重排）；**2 字查询**（索引/缓存/ai/js）可用（有界 LIKE ≤2s，约 30ms，带 shortQueryFallback 标记）；`/mnt/d` cwd 的 workspace content 自动退回全局（scopeFallback: global）。
-- **响应性**：content 构建/刷新每 ~40ms 或 64 文档让出、增量刷新 8s 墙钟预算、淘汰分片；不再出现多分钟增量刷新。
-- **9p 新鲜度**：`unwatchedRefreshIntervalMs` 默认 **300000（5min）**，backoff 2× 封顶（最坏 10min），压力门控 + 刷新后 FreeOSMemory；status 新增 unwatchedRefreshMs/nextRefreshAt/refreshRounds/refreshSkippedByPressure。
-- **面板/HTTP**：combined content freshness 批量查询；full 响应前 10 条保留证据字段（`evidenceLimit`），其余剥离；空查询不发请求、不做 stat/hash；面板识别 shortQueryFallback。
-- **质量与 P2**：无后缀文本嗅探（4KB，`contentTextSniff`）、新增 ~70 种文本扩展名、会话窗口不再因新会话删除已索引日志、warnings 持久化、worker cache 16→64MiB；BATCH_OPS 250→1000；新库 auto_vacuum=INCREMENTAL。schema v4（符号归一化/正文去重，约 −114MB/−98MB）评估后暂缓（空间次要，避免 4GB 库迁移风险）。
-- **迁移**：默认 caps/会话窗口变化，升级后建议空闲时跑一次全量内容重建（后台约 6min）；`contentMaxDbBytes` 已改为 live 页口径，不再因 merge 释放页触发 6h 重建循环。512 tests；六引擎按 0.20.2 重建。
-
-## 0.20.0 更新
-
-- **默认索引范围**：默认跳过工具链/包缓存（`~/go/pkg/mod`、`.cargo*`、`.rustup`、`.local/lib`、pnpm store 等），条目约 −75%；`includeCaches: true` 恢复旧行为。0.19 旧快照仍含缓存条目，首次 diff 刷新自动收敛，`locator_rebuild` 可立即收缩。
-- **引擎内存与持久化**：`memoryLimitMB: 0` 改为自动（25% RAM，384–1024 MiB）；快照流式载入（少占约 81MB）；拼音/折叠派生单趟构建；autosave 按最后变更计时（活跃期写入 −80~90%）；保存不再持读锁；Compact 移出写锁、墓碑阈值降到 5%；可选 zstd 快照与 base+journal 增量快照。
-- **监听与兜底刷新**：Linux watcher 从内存目录索引直接装（不再 WalkDir）、异步就绪、`watchMaxDirs` 配额与部分覆盖中间态；9p/DrvFs 改 upsert-diff（不再删子树重扫、无变化不落盘、指数退避）。
-- **名称查询**：`IndexByte` 折叠匹配、glob 单星快路径、ext/pinyin 位图、正则字面量预过滤、top-k 流式、扫描路径零分配与预编译 exclude；查询/扫描 CPU 实测 −27~88%。
-- **内容查询**：自适应 bm25（宽结果不 rank）、page/count 过滤 SQL 拆分、TTL+LRU + single-flight 缓存、worker 取消（消息+SAB）与 2 worker 池、只读 PRAGMA、>1s 自动降级；常见词查询快 10–80 倍。
-- **内容索引**：generation 快路径（无变化刷新 <0.3s，不再全量 dump 150 万条）、预算淘汰 + coverage、250 写/事务与 WAL checkpoint、FTS optimize、符号上限 500 且排除生成代码、抽取移入 worker（默认上限 8MiB）、会话日志流式多帧 + 增量尾部 + 64MiB 头截断、负载/电池自适应节流。
-- **repo_map/symbol**：SQL 聚合 + root 过滤 + 硬上限，消除 2.98GB 峰值 / 18s 冻结；symbol exact/prefix 走索引。
-- **面板与 HTTP**：`/combined` 富化异步/限并发/TTL/9p 跳 hash/`compact` 模式；断连取消内容查询；`/search` `nextOffset` 修正；面板两阶段搜索（先 names ~90ms，300ms 后补 content，<3 字符不查 content，LRU 20），300 行上限 + 增量 loadMore，highlight 正则复用，building 只轮询 `/status`。
-- **配置**：新增 17 个性能/资源项（见上表）；`contentExtractMaxBytes` 默认 8MiB；`memoryLimitMB=0` 语义变为自动。
-- **行为变化**：默认不再索引缓存目录；`status.builtAt` 改为 Unix ms；watcher 异步安装期间 `watching` 可能暂为 false（看 `watchInitializing`）；FTS schema v4（contentless/拆分表）评估后暂缓（收益约 100MB，不值得 4GB 库迁移），per-root 分片被增量 journal 取代。
-- 测试 **443 个**；六引擎按 0.20.0 重建。
-
-## 0.19.4 更新
-
-- **面板默认中文**：面板语言改为每次取用时解析（优先 DSH 的 `<html lang>`，无有效标签时默认中文），不再在模块加载时冻结；live profile 也把 DSH locale 偏好固定为 `zh`。
-
-## 0.19.2 更新
-
-- **修复 0.19.1 的 README 插句错误**：恢复 5 个语言 README 里被插坏的介绍/兼容性句子。
-- **补齐 DeepSeek Harness 0.2.2-rc.4 元数据**：`@deepseek-ai/dsh-tools` devDependency 升到 0.2.2-rc.4；`engines.dsh` 与 dsh-tools peer 增加 `|| >=0.2.2-0 <0.3.0` 子句。
-- **面板搜索入口**：移除侧边栏底部启动按钮；只保留会话头部放大镜（16px SVG、28px 点击区、垂直居中，和旁边图标协调）。
-- **文档迭代**：工具表补全 0.19.0 的 6 个新工具、新增命令行/MCP 用法、配置表补全抽取/符号/预算/忽略/URL 保鲜/钩子等新项，性能数字按 0.19.x 实测更新。
-- 测试 **336 个**；六引擎按 0.19.2 重建。
-
-## 0.19.1 更新
-
-- 对齐 DeepSeek Harness 0.2.2-rc.4（版本/文档；无运行时行为变化）。注：该版 README 有插句错误，已在 0.19.2 修复。
-
-## 0.19.0 更新
-
-- **中文文件名检索**：名称索引新增全角/半角、大小写、CJK 兼容归一与拼音匹配——全拼 `guojia`、首字母 `gjjy`/`gjy`、混合 `guo家` 都能命中中文文件名；snapshot 格式不变，旧快照加载时自动构建拼音派生键。
-- **周期重建增量优化**：watcher 覆盖不到的 root（9p/NFS/SMB 等）才重扫，健康的被监听 root 复用索引；失败/结构变化自动回退全量。引擎新增 `--no-incremental-refresh` 可回退 0.18 行为；`locator_status` 新增 9 个刷新状态字段。
-- **文档正文抽取**：内容索引可选抽取 PDF/Word/Excel/PPT/EPUB 正文（`contentExtractDocuments`/`contentExtractMaxBytes`，lazy 加载），损坏或超限只产生 warning，不阻塞构建；命中带 `format`。
-- **代码符号与 repo map**：additive `symbols` 表 + `docs_meta.format`（不 bump user_version），索引时填充（`contentIndexSymbols`/`contentSymbolMaxBytes`）；新增 `locator_outline`、`locator_symbol`、`locator_repo_map`（按 token 预算截断）。支持 14 种语言 + Markdown 标题，启发式解析。
-- **结果预算与模式**：`locator_search`/`locator_find` 新增 `mode`（names/content/count）、`headLimit`、`contextLines`，输出 `totalCount`/`nextOffset`/`truncated`/`budget`（默认 8000 字符），命中带 `format`/`refStatus`/上下文行。
-- **证据层**：`locator_resolve` 新增 `status`（fresh/stale/missing/tombstoned）、`checkedAt`、`anchor`；`locator_cite` 新增 `detail: exact|compact`（逐字原文 + offsets + fallback 链接）与 `maxBytes`；文件 ref 带 `line/cs/ce`；find 命中带 `refStatus`。
-- **URL ref 保鲜**（可选 `urlFreshness`，默认关闭）：ETag/Last-Modified + 有界正文哈希的条件请求，结果持久化到 refs meta；304→fresh、404/410→missing、不可达→stale。
-- **忽略语义三层**：`notIndexed` / `notSearchable` / `notReadable`（glob）分别控制「不进正文索引 / 名称不可见 / agent 不可读」；`locator_status` 展示生效规则。
-- **面板**：官方提及语法互操作（`@path` / `@"path"` / `@[标题]` 后接 `dsh-session:` 目标）；搜索框粘贴 ref/mention 触发 Quick Switch；证据详情（行点击 / `Ctrl+I`）展示 freshness/permissions/hash/session 信息，可复制 ref/Markdown 引用、插入提及、打开/定位/跳转；`/combined` 命中新增证据字段；9 语言新增 45 条文案。
-- **公开 API 与 MCP**：`GET /dsh-locator/search?q=...`（同一 trust fence）；随包提供 `locator-cli`（search/find/status/resolve/cite，JSON 输出）与 `locator-mcp`（只读 MCP stdio server）并暴露为 npm bin；新增 `locator_explore` 多 query 探索（token 预算内）。
-  ```sh
-  npx dsh-locator search "handoff ext:md" --json
-  npx dsh-locator-mcp    # stdio MCP server，供 Claude Code / Cursor 等外部 agent 只读调用
-  ```
-- **可选钩子**：`rerankCommand`（find 结果后重排）与 `ocrCommand`（扫描 PDF 走外部 OCR），默认关闭。
-- 测试 **336 个**；六引擎按 0.19.0 重建（darwin 发布二进制由 macOS CI 重建）。
-## 0.18.0 更新
-
-- **远程盘 roots 不再走 inotify 目录树**：NFS / SMB / CIFS / Ceph / AFS 与 WSL 9p/DrvFs 根目录不会产生可用 inotify 事件。Linux watcher 现在完全跳过这些根目录的逐目录挂 watch（此前仍会走一遍、随后才标记 degraded），启动/周期重建不再为此多花数秒到数分钟，也不再占用数万个内核 watch 槽位；这些根目录仍由周期重建兜底，状态继续报告 `watchDegraded` + 原因；本地根目录保持原生监听。
-- **content 刷新撞上引擎重建不再丢库全量重建**：当引擎在 content 刷新分页之间开始重扫（周期 fallback 或 `locator_rebuild`）时，本次刷新改为顺延到下一周期（`content-refresh-deferred` 警告），不再回退为全量重建、重读所有已索引文件；此前在大根目录/忙碌 profile 上可能意外触发多 GB content 库重建。
-- 测试 **206 个**（另新增两个 Linux watcher 的 Go 测试）；六引擎按 0.18.0 重建（darwin 发布二进制由 macOS CI 重建）。
-
-## 0.17.0 更新
-
-- **兼容 DSH 0.2.2**：宿主现在先对每条 Web 路由鉴权、再把已认证的 Peer 交给 handler，同时把旧的 `connection.requestRejection` 换成 `connection.admit`。本版优先信任宿主交来的 Peer（保留本地同源校验），并兼容两种旧 connection 形态（都没有时仍 fail-closed 503），修复 0.16.0 在 DSH 0.2.2 上面板 HTTP 路由全部 503 的问题。
-- **会话命中带事件地址**：`locator_find` 的会话命中新增 `seq` 与 `eventRef`（`ref://session-event?sid=…&seq=N`），可直接交给 `locator_resolve`/`locator_cite`；同时修复会话命中时 `provenance.indexedAt` 为小数导致工具输出被判 invalid 的问题。
-- **状态页 refs 计数**：`locator_status` 新增 additive `content.refs`（`total` 与 `byKind`），显示已存的 URL / session-event / spill / attachment 证据引用数。
-- **缺失引用懒写回**：spill / attachment 目标已不存在时，第一次 resolve 会把 `missing` 标记写回 `refs.meta`，后续直接读标记（warning `missing-state-cached`），不再反复探测文件系统。
-- **面板**：Capabilities 与 ref chip 文案补齐 9 种语言（英文 fallback 不变）；Capabilities 页注明这是全局能力注册表视图（preset 作用域工具如 bash/write 可能不出现）；URL 引用显示截断后的可读 URL，并带 origin/title tooltip。
-- 新增 `test/client.spec.ts`（client.js 语法、9 语言键集、面板路由契约、URL ref helper）；`test/lag.spec.ts` 改为显式等待上限 + 自校准阈值。
-- 测试 **205 个**；六引擎按 0.17.0 重建（darwin 发布二进制仍由 macOS CI 以 CGO/FSEvents 重建）。
-
-## 0.16.0 更新
-
-- **面板能力视图**：新增 `POST /dsh-locator/capabilities`（与其它面板路由同一 trust fence），把 `capability_search`/`capability_preflight` 的数据接到面板；面板新增 **Capabilities** 标签：输入意图 → 能力卡列表（kind/risk/approval），选中可看 preflight（callable/schema/副作用）。英文文案，其余语言回退。
-
-## 0.15.0 更新
-
-- **Wave 2 证据 ref**：内容库新增 additive `refs`/`refs_meta`（不 bump schema、不重建 6.6GB），会话日志单遍提取 **URL**（`web_search`/`web_fetch` meta，无需打开 tool-results 索引）、**spill locator**（结果正文 notice）、**attachment digest**（消息块）与 **session-event**（`ref://session-event?sid=…&seq=N`）；`locator_resolve`/`locator_cite` 支持新类型（沿用 cwd 授权；spill 校验 session 目录归属，attachment 查本地 store）。
-- Web 面板 combined 命中补 `ref`，结果行新增复制 ref 的 chip（英文；其余语言回退）；升级旧库首次刷新只重读会话日志。
-
-## 0.14.0 更新
-
-- **能力索引适配器**：新增 `capability_search`（自然语言找“谁能做这件事”）与 `capability_preflight`（能力是否可见、参数是否符合 schema、需要什么审批/沙箱、有哪些副作用）；数据来自宿主已有的 tool registry（含 MCP 工具）与 skill catalog，不重复发现、不用 embedding，60s 自动刷新。
-- 本版是 Wave 3 的第一部分；面板能力页、租户/企业包，以及 Wave 2 的 refs 持久化/URL·spill·attachment ref 留待后续版本（企业包需 dsh-ee 实例与凭据）。
-
-## 0.13.0 更新
-
-- **授权修复**：`locator_find` 的 `sessionId`/`scope:"all"`/`pathPrefix` 不再绕过调用方身份——显式会话 id 只允许「当前会话」或「header.cwd 与调用方相同的会话」（与 DSH session-query 工具一致）；`pathPrefix` 必须落在已配置 root 内；`scope:"all"` 仍可搜全部文件，但会话正文默认限调用方授权集合（`allowCrossWorkspaceSessions: true` 可显式放开）。
-- **名称搜索默认 workspace**：`locator_search` 在 cwd 位于索引 root 内时默认只返回 cwd 下的命中（`scope:"all"` 搜全部 root；cwd 不在 root 内时退回索引 roots 并用 `scopeFallback` 说明）。
-- **可引用证据 ref**：`locator_search`/`locator_find` 的每条命中新增 `ref`（会话用 `dsh-session:` URI，文件用 `ref://file?...&sha256=`）、`provenance`、`freshness`、`permissions`；新增 `locator_resolve`（元数据+有界摘录，带授权）与 `locator_cite`（markdown/mention/json 引用），结果从"路径"升级为"可引用证据"。
-- 内容索引记录会话 `cwd`（`sources.cwd`，additive 迁移；升级后首次刷新只重建会话文档，不动 6.6GB 文件索引）。
-
-## 0.12.1 更新
-
-- 面板：多 root 时新增**根目录筛选**（文件/目录/内容命中都按所选 root 过滤，服务端会校验该前缀确实在已配置 root 之下）；新增 **CSV/JSON 导出**当前已加载/过滤结果；`Ctrl+F` 查找条记住**最近查询**（浏览器原生输入建议）。
-- 客户端新增 **ja/fr/de/ru** 文案（共 9 种语言，全部跟随宿主 `<html lang>`）。
-- CI 增加**非阻塞 macOS Node smoke**：拿不到 macOS runner 也不影响发布门禁（0.10.x 曾被它阻塞）。
-
-- 已归档会话现在始终索引但默认不参与搜索结果；面板勾选“包含归档会话”或 `contentIncludeArchived: true` 可按需搜索（切换无需重建）。
-- 新增可选 `contentIndexToolResults`：把 `tool/result` 文本作为独立会话文档入索引（标题为工具名、消息 id 为 call id）；默认关闭，切换只重建会话。
-- 文件命中支持**行级打开**：`/open` 接受 `line`；检测 VS Code 系（`code`/`cursor`/`codium`/`windsurf`/`code-insiders`）与 Sublime 并传入跳行参数，`DSH_LOCATOR_EDITOR` 可覆盖；其它环境退回普通打开，响应里的 `line` 表示是否成功跳行。
-
-## 0.11.8 修复
-
-- 修复 cwd 不在任何已索引 root 内时 `locator_find` workspace 范围只返回当前会话消息的问题：此时没有 workspace 文件子集可限制，文件正文改为在所有已索引 root 中搜索，会话命中仍只限当前会话。
-
-## 0.11.7 修复
-
-- 修复 `locator_find` workspace 范围搜不到文件正文的问题：会话过滤与 cwd 路径过滤被 AND 在同一行上（永远无法同时命中），现在按文档类型组合——会话命中来自当前会话日志、文件命中来自 cwd；当前会话尚未落定入索引时改为只搜文件并给出 `unknown-session` 警告，而不是所有查询都返回空。
-
-## 0.11.6 修复
-
-- 修复 `locator_find` 输出被宿主判为非法的问题：工具声明的 `state` schema 缺少 `fullIndex`/`reasoningIndex`（0.11.3 起存在）和 `progress`，导致每次调用都以 `invalid output` 失败；`locator_status` 现在也会返回内容索引状态（`content`）。两个工具共用同一份 state schema，避免新字段再次悄悄打破其中一个。
-
-## 0.11.5 更新
-
-- **内容构建进度**：构建期间 `locator_status`、HTTP `status` 路由和 Web 面板会报告当前阶段（`files` / `sessions`）、已扫描条目数、已知总数和当前路径（`content.progress`），不再只有一个 `building: true`；构建结束或失败后该字段消失。
-
-## 0.11.0 升级注意
-
-- 切换 `contentIndexReasoning` 只重建会话，不再全量重建 16.4 万文件；调小内容 cap 会在下次启动重建，避免旧数据继续越预算可搜；`locator_find` 支持 `offset`；面板可一键复制当前已加载/过滤结果的路径。
-
-- 状态/面板会显示 **全量内容** 与 **含思考内容**；客户端语言优先跟随宿主 `<html lang>`（DSH locale），没有时退回浏览器语言。
-
-- 宿主 `connection` 服务在插件启动时尚未就绪也不会永久丢路由：先注册、每个请求再检查并 503；确实没有 connection 的 host 可设 `httpConnectionOptional: true`，退回宿主鉴权 + 同源 Fetch 检查（默认 false）。
-
-- 可选 **思考内容索引**：`contentIndexReasoning: true` 会把 assistant 的 `reasoning`/`thinking` block 并入同一条会话消息（最终答案在前，8KB 上限内），因此 `locator_find` 能搜思考过程，跳转仍指向消息；默认关闭，切换该开关会强制重建会话索引。
-
-- **全量内容索引**：设置 `contentFullIndex: true`（或把两个 cap 都设为 `0`），即可索引全部符合文本扩展名/单文件上限的文件。实测本机 eligible 约 **16.4 万文件 / 1.74GB 文本**（含 /mnt/d 工作区），FTS 库约 **5.45GB**；首次构建实测 **331s**，查询约 **0.02–0.4s**。默认保留 1.6GB/20 万上限，避免普通用户磁盘暴涨；面板会显示 `truncated`。
-- `locator_find` 默认仍 workspace：当前会话 + 调用者 cwd；但如果 cwd **不在任何已索引 root 内**，不再把文件命中限制到 cwd（否则必然为空），而是搜索已索引 root 的文件；会话仍只查当前会话。跨范围仍用 `scope:"all"`。
-- 面板新增：**加载更多**（按 offset 分页）、**最近搜索**（localStorage，可清空）、**过滤已加载结果**。
-- 安全：Linux 下拒绝 root 内嵌套 mount point 的目标（bind mount 防逃逸）；`/open` 用 `O_NOFOLLOW` 打开并核对 inode，缩小 TOCTOU 窗口。
-- 内容查询支持 offset；名称/内容分组各自分页。
-
-## 0.10.0 升级注意
-
-- 内容搜索最短 **3 个字符**；1–2 字符请用 `Ctrl+F` 会话内查找。查询超过 256 字符/32 个词会直接报错。
-- `locator_find` 默认 **workspace 范围**（会话只查调用者当前会话，文件正文只查调用者 cwd）；跨工作区需显式传 `scope: "all"`。新增 `matchMode`/`caseSensitive`/`wholeWord`/`sessionId`/`count`/`pathPrefix` 参数。
-- 面板 HTTP 路由现在**硬依赖 DSH `connection` 服务**（缺失则不挂载/503），并强制 POST + JSON + 同源校验；stock web profile 正常。
-- `locator_export` 默认只写插件 stateDir，覆盖前校验是否本工具生成的 SQLite；`locator_rebuild` 只接受配置 roots/excludes 的子集。
-- 引擎二进制版本为 0.10.0；快照保存改为脏数据 debounce、`sort=path` 内存修复、watcher 降级/refresh fallback；macOS 发布版必须由 macOS cgo/FSEvents 构建，debug kqueue fallback 不能发布。
-- 客户端：面板点击结果后键盘/Esc 保持；软换行/`<br>`/CJK 查找修复；assistant 同 nodeKey 双行优先回复行；正则优先 Unicode `u` 且 worker 失败不再回退主线程；内容错误/警告/截断在面板可见。
+- 两个 DSH 进程共享同一个 `stateDir` 时有引擎写锁防损坏，但仍建议各用各的缓存目录。
+- macOS 发布版二进制用 FSEvents；`CGO_ENABLED=0` 构建只有 kqueue（上限 4096 个目录）。
+- 全库内容正则**有意不做**（会话内查找条支持正则）；面板在正则模式下暂停内容组。
 
 ## 安全与隐私
 
 - 索引完全在本地：不联网、不上传、不埋点；插件不会修改、移动或删除被索引的文件。
-- 内容库与构建锁以 `0600` 创建、状态目录以 `0700` 创建，同机其他用户无法读取被索引的文档或会话正文。
-- 快照和内容库里有文件名、路径和正文，请当作私有数据；删除 `stateDir` 即可清空。
-- 建议给同时运行的多个 DSH 进程配置不同的 `stateDir`。
+- 状态目录在 POSIX 上以 `0700` 创建、快照/日志/meta/内容库以 `0600` 创建（启动时对已有文件幂等纠正；Windows 沿用 profile ACL）。同机其他用户无法读取被索引的文档或会话正文。
+- `notReadable` 是**硬读取围栏**：`locator_read`、`locator_resolve`、`locator_cite` 在读字节前就返回 `scope-denied`；`notIndexed` 默认把凭据排除在内容库之外。
+- `locator_admin`（写操作）延后加载；CLI 与 MCP 天生只读（临时状态副本、不可变内容库），且从不暴露 admin。MCP 只走 stdio；HTTP 路由在宿主信任围栏之后 fail-closed。
+- 快照与内容库含文件名、路径和正文，请当作私有数据；删除 `stateDir` 即可清空缓存。并发 DSH 进程请各用各的 `stateDir`。
 
 ## 版本与兼容性
 
-- Node：`^22.19.0 || >=24.9.0`；DSH：`>=0.2.1-rc.2 <0.3.0 || >=0.2.2-0 <0.3.0`（见 `package.json` 的 `engines`）。
-- 发布走 GitHub Actions provenance，npm 上的包可验证来源；Gitee / GitCode 由 mirror workflow 自动同步。
-- 更新记录：[CHANGELOG.md](CHANGELOG.md)；问题与建议：[Issues](https://github.com/PerryLink/dsh-locator/issues)。
+- Node `^22.19.0 || >=24.9.0`；DSH `>=0.2.1-rc.2 <0.3.0 || >=0.2.2-0 <0.3.0 || >=0.2.3-0 <0.3.0-0`（见 `package.json` 的 `engines`）。
+- 发布带 GitHub Actions provenance，可校验 npm 包来源；Gitee / GitCode 由 mirror workflow 同步。0.23.0 起 GitHub Release 附带 tarball 与 `sha256sums.txt`。
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)；问题反馈：[Issues](https://github.com/PerryLink/dsh-locator/issues)。
+
+## 0.23.0 升级说明
+
+- **默认工具面是 3+1**（`locator_find`、`locator_read`、`locator_status` + 延后加载的 `locator_admin`）。0.22 之前的旧工具默认不再注册；需要时设 `legacyTools: true`（仍 defer）。这也把旧声明从 prompt-caching/`run_code` 列表里去掉（总计约 21KB，0.22 为 54,764B）。
+- **`mode: 'auto'` 改为跨源合并**：symbol exact → body 词/BM25 → symbol prefix → name prefix/substring，按身份去重并合并 `why`/`sources`；`resolvedMode` 可为 `mixed`；auto 页用 cursor v2，单源模式继续 v1 游标。
+- **CJK/短词**：有长词时 1 字符 term 丢弃（`terms-dropped`）；2 字符 term 不再让整个查询退化为 LIKE，改为 FTS + 后置过滤；`includeArchived` 成为 `locator_find` 显式参数。
+- **status brief 不再报喜不报忧**：包含引擎 warning、roots 列表与内容 `truncated`（上限 600 → 1,400 字符）。
+- **HTTP `/v1/{find,read,status}`**（files-only、同一信封）新增；`/content`、`/content/rebuild` 标记 deprecated，0.24.0 删除。
+- **MCP/CLI 新增 `--api=2026-11`** 可选面；旧默认面冻结。MCP 支持协议 `2025-11-25`，未知版本回最新而不是最老。
+- **安全修复**：`notReadable` 围栏在 read/resolve/cite 生效；状态目录/文件按 `0700`/`0600` 创建并在启动时纠正。
+- **运维**：config-drift guard（预算变小不再删库）、磁盘余量预检、引擎写锁、`meta.json` 缺失重建、Windows 按版本复制引擎（status 暴露 `engineVersion`）、`stateDir` 内的 last-good-profile、GitHub Release tarball + `sha256sums.txt`。
+
+完整步骤见 [docs/upgrade.md](https://github.com/PerryLink/dsh-locator/blob/main/docs/upgrade.md)；历史版本说明见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 0.22.2 升级说明
+
+- 默认工具面改为 3+1 与统一 `apiVersion 2026-11` 信封；当时旧工具仍注册但 defer。
+- 声明预算 find 2,518B + read 1,405B + status 485B = 4,408B 常驻（0.22 为 4,136B）；含两个 capability 适配约 6.4KB。
 
 ## 路线图
 
 不是承诺，只是当前方向：
 
-1. Electron 桌面运行时在真实 Windows 安装上的验证。
-2. 面板里的预览和结果分组。
-3. Windows on ARM / Linux ARM 的运行时覆盖。
-4. 更大的索引：小写名字 arena 与 trigram 预筛选。
-5. 快照增量压缩与按根目录的 journal。
+1. 在真实 Windows 安装上核验 Electron 桌面运行时。
+2. 面板更丰富的预览与结果分组。
+3. Windows on ARM / Linux ARM 运行时覆盖。
+4. 面向超大索引的小写名称 arena 与 trigram 预过滤。
+5. 增量快照压缩与 per-root journal。
 
 ## 许可证
 

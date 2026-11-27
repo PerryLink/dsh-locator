@@ -177,6 +177,18 @@ type Server struct {
 	// fallback-rebuild context.
 	runCtx context.Context
 
+	// lock is the state-directory write lock owned by this server; nil when
+	// another live engine holds it. lockStop stops the heartbeat goroutine.
+	lock     *store.Lock
+	lockStop func()
+	// lockHolder describes the engine that owns the lock when this server runs
+	// read-only. Guarded by mu.
+	lockHolder *store.LockInfo
+	// readOnly is true when another live engine owns the state directory: this
+	// server serves queries from the snapshot but never writes. It can be
+	// cleared later by tryTakeLock when the owner exits. Guarded by mu.
+	readOnly bool
+
 	rebuildMu sync.Mutex
 
 	usnMu     sync.Mutex
@@ -259,6 +271,25 @@ type rpcError struct {
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.out = out
 	s.runCtx = ctx
+	if err := s.acquireLock(); err != nil {
+		s.event("error", map[string]string{"message": err.Error()})
+		return err
+	}
+	defer func() {
+		// Covers bootstrap errors too: Run may return without reaching shutdown,
+		// and the lock must never outlive the engine that owns it.
+		s.mu.Lock()
+		stop := s.lockStop
+		s.lockStop = nil
+		lock := s.lock
+		s.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
+		if lock != nil {
+			_ = lock.Release()
+		}
+	}()
 	if err := s.bootstrap(ctx); err != nil {
 		s.event("error", map[string]string{"message": err.Error()})
 		return err
@@ -298,6 +329,81 @@ type bootstrapError struct{ err error }
 func (e bootstrapError) Error() string { return e.err.Error() }
 func (e bootstrapError) Unwrap() error { return e.err }
 
+// acquireLock takes the state-directory write lock. When another live engine
+// owns it (for example the previous plugin instance during an HMR reload), the
+// server keeps running read-only: queries are served from the snapshot on disk,
+// but no snapshot, journal, meta or USN state is written, so two engines can
+// never corrupt one state directory.
+func (s *Server) acquireLock() error {
+	lock, holder, err := store.AcquireLock(s.opt.StateDir, s.opt.Version)
+	if err != nil {
+		// An unwritable/unreadable state directory must not disable search: fall
+		// back to serving from memory + the snapshot read-only, exactly like a
+		// second engine. Persistence is simply skipped.
+		s.mu.Lock()
+		s.readOnly = true
+		s.mu.Unlock()
+		msg := fmt.Sprintf("cannot lock the state directory %s (%v); running read-only without persistence", s.opt.StateDir, err)
+		s.logf("%s", msg)
+		s.event("warning", map[string]string{"message": msg})
+		return nil
+	}
+	if lock == nil {
+		s.mu.Lock()
+		s.readOnly = true
+		s.lockHolder = holder
+		s.mu.Unlock()
+		pid := 0
+		if holder != nil {
+			pid = holder.PID
+		}
+		msg := fmt.Sprintf("another locator engine owns the state directory %s (pid %d); running read-only until it exits", s.opt.StateDir, pid)
+		s.logf("%s", msg)
+		s.event("warning", map[string]string{"message": msg})
+		return nil
+	}
+	s.mu.Lock()
+	s.lock = lock
+	s.lockStop = lock.KeepAlive(store.LockHeartbeatInterval)
+	s.mu.Unlock()
+	return nil
+}
+
+// tryTakeLock upgrades a read-only server once the owning engine released the
+// lock (the common HMR handover: the old plugin instance exits, the new one
+// starts writing). It returns true when this server now owns the lock.
+func (s *Server) tryTakeLock() bool {
+	lock, holder, err := store.AcquireLock(s.opt.StateDir, s.opt.Version)
+	if err != nil {
+		return false
+	}
+	if lock == nil {
+		if holder != nil {
+			s.mu.Lock()
+			s.lockHolder = holder
+			s.mu.Unlock()
+		}
+		return false
+	}
+	stop := lock.KeepAlive(store.LockHeartbeatInterval)
+	s.mu.Lock()
+	s.lock = lock
+	s.lockStop = stop
+	s.lockHolder = nil
+	s.readOnly = false
+	s.mu.Unlock()
+	s.logf("acquired the state directory write lock; writes enabled")
+	s.markDirty()
+	return true
+}
+
+// isReadOnly reports whether another engine currently owns the writes.
+func (s *Server) isReadOnly() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.readOnly
+}
+
 // bootstrap loads a usable snapshot or starts the initial scan in the
 // background. Either way requests are served immediately: a search during the
 // first scan sees the entries indexed so far and carries `indexing: true`.
@@ -322,7 +428,17 @@ func (s *Server) bootstrap(ctx context.Context) error {
 		s.lastSaveAt = now
 		s.lastDirtyAt = now
 		s.needsFullSave = !info.SupportsJournal()
+		if meta.Rebuilt {
+			// meta.json was missing or corrupt; the snapshot data is intact, so
+			// nothing is rescanned. Mark the metadata dirty so the next save (or
+			// the moment this read-only instance takes the lock) rewrites it.
+			s.dirty = true
+		}
 		s.saveMu.Unlock()
+		if meta.Rebuilt {
+			s.logf("meta.json missing or unreadable in %s; rebuilt it from the snapshot", s.opt.StateDir)
+			s.event("warning", map[string]string{"message": "meta.json is missing or corrupt; rebuilt metadata from the snapshot (no rescan)"})
+		}
 		s.saveStatsMu.Lock()
 		s.snapshotFormat = info.Version
 		s.journalEntries = int64(info.JournalEntries)
@@ -379,7 +495,7 @@ func (s *Server) initialScan(ctx context.Context, ix *index.Index) {
 		s.markDirty()
 		s.emitStats()
 	}()
-	if _, err := s.scanRoots(ctx, ix, s.opt.Roots, s.opt.USN); err != nil {
+	if _, err := s.scanRoots(ctx, ix, s.opt.Roots, s.opt.USN, scanModeInitial); err != nil {
 		s.logf("initial scan failed: %v", err)
 		s.event("error", map[string]string{"message": "initial scan failed: " + err.Error()})
 		return
@@ -399,7 +515,14 @@ func (s *Server) initialScan(ctx context.Context, ix *index.Index) {
 // how much it actually did. useUSN is false for partial rescans: a volume MFT
 // enumeration would cover more than the refreshed roots and starts its own
 // change watcher, which a partial refresh must not do next to the live watcher.
-func (s *Server) scanRoots(ctx context.Context, ix *index.Index, roots []string, useUSN bool) (scan.Stats, error) {
+// Scan modes recorded in meta.lastRefresh.
+const (
+	scanModeInitial = "initial"
+	scanModeRefresh = "refresh"
+	scanModeRebuild = "rebuild"
+)
+
+func (s *Server) scanRoots(ctx context.Context, ix *index.Index, roots []string, useUSN bool, mode string) (scan.Stats, error) {
 	s.event("scan", map[string]any{"phase": "start", "roots": roots})
 	st, err := scan.Run(ctx, ix, scan.Options{
 		Roots:         roots,
@@ -420,14 +543,16 @@ func (s *Server) scanRoots(ctx context.Context, ix *index.Index, roots []string,
 	if err != nil {
 		return st, err
 	}
+	at := time.Now()
 	s.mu.Lock()
 	s.usnActive = st.USN
 	s.meta = store.Meta{
-		Version:  s.opt.Version,
-		Roots:    ix.Roots(),
-		Excludes: s.opt.Excludes,
-		BuiltAt:  time.Now(),
-		Stats:    st,
+		Version:     s.opt.Version,
+		Roots:       ix.Roots(),
+		Excludes:    s.opt.Excludes,
+		BuiltAt:     at,
+		Stats:       st,
+		LastRefresh: &store.RefreshInfo{At: at, Mode: mode, Stats: st},
 	}
 	s.mu.Unlock()
 	s.markDirty()
@@ -732,7 +857,7 @@ func (s *Server) rebuild(ctx context.Context, p RebuildParams) (any, error) {
 		defer s.rebuildMu.Unlock()
 		s.stopWatcher()
 		ix := index.New()
-		if _, err := s.scanRoots(ctx, ix, roots, s.opt.USN); err != nil {
+		if _, err := s.scanRoots(ctx, ix, roots, s.opt.USN, scanModeRebuild); err != nil {
 			s.logf("rebuild failed: %v", err)
 			s.event("error", map[string]string{"message": "rebuild failed: " + err.Error()})
 			if !s.startWatcher(ctx) {
@@ -767,7 +892,7 @@ func (s *Server) rebuild(ctx context.Context, p RebuildParams) (any, error) {
 func (s *Server) rebuildWith(ctx context.Context, roots, excludes []string) scan.Stats {
 	s.stopWatcher()
 	ix := index.New()
-	st, err := s.scanRoots(ctx, ix, roots, s.opt.USN)
+	st, err := s.scanRoots(ctx, ix, roots, s.opt.USN, scanModeRebuild)
 	if err != nil {
 		s.logf("rebuild failed: %v", err)
 		s.event("error", map[string]string{"message": "rebuild failed: " + err.Error()})
@@ -932,6 +1057,13 @@ func (s *Server) statusPayload() map[string]any {
 	refreshNextAt := s.refreshNextAt
 	refreshRounds := s.refreshRounds
 	pressureSkips := s.refreshSkippedByPressure
+	readOnly := s.readOnly
+	lockPid := 0
+	if s.lock != nil {
+		lockPid = s.lock.Info().PID
+	} else if s.lockHolder != nil {
+		lockPid = s.lockHolder.PID
+	}
 	s.mu.RUnlock()
 	metrics := s.statusMetrics()
 	queryCount, lastQueryMs, recentQueryMs := s.queryStats()
@@ -959,8 +1091,12 @@ func (s *Server) statusPayload() map[string]any {
 		refreshChanged = lastRefresh.Changed
 	}
 	return map[string]any{
-		"version":             s.opt.Version,
-		"platform":            meta.Platform,
+		"version":  s.opt.Version,
+		"platform": meta.Platform,
+		// Write-lock ownership (0.23): readOnly means another live engine owns
+		// the state directory; lockPid identifies it.
+		"readOnly":            readOnly,
+		"lockPid":             lockPid,
 		"roots":               ix.Roots(),
 		"entries":             st.Entries,
 		"files":               st.Files,
@@ -1120,6 +1256,13 @@ func (s *Server) autosave(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if s.isReadOnly() {
+				// The owning engine may have exited (profile HMR handover); take the
+				// lock over before the index falls behind the disk.
+				if !s.tryTakeLock() {
+					continue
+				}
+			}
 			if s.isScanning() {
 				continue
 			}
@@ -1140,6 +1283,10 @@ func (s *Server) autosave(ctx context.Context) {
 // a scan/rebuild, on a v1 migration, when the journal overflowed, or right
 // after a compaction.
 func (s *Server) save(force bool) bool {
+	if s.isReadOnly() {
+		// Another engine owns the state directory; never write over its snapshot.
+		return false
+	}
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 	ix := s.current()
@@ -1261,8 +1408,17 @@ func (s *Server) shutdown() {
 	s.stopWatcher()
 	s.stopRefreshFallback()
 	// Write only if something is actually unsaved; a quiet shutdown leaves the
-	// existing snapshot untouched.
+	// existing snapshot untouched. A read-only instance skips the save and never
+	// removes a lock it does not own.
 	s.save(false)
+	s.mu.Lock()
+	lock := s.lock
+	s.mu.Unlock()
+	if lock != nil {
+		if err := lock.Release(); err != nil {
+			s.logf("releasing the state directory lock failed: %v", err)
+		}
+	}
 }
 
 func (s *Server) stopUSN() {

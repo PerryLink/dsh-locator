@@ -16,7 +16,7 @@ import { makeExploreTool } from './explore.ts'
 import { makeExportTool } from './export.ts'
 import { makeReindexTool } from './reindex.ts'
 import { registerHttp } from './http.ts'
-import { resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
+import { packageVersion, recordLastGoodProfile, resolveBinary, resolveRoots, resolveStateDir } from './paths.ts'
 import { LocatorRuntime } from './runtime.ts'
 import { makeCapabilityTools, preflightCapabilityCard, searchCapabilityCards, type CapabilitySources } from './capabilities.ts'
 import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
@@ -191,6 +191,14 @@ export function apply(ctx: Context, config: Config): void {
     const start = (): void => {
       rt.start()
       logger.info(`index roots: ${roots.join(', ')} (state ${stateDir})`)
+      // Record a known-good boot in the state directory only; doctor prints how
+      // to restore it after an external profile reset. Never fails boot.
+      recordLastGoodProfile(stateDir, {
+        packageVersion: packageVersion(),
+        roots,
+        contentIndex: config.contentIndex,
+        ...(rt.status?.warning === undefined ? {} : { warnings: [rt.status.warning] }),
+      })
       if (content !== undefined && config.contentLazy === false) ensureContent()
     }
     let disposeBoot: (() => void) | undefined
@@ -215,42 +223,45 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  ctx.tools.register(makeSearchTool(rt, {
-    ...(content === undefined ? {} : { content }),
-    ensure: ensureContent,
-    scope,
-    budgetChars,
-  }))
-  // 0.22 AI-first surface: three常驻 tools plus a deferred admin tool. The
-  // legacy tools stay registered but deferLoading, so they do not tax the
-  // initial agent prompt while remaining callable by name.
+  // 0.23 AI-first surface: three resident tools plus a deferred admin tool.
+  // Legacy tools are opt-in via config.legacyTools (default false in 0.23),
+  // which keeps the native declaration at ~4.4 KB and the PTC schema small.
   ctx.tools.register(makeAgentFindTool(rt, content, ensureContent, {
     scope,
     allowCrossWorkspaceSessions: config.allowCrossWorkspaceSessions,
     maxChars: budgetChars,
   }))
-  ctx.tools.register(makeAgentReadTool(rt, content))
   ctx.tools.register(makeAgentStatusTool(rt, content, scope))
   ctx.tools.register(makeAgentAdminTool({ rt, ...(content === undefined ? {} : { content }), ensure: ensureContent }))
-  ctx.tools.register(makeRebuildTool(rt))
-  ctx.tools.register(makeExportTool(rt))
-  ctx.tools.register(makeResolveTool(rt, content, { urlFreshness: config.urlFreshness === true }))
+  ctx.tools.register(makeAgentReadTool(rt, content, { scope }))
+  ctx.tools.register(makeResolveTool(rt, content, { urlFreshness: config.urlFreshness === true, scope }))
   // Cite detail mode reads session/file anchors through the same stores; pass
   // them explicitly so a ref carrying a line can quote that line verbatim.
   ctx.tools.register(makeCiteTool({
     ...(content === undefined ? {} : { content }),
     roots,
-  }))
-  // locator_explore works with the name index alone; the content half is added
-  // when the profile enables it (same lazy boot hook as locator_find).
-  ctx.tools.register(makeExploreTool(rt, {
-    ...(content === undefined ? {} : { content }),
-    ensure: ensureContent,
-    roots,
-    allowCrossWorkspaceSessions: config.allowCrossWorkspaceSessions,
     scope,
-    budgetChars,
   }))
+  if (config.legacyTools === true) {
+    ctx.tools.register(makeSearchTool(rt, {
+      ...(content === undefined ? {} : { content }),
+      ensure: ensureContent,
+      scope,
+      budgetChars,
+    }))
+    ctx.tools.register(makeRebuildTool(rt))
+    ctx.tools.register(makeExportTool(rt))
+    // locator_explore works with the name index alone; the content half is
+    // added when the profile enables it (same lazy boot hook as find).
+    ctx.tools.register(makeExploreTool(rt, {
+      ...(content === undefined ? {} : { content }),
+      ensure: ensureContent,
+      roots,
+      allowCrossWorkspaceSessions: config.allowCrossWorkspaceSessions,
+      scope,
+      budgetChars,
+    }))
+  }
   // Capability adapter: read the host's tool registry and skill catalog instead
   // of duplicating discovery. Optional services stay optional.
   const skillsService = (ctx as unknown as { get?: (name: string) => unknown }).get?.('skills')
@@ -259,7 +270,7 @@ export function apply(ctx: Context, config: Config): void {
     ...(skillsService === undefined ? {} : { skills: skillsService as CapabilitySources['skills'] }),
   }
   for (const tool of makeCapabilityTools(capabilitySources)) ctx.tools.register(tool)
-  if (content !== undefined) {
+  if (content !== undefined && config.legacyTools === true) {
     ctx.tools.register(makeReindexTool(content, ensureContent))
     // Symbol data layer (P1-2): outline/symbol/repo_map are read-only views over
     // the additive symbols table and share the same scope + budget rules.

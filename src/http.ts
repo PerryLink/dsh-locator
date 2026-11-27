@@ -9,6 +9,22 @@
  *   POST /dsh-locator/status   {}
  *   POST /dsh-locator/combined { query, limit, contentLimit, compact, ... }
  *
+ * 0.23.0 adds a versioned AI-first face that answers the shared agent-core
+ * envelope (apiVersion/ok/tool/items/page/error) and shares the same trust
+ * fence:
+ *
+ *   POST /dsh-locator/v1/find   { query, mode, kinds, where, scope, limit, cursor, ... }
+ *   POST /dsh-locator/v1/read   { ref | refs[] | path, line, window, as, maxBytes }
+ *   POST /dsh-locator/v1/status { detail: brief|full }
+ *
+ * The /v1 handlers are thin adapters over the exact tool factories the host
+ * registers (makeAgentFindTool / makeAgentReadTool / makeAgentStatusTool), so
+ * there is no second search implementation. The HTTP API has no caller
+ * session identity: find is files-only and hides session rows, read accepts
+ * only file refs and absolute paths, and admin is never exposed. The legacy
+ * /search route is unchanged; /content and /content/rebuild are deprecated
+ * (removed in 0.24.0).
+ *
  * **Method contract, per route.** `/dsh-locator/search` accepts both POST and
  * GET on purpose: the panel keeps the POST JSON-body contract, while scripts and
  * other tools get a plain, citable GET query API (Everything-style HTTP) behind
@@ -40,6 +56,11 @@ import type { LocatorRuntime, SearchArgs } from './runtime.ts'
 import type { ContentHit, ContentIndex } from './content.ts'
 import { fileRef } from './refs.ts'
 import type { ContentSearchOptions } from './content-search.ts'
+import { makeAgentFindTool } from './agent-find.ts'
+import { makeAgentReadTool } from './agent-read.ts'
+import { makeAgentStatusTool } from './agent-status.ts'
+import { makeError, makeTiming, type AgentErrorCode, type AgentFailureEnvelope } from './agent-core.ts'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { contentScopeOptionsOf, readContextLines, runContentSearchRequest, type CallerIdentity, type ContentRequest, type ContentRequestResult } from './find.ts'
 import {
   applyOutputBudget,
@@ -66,6 +87,7 @@ import {
   revealInFileManager,
 } from './reveal.ts'
 import { closeSync, constants, fstatSync, openSync, statSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 
 interface WebServerLike {
   register(route: {
@@ -201,17 +223,31 @@ export function registerHttp(
     route('/dsh-locator/reveal', async body => await reveal(rt, body))
     route('/dsh-locator/combined', async (body, res) => await combined(rt, content, ensure, body, res, options))
     if (content !== undefined) {
-      route('/dsh-locator/content/rebuild', async body => {
+      // Deprecated in 0.23.0, removed in 0.24.0: the panel keeps these routes
+      // for one more minor release. Both carriers (header + JSON body) mark the
+      // deprecation; the replacement is the versioned API.
+      route('/dsh-locator/content/rebuild', async (body, res) => {
+        markDeprecated(res, '/dsh-locator/content/rebuild', 'the locator_admin host tool (action rebuild/reindex)')
         ensure?.()
         const full = body.full === true
         const started = full ? content.rebuild() : content.refreshNow()
-        return started ? { ok: true, started: true, full } : { ok: false, error: 'a content build is already running' }
+        return started
+          ? { ok: true, started: true, full, deprecated: true, replacement: 'locator_admin' }
+          : { ok: false, error: 'a content build is already running', deprecated: true, replacement: 'locator_admin' }
       })
-      route('/dsh-locator/content', async body => {
+      route('/dsh-locator/content', async (body, res) => {
+        markDeprecated(res, '/dsh-locator/content', '/dsh-locator/v1/find')
         ensure?.()
         const query = typeof body.query === 'string' ? body.query : ''
         const limit = typeof body.limit === 'number' ? body.limit : 30
-        return { ok: true, query, hits: await content.search(query, limit), state: content.status() }
+        return {
+          ok: true,
+          query,
+          hits: await content.search(query, limit),
+          state: content.status(),
+          deprecated: true,
+          replacement: '/dsh-locator/v1/find',
+        }
       })
     }
     route('/dsh-locator/open', async body => await openPath(rt, body))
@@ -230,6 +266,22 @@ export function registerHttp(
         return await capabilities.search(intent, limit)
       })
     }
+
+    // 0.23.0 versioned AI-first face: the same three tools the host registers,
+    // as a thin HTTP adapter. The agent-core envelope is returned verbatim so
+    // HTTP, MCP and CLI share one contract; every error the tool reports stays
+    // an envelope (HTTP 200, protocol-level failure) while wire-format
+    // rejections answer a non-2xx status with the same envelope shape.
+    const agentTools = makeHttpAgentTools(rt, content, ensure, scope)
+    const v1Route = (
+      path: string,
+      run: (body: Record<string, unknown>, res: ServerResponse) => Promise<unknown>,
+    ): void => {
+      scoped.effect(() => server.register({ kind: 'exact', path, auth: 'required', handler: v1Handler(scoped, run, options.connectionOptional === true) }))
+    }
+    v1Route('/dsh-locator/v1/find', async body => await v1Find(agentTools.find, body))
+    v1Route('/dsh-locator/v1/read', async body => await v1Read(agentTools.read, body))
+    v1Route('/dsh-locator/v1/status', async body => await v1Status(agentTools.status, body))
   })
 }
 
@@ -1163,4 +1215,347 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/* ------------------------------------------------------------------------- */
+/* 0.23.0 versioned /v1 AI-first face                                        */
+/* ------------------------------------------------------------------------- */
+
+/** Wire-level tool name carried by /v1 transport failures. */
+const HTTP_TOOL = 'locator_http'
+/** Top-level arguments /v1/find forwards to the locator_find tool. */
+const V1_FIND_KEYS: ReadonlySet<string> = new Set(['query', 'mode', 'kinds', 'where', 'pathPrefix', 'scope', 'limit', 'offset', 'cursor', 'maxChars', 'detail', 'count', 'includeArchived'])
+/** Top-level arguments /v1/read forwards to the locator_read tool. */
+const V1_READ_KEYS: ReadonlySet<string> = new Set(['ref', 'refs', 'path', 'line', 'window', 'as', 'maxBytes'])
+/** Top-level arguments /v1/status forwards to the locator_status tool. */
+const V1_STATUS_KEYS: ReadonlySet<string> = new Set(['detail'])
+/** Row kinds /v1/find returns by default: HTTP has no caller session. */
+const V1_FIND_DEFAULT_KINDS: readonly string[] = ['file', 'dir', 'symbol']
+
+/** The three agent tools behind the /v1 face. */
+interface HttpAgentTools {
+  find: ToolDefinition
+  read: ToolDefinition
+  status: ToolDefinition
+}
+
+/**
+ * Build the three /v1 tools from the exact factories the host registers.
+ *
+ * Reusing the factories (instead of re-implementing search in HTTP) keeps one
+ * contract and one search implementation across host tools, MCP, CLI and HTTP.
+ * The find tool receives a files-only content view: the HTTP API has no caller
+ * session identity, so session documents must never be searched, counted or
+ * paged over. The read and status tools keep their normal stores; read's own
+ * session authorization is empty without a caller identity, and status is the
+ * same read-only report the panel already sees.
+ * @param rt - locator runtime.
+ * @param content - content index, when enabled.
+ * @param ensure - lazy content boot hook.
+ * @param scope - layered ignore rules compiled from the plugin configuration.
+ * @returns the tool instances for the /v1 handlers.
+ */
+function makeHttpAgentTools(
+  rt: LocatorRuntime,
+  content: ContentIndex | undefined,
+  ensure: (() => void) | undefined,
+  scope: Scope | undefined,
+): HttpAgentTools {
+  const outputBudget = typeof rt.config?.outputBudgetChars === 'number' ? rt.config.outputBudgetChars : undefined
+  const find = makeAgentFindTool(rt, content === undefined ? undefined : filesOnlyContent(content), ensure, {
+    ...(scope === undefined ? {} : { scope }),
+    ...(outputBudget === undefined ? {} : { maxChars: outputBudget }),
+    // Sessions are already excluded at the content layer; keeping the option
+    // false means no code path can widen into cross-workspace sessions either.
+    allowCrossWorkspaceSessions: false,
+  })
+  return {
+    find,
+    // The read factory guards every byte read with the layered readableDenial
+    // rules when a scope is present; HTTP uses the same fence as the panel.
+    read: makeAgentReadTool(rt, content, scope === undefined ? {} : { scope }),
+    status: makeAgentStatusTool(rt, content, scope),
+  }
+}
+
+/**
+ * Content-store view whose every search call excludes session documents.
+ *
+ * The HTTP face has no caller session, so even a future find parameter that
+ * widens scopes cannot reach session bodies: the exclusion happens in the
+ * content layer, before counting, ranking or paging. Every other method stays
+ * bound to the real store (the content index is a class with private fields).
+ * @param content - the real content store.
+ * @returns a store view with session documents excluded from searches.
+ */
+function filesOnlyContent(content: ContentIndex): ContentIndex {
+  const store = content as unknown as {
+    search?: (query: string, limit: number, options?: ContentSearchOptions) => Promise<unknown>
+  }
+  if (typeof store.search !== 'function') return content
+  const search = store.search
+  return new Proxy(content as object, {
+    get(target, key) {
+      if (key === 'search') {
+        return (query: string, limit: number, options?: ContentSearchOptions) =>
+          search.call(content, query, limit, { ...(options ?? {}), excludeSessions: true })
+      }
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(content) : value
+    },
+  }) as ContentIndex
+}
+
+/** Build one transport-level failure envelope for the /v1 face. */
+function v1Failure(
+  code: AgentErrorCode,
+  message: string,
+  tool: string,
+  started: number,
+  details?: Record<string, unknown>,
+): AgentFailureEnvelope {
+  return makeError(code, message, {
+    tool,
+    timing: makeTiming(started),
+    ...(details === undefined ? {} : { details }),
+  })
+}
+
+/**
+ * Wire the /v1 carrier: trust fence -> POST -> JSON media type -> bounded body.
+ *
+ * The security order is the same as the panel routes. A tool-level failure is
+ * a successful protocol response (HTTP 200 + envelope ok:false); only a
+ * malformed carrier request answers a non-2xx status, still with the envelope
+ * shape so clients parse one representation. A trust-fence rejection keeps its
+ * bare status: it is an authentication gate, not an API answer.
+ * @param scoped - scoped context for the connection service.
+ * @param run - the route body.
+ * @param connectionOptional - explicit host-auth fallback from the plugin config.
+ */
+function v1Handler(
+  scoped: Context,
+  run: (body: Record<string, unknown>, res: ServerResponse) => Promise<unknown>,
+  connectionOptional = false,
+): (req: IncomingMessage, res: ServerResponse, peer?: unknown) => Promise<void> {
+  return async (req, res, peer) => {
+    const started = Date.now()
+    const rejection = trustRejection(scoped, req, connectionOptional, peer)
+    if (rejection !== undefined) {
+      res.statusCode = rejection
+      res.end()
+      return
+    }
+    if (req.method !== 'POST') {
+      res.setHeader('allow', 'POST')
+      sendV1(res, 405, v1Failure('invalid-argument', 'method not allowed (use POST)', HTTP_TOOL, started))
+      return
+    }
+    if (!isJsonContentType(req.headers['content-type'])) {
+      sendV1(res, 415, v1Failure('invalid-argument', 'content-type must be application/json', HTTP_TOOL, started))
+      return
+    }
+    let body: Record<string, unknown>
+    try {
+      body = await readJson(req, BODY_LIMIT)
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : 400
+      sendV1(res, status, v1Failure('invalid-argument', messageOf(error), HTTP_TOOL, started, { status: wireErrorCode(status) }))
+      return
+    }
+    try {
+      sendV1(res, 200, await run(body, res))
+    } catch (error) {
+      // A client disconnect cancels the call: the caller is gone, but the
+      // response object may still be writable, so answer in the same shape.
+      const aborted = isAbortError(error)
+      sendV1(res, aborted ? 200 : 500, v1Failure(aborted ? 'cancelled' : 'internal', messageOf(error), HTTP_TOOL, started))
+    }
+  }
+}
+
+/** Send one /v1 value with the shared JSON framing. */
+function sendV1(res: ServerResponse, status: number, body: unknown): void {
+  sendJson(res, status, body)
+}
+
+/**
+ * POST /dsh-locator/v1/find.
+ *
+ * The body is the locator_find argument object with three HTTP identity rules:
+ * scope is roots/all only (default roots: there is no caller workspace), kinds
+ * never contains session (default file/dir/symbol), and the legacy top-level
+ * pathPrefix is folded into where.pathPrefix. Everything else is validated and
+ * executed by the find tool itself.
+ * @param tool - the locator_find tool instance.
+ * @param raw - the request body.
+ */
+async function v1Find(tool: ToolDefinition, raw: Record<string, unknown>): Promise<unknown> {
+  const started = Date.now()
+  const unknown = unknownArguments(raw, V1_FIND_KEYS)
+  if (unknown.length > 0) {
+    return v1Failure('invalid-argument', 'unknown /v1/find argument(s): ' + unknown.join(', '), HTTP_TOOL, started, { arguments: unknown })
+  }
+  const denied = v1FindDenial(raw)
+  if (denied !== undefined) return v1Failure(denied.code, denied.message, HTTP_TOOL, started)
+  return await executeAgentTool(tool, v1FindArgs(raw), started)
+}
+
+/** HTTP-identity rules of /v1/find, checked before the tool runs. */
+function v1FindDenial(raw: Record<string, unknown>): { code: AgentErrorCode; message: string } | undefined {
+  if (raw.scope !== undefined && raw.scope !== 'roots' && raw.scope !== 'all') {
+    if (raw.scope === 'workspace') {
+      return {
+        code: 'invalid-argument',
+        message: 'HTTP has no caller workspace; pass scope "roots" (default) or "all"',
+      }
+    }
+    return { code: 'invalid-argument', message: 'scope must be "roots" or "all" over HTTP' }
+  }
+  if (Array.isArray(raw.kinds) && raw.kinds.includes('session')) {
+    return {
+      code: 'invalid-argument',
+      message: 'session rows are not available over HTTP: the endpoint has no caller session identity',
+    }
+  }
+  if (raw.pathPrefix !== undefined) {
+    if (typeof raw.pathPrefix !== 'string' || raw.pathPrefix.trim() === '') {
+      return { code: 'invalid-argument', message: 'pathPrefix must be a non-empty absolute directory path' }
+    }
+    if (raw.where !== undefined) {
+      if (!isRecord(raw.where)) return { code: 'invalid-argument', message: 'where must be an object' }
+      if (raw.where.pathPrefix !== undefined) {
+        return { code: 'invalid-argument', message: 'pathPrefix and where.pathPrefix are mutually exclusive' }
+      }
+    }
+  }
+  return undefined
+}
+
+/** Shape one /v1/find body into locator_find arguments (identity rules applied). */
+function v1FindArgs(raw: Record<string, unknown>): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  for (const key of ['query', 'mode', 'limit', 'offset', 'cursor', 'maxChars', 'detail', 'count', 'includeArchived'] as const) {
+    if (raw[key] !== undefined) args[key] = raw[key]
+  }
+  args.scope = raw.scope === 'all' ? 'all' : 'roots'
+  args.kinds = Array.isArray(raw.kinds) ? raw.kinds : [...V1_FIND_DEFAULT_KINDS]
+  let where = raw.where
+  if (raw.pathPrefix !== undefined) {
+    // The legacy panel/API spelled the path filter as a top-level pathPrefix;
+    // HTTP keeps accepting that spelling and folds it into where.pathPrefix.
+    where = { ...(isRecord(raw.where) ? raw.where : {}), pathPrefix: raw.pathPrefix }
+  }
+  if (where !== undefined) args.where = where
+  return args
+}
+
+/**
+ * POST /dsh-locator/v1/read.
+ *
+ * Only file evidence is readable over HTTP: path must be absolute (there is no
+ * caller workspace to resolve a relative path) and every ref must be a
+ * ref://file URI. Session/spill/attachment/url refs need a caller session, so
+ * they answer scope-denied instead of being resolved without authorization.
+ * @param tool - the locator_read tool instance.
+ * @param raw - the request body.
+ */
+async function v1Read(tool: ToolDefinition, raw: Record<string, unknown>): Promise<unknown> {
+  const started = Date.now()
+  const unknown = unknownArguments(raw, V1_READ_KEYS)
+  if (unknown.length > 0) {
+    return v1Failure('invalid-argument', 'unknown /v1/read argument(s): ' + unknown.join(', '), HTTP_TOOL, started, { arguments: unknown })
+  }
+  const args: Record<string, unknown> = {}
+  for (const key of ['ref', 'refs', 'path', 'line', 'window', 'as', 'maxBytes'] as const) {
+    if (raw[key] !== undefined) args[key] = raw[key]
+  }
+  if (typeof args.path === 'string' && args.path.trim() !== '' && !isAbsolute(args.path.trim())) {
+    return v1Failure('invalid-argument', 'path must be an absolute path over HTTP (there is no caller workspace to resolve a relative path)', tool.name, started)
+  }
+  const refs: string[] = []
+  if (typeof args.ref === 'string') refs.push(args.ref.trim())
+  if (Array.isArray(args.refs)) {
+    for (const entry of args.refs) if (typeof entry === 'string') refs.push(entry.trim())
+  }
+  // Empty refs are not a ref-kind problem: let the tool report its normal
+  // invalid-argument ("provide exactly one of ref, refs[], or path").
+  if (refs.some(ref => ref !== '' && !ref.startsWith('ref://file?'))) {
+    return v1Failure('scope-denied', 'only file refs (ref://file?...) are readable over HTTP; session, spill, attachment and url refs need a caller session', tool.name, started)
+  }
+  return await executeAgentTool(tool, args, started)
+}
+
+/**
+ * POST /dsh-locator/v1/status.
+ *
+ * The body is the locator_status argument object: { detail: "brief" | "full" }.
+ * Admin is a separate tool and is never mounted on this face.
+ * @param tool - the locator_status tool instance.
+ * @param raw - the request body.
+ */
+async function v1Status(tool: ToolDefinition, raw: Record<string, unknown>): Promise<unknown> {
+  const started = Date.now()
+  const unknown = unknownArguments(raw, V1_STATUS_KEYS)
+  if (unknown.length > 0) {
+    return v1Failure('invalid-argument', 'unknown /v1/status argument(s): ' + unknown.join(', '), HTTP_TOOL, started, { arguments: unknown })
+  }
+  if (raw.detail !== undefined && raw.detail !== 'brief' && raw.detail !== 'full') {
+    return v1Failure('invalid-argument', 'detail must be "brief" or "full"', tool.name, started)
+  }
+  return await executeAgentTool(tool, raw.detail === undefined ? {} : { detail: raw.detail }, started)
+}
+
+/**
+ * Execute one /v1 tool call and keep every failure an envelope.
+ *
+ * The tools return their own failure envelopes for domain errors; this wrapper
+ * only covers what they throw (defineTool argument validation, unexpected
+ * internal errors), so a route can never answer a raw stack trace.
+ * @param tool - the tool to execute.
+ * @param args - validated-through-tool arguments.
+ * @param started - call start timestamp.
+ * @returns the tool value (success or failure envelope).
+ */
+async function executeAgentTool(tool: ToolDefinition, args: Record<string, unknown>, started: number): Promise<unknown> {
+  try {
+    return await tool.execute(args, undefined as never)
+  } catch (error) {
+    const violations = toolArgumentViolations(error)
+    if (violations !== undefined) {
+      return v1Failure('invalid-argument', messageOf(error), tool.name, started, { violations })
+    }
+    return v1Failure(isAbortError(error) ? 'cancelled' : 'internal', messageOf(error), tool.name, started)
+  }
+}
+
+/** Violations of a defineTool argument-validation error, when that is what was thrown. */
+function toolArgumentViolations(error: unknown): string[] | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const candidate = error as { name?: unknown; violations?: unknown }
+  if (candidate.name !== 'ToolArgsError' || !Array.isArray(candidate.violations)) return undefined
+  return candidate.violations.filter((violation): violation is string => typeof violation === 'string')
+}
+
+/** Top-level request keys outside the route's contract. */
+function unknownArguments(raw: Record<string, unknown>, allowed: ReadonlySet<string>): string[] {
+  return Object.keys(raw).filter(key => !allowed.has(key)).sort()
+}
+
+/** Plain-object check for request sub-objects. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Mark one legacy route deprecated in both carriers: response headers (for
+ * proxies/clients) and the JSON body (for the panel and scripts).
+ * @param res - the response being written.
+ * @param route - the deprecated route path.
+ * @param replacement - the versioned route that replaces it.
+ */
+function markDeprecated(res: ServerResponse, route: string, replacement: string): void {
+  res.setHeader('deprecation', 'true')
+  res.setHeader('x-dsh-locator-deprecated', 'remove-in-0.24.0')
+  res.setHeader('warning', '299 - "' + route + ' is deprecated and will be removed in 0.24.0; use ' + replacement + ' instead"')
 }

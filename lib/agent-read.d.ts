@@ -10,6 +10,7 @@
  */
 import type { ContentIndex } from './content.ts';
 import type { LocatorRuntime } from './runtime.ts';
+import { type Scope } from './scope.ts';
 /** Hard cap on refs[] per call (the schema cap is advisory on model input). */
 export declare const READ_MAX_REFS = 20;
 /** Hard cap on window (lines added on each side of the target line). */
@@ -24,6 +25,12 @@ declare const READ_MODES: readonly ["meta", "excerpt", "quote"];
 export interface AgentReadOptions {
     /** Override the maximum refs accepted in one call (tests/embedders only). */
     maxRefs?: number;
+    /**
+     * Layered ignore rules. When present, every byte read (file refs, path
+     * targets, spill and attachment objects) is fenced by readableDenial first:
+     * a notReadable path answers scope-denied and its body is never returned.
+     */
+    scope?: Scope;
 }
 /** Build the locator_read tool. */
 export declare function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, options?: AgentReadOptions): import("@deepseek-ai/dsh-tools").ToolDefinition;

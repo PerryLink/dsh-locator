@@ -29,10 +29,11 @@ import {
   type AgentTiming,
 } from './agent-core.ts'
 import type { ContentIndex } from './content.ts'
-import { fileRef, parseRef, type RefFreshness, type RefPermissions, type RefProvenance, type RefStatus } from './refs.ts'
+import { fileRef, parseRef, type ParsedRef, type RefFreshness, type RefPermissions, type RefProvenance, type RefStatus } from './refs.ts'
 import { makeCiteTool, makeResolveTool } from './ref-tools.ts'
 import { resolveWithinRoots } from './reveal.ts'
 import type { LocatorRuntime } from './runtime.ts'
+import { readableDenial, type Scope } from './scope.ts'
 
 /**
  * Build one structured error block with the shared per-code defaults; the
@@ -94,6 +95,12 @@ const PROVENANCE_ORIGINS = ['index', 'tool', 'session', 'web'] as const
 export interface AgentReadOptions {
   /** Override the maximum refs accepted in one call (tests/embedders only). */
   maxRefs?: number
+  /**
+   * Layered ignore rules. When present, every byte read (file refs, path
+   * targets, spill and attachment objects) is fenced by readableDenial first:
+   * a notReadable path answers scope-denied and its body is never returned.
+   */
+  scope?: Scope
 }
 
 /** One read row: evidence metadata plus (for excerpt/quote) verbatim text. */
@@ -212,6 +219,18 @@ const READ_ITEM_SCHEMA = {
   },
 } as const
 
+/** Explicit per-excerpt vs whole-batch limits (0.23.0, additive). */
+const READ_LIMITS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    perExcerptChars: { type: 'integer', required: true, description: 'Effective per-excerpt cap: maxBytes after clamping.' },
+    batchLimitChars: { type: 'integer', required: true, description: 'Sum of the per-excerpt caps for this call (worst case if every excerpt filled its cap). Excerpts are capped independently.' },
+    maxChars: { type: 'integer', required: true, description: 'Batch-level text budget in force. Always 0 today: the batch is never re-trimmed across excerpts; lower maxBytes when the total payload matters.' },
+    maxRefs: { type: 'integer', required: true, description: 'Hard cap on targets per call.' },
+  },
+} as const
+
 const READ_OUTPUT = {
   type: 'object',
   additionalProperties: false,
@@ -222,12 +241,15 @@ const READ_OUTPUT = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        requested: { type: 'integer', required: true },
+        requested: { type: 'integer', required: true, description: 'Targets read after collapsing duplicates.' },
         returned: { type: 'integer', required: true },
         failed: { type: 'integer', required: true },
+        duplicates: { type: 'integer', description: 'Repeated refs collapsed before reading (same ref string).' },
+        linesDropped: { type: 'integer', description: 'Window lines dropped so each excerpt respects perExcerptChars.' },
       },
     },
     budget: AGENT_BUDGET_SCHEMA,
+    limits: READ_LIMITS_SCHEMA,
     error: AGENT_ERROR_INFO_SCHEMA,
   },
 } as const
@@ -261,6 +283,21 @@ interface ReadContext {
   exec: ToolRunContext
   resolveTool: ReturnType<typeof makeResolveTool>
   citeTool: ReturnType<typeof makeCiteTool>
+  /** Layered ignore rules; undefined disables the fence (backwards compatible). */
+  scope?: Scope
+}
+
+/** One unified scope-denied row for a notReadable path (no bytes are read). */
+function notReadableOutcome(target: { kind: 'ref' | 'path'; value: string }, path: string, reason: string): TargetOutcome {
+  return {
+    ok: false,
+    targetKind: target.kind,
+    target: target.value,
+    error: errorInfo(AGENT_ERROR_CODES.scopeDenied, 'path matches a configured notReadable glob: ' + path, {
+      remediation: 'This path is readable-blocked by the operator (notReadable). Pick a readable file, or ask the operator to relax the rule; locator_status(full) reports the effective rules.',
+      details: { path, reason },
+    }),
+  }
 }
 
 /** Read one target and return its row or a structured error. */
@@ -303,7 +340,7 @@ async function readRef(rawRef: string, mode: ReadMode, lineArg: number | undefin
       targetKind: 'ref',
       target: ref,
       error: errorInfo(AGENT_ERROR_CODES.invalidArgument, 'a session-level ref has no single message body to excerpt', {
-        remediation: 'Read the ref://session-event?sid=...&seq=N value that locator_find returns as eventRef, or pass as: "meta".',
+        remediation: 'Use the eventRef (ref://session-event?sid=...&seq=N) that locator_find returns for session hits (pass detail:"full" if the compact row omitted it), or pass as: "meta" for session metadata.',
       }),
     }
   }
@@ -313,7 +350,7 @@ async function readRef(rawRef: string, mode: ReadMode, lineArg: number | undefin
   }
   if (resolved.ok !== true) return { ok: false, targetKind: 'ref', target: ref, error: resolveFailure(resolved) }
   const base = itemFromResolved(resolved, { ref })
-  if (mode === 'meta') return { ok: true, item: base, dropped: 0 }
+  if (mode === 'meta') return { ok: true, item: { ...base, ...metaFieldsOf(parsed, resolved, lineArg) }, dropped: 0 }
   if (parsed.kind === 'session-event') {
     const citation = await citeView(ctx, [ref], 'exact', maxBytes)
     const exact = citation?.citations?.[0]?.exact
@@ -375,6 +412,10 @@ async function readPath(rawPath: string, mode: ReadMode, lineArg: number | undef
       }),
     }
   }
+  // Security fence (0.23.0 P0-1): deny before stat/existence checks, so a
+  // notReadable path answers scope-denied even when it exists.
+  const denial = ctx.scope === undefined ? undefined : readableDenial(ctx.scope, authorized.path)
+  if (denial !== undefined) return notReadableOutcome({ kind: 'path', value: input }, authorized.path, denial)
   if (!authorized.exists) {
     return { ok: false, targetKind: 'path', target: input, error: errorInfo(AGENT_ERROR_CODES.notFound, 'file does not exist: ' + authorized.path) }
   }
@@ -383,7 +424,14 @@ async function readPath(rawPath: string, mode: ReadMode, lineArg: number | undef
   try {
     const info = statSync(authorized.path)
     if (!info.isFile()) {
-      return { ok: false, targetKind: 'path', target: input, error: errorInfo(AGENT_ERROR_CODES.invalidArgument, 'path is not a regular file: ' + authorized.path) }
+      return {
+        ok: false,
+        targetKind: 'path',
+        target: input,
+        error: errorInfo(AGENT_ERROR_CODES.invalidArgument, 'locator_read reads files, not directories: ' + authorized.path, {
+          remediation: 'To list or match directories use locator_find with kinds:["dir"]; pass a file path to read its lines.',
+        }),
+      }
     }
     mtime = info.mtimeMs
     size = info.size
@@ -404,6 +452,12 @@ async function readFileContent(
   maxBytes: number,
   ctx: ReadContext,
 ): Promise<TargetOutcome> {
+  // Security fence (defense in depth): the resolve tool already refuses a
+  // notReadable path, but never open a byte of one even if an embedder wired
+  // an unscoped resolve tool. Deny before the missing check so existence is
+  // not leaked either.
+  const denial = ctx.scope === undefined ? undefined : readableDenial(ctx.scope, target.path)
+  if (denial !== undefined) return notReadableOutcome({ kind: 'ref', value: target.ref }, target.path, denial)
   if (resolved.status === 'missing') {
     return { ok: false, targetKind: 'ref', target: target.ref, error: errorInfo(AGENT_ERROR_CODES.notFound, 'evidence file is missing: ' + target.path, { remediation: 'The file moved or was deleted after indexing; search again with locator_find.' }) }
   }
@@ -481,6 +535,27 @@ function itemFromResolved(resolved: ResolvedView, extra: ReadItem): ReadItem {
   }
 }
 
+/**
+ * Top-level identity fields for meta rows (0.23.0): the old meta row only had
+ * them nested in provenance/anchor, which made "read the metadata, then decide"
+ * loops expensive. file → path+line, session/session-event → sessionId (+seq).
+ */
+function metaFieldsOf(parsed: ParsedRef, resolved: ResolvedView, lineArg: number | undefined): ReadItem {
+  const fields: ReadItem = {}
+  if (parsed.kind === 'file') {
+    const path = resolved.provenance?.path
+    if (typeof path === 'string' && path !== '') fields.path = path
+    const line = lineArg ?? parsed.line ?? resolved.anchor?.line
+    if (line !== undefined) fields.line = line
+    return fields
+  }
+  if (parsed.kind === 'session' || parsed.kind === 'session-event') {
+    fields.sessionId = parsed.sessionId
+    if (parsed.kind === 'session-event') fields.seq = parsed.seq
+  }
+  return fields
+}
+
 const RESOLVE_FAILURES: Readonly<Record<string, AgentErrorInfo>> = {
   'content-path-denied': errorInfo(AGENT_ERROR_CODES.scopeDenied, 'path is outside every indexed root', {
     remediation: 'Read a path under one of the configured index roots (locator_status reports them).',
@@ -499,6 +574,13 @@ const RESOLVE_FAILURES: Readonly<Record<string, AgentErrorInfo>> = {
 
 /** Map a locator_resolve failure onto the closed agent error set. */
 function resolveFailure(resolved: ResolvedView): AgentErrorInfo {
+  // A notReadable fence is reported as content-scope-denied + path-not-readable
+  // by locator_resolve (same convention as locator_outline/locator_symbol).
+  if (resolved.warnings?.includes('path-not-readable') === true) {
+    return errorInfo(AGENT_ERROR_CODES.scopeDenied, 'path matches a configured notReadable glob', {
+      remediation: 'The operator marked this path unreadable (notReadable). Pick a readable file, or ask them to relax the rule; locator_status detail:"full" shows the effective rules.',
+    })
+  }
   const known = resolved.error === undefined ? undefined : RESOLVE_FAILURES[resolved.error]
   if (known !== undefined) return known
   return errorInfo(AGENT_ERROR_CODES.internal, resolved.error === undefined ? 'locator_resolve failed without a message' : 'locator_resolve failed: ' + resolved.error)
@@ -629,15 +711,31 @@ function readLineWindow(path: string, center: number, window: number, maxBytes: 
   }
 }
 
-/** Aggregate the shared budget block from the rows and dropped-line count. */
-function readBudget(items: readonly ReadItem[], dropped: number, maxBytes: number, requested: number): AgentBudget {
+/**
+ * Per-call budget block. limitChars is the batch ceiling (perExcerptChars ×
+ * targets) and usedChars counts the verbatim excerpt characters actually
+ * returned; read never drops rows (dropped stays 0), while window lines
+ * trimmed inside an excerpt are reported as counts.linesDropped plus the row's
+ * truncated flag/warnings.
+ */
+function readBudget(items: readonly ReadItem[], maxBytes: number, requested: number): AgentBudget {
   let usedChars = 0
-  for (const item of items) usedChars += (item.excerpt?.length ?? 0) + (item.markdown?.length ?? 0)
+  for (const item of items) usedChars += item.excerpt?.length ?? 0
   return {
     limitChars: maxBytes * Math.max(1, requested),
     usedChars,
-    truncated: dropped > 0 || items.some(item => item.truncated === true),
-    dropped,
+    truncated: items.some(item => item.truncated === true),
+    dropped: 0,
+  }
+}
+
+/** Explicit per-excerpt vs whole-batch limits so the budget block is unambiguous. */
+function readLimits(maxBytes: number, requested: number, maxRefs: number): { perExcerptChars: number; batchLimitChars: number; maxChars: number; maxRefs: number } {
+  return {
+    perExcerptChars: maxBytes,
+    batchLimitChars: maxBytes * Math.max(1, requested),
+    maxChars: 0,
+    maxRefs,
   }
 }
 
@@ -657,14 +755,17 @@ function formatSize(bytes: number): string {
 /** Build the locator_read tool. */
 export function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, options: AgentReadOptions = {}) {
   const maxRefs = Math.max(1, Math.min(READ_MAX_REFS, Math.trunc(options.maxRefs ?? READ_MAX_REFS)))
-  const resolveTool = makeResolveTool(rt, content)
-  const citeTool = makeCiteTool({ ...(content === undefined ? {} : { content }), roots: rt.roots })
+  const scope = options.scope
+  // The nested resolve/cite tools receive the same scope: their denial is the
+  // authoritative authorization check, and read's own fences are defense in depth.
+  const resolveTool = makeResolveTool(rt, content, scope === undefined ? {} : { scope })
+  const citeTool = makeCiteTool({ ...(content === undefined ? {} : { content }), roots: rt.roots, ...(scope === undefined ? {} : { scope }) })
   return defineTool({
     name: TOOL,
     description: [
       'Read a file/session ref from locator_find, a batch of refs, or a file path (dsh-locator).',
       '',
-      'Pass exactly one of ref, refs[] (1-20), or path (inside configured roots). as: meta = evidence only; excerpt (default) = verbatim whole lines around line; quote = markdown blockquote + citation link + fallback. window (0-20) adds context; maxBytes caps each excerpt (default 2000, max 65536).',
+      'Pass exactly one of ref, refs[] (1-20, duplicates collapsed), or path (inside configured roots). as: meta = evidence; excerpt (default) = verbatim whole lines around line; quote = blockquote + citation + fallback. window 0-20 adds context; maxBytes caps each excerpt independently (default 2000, max 65536) — the batch is never re-trimmed, see limits.',
       '',
       'Use it instead of shell cat/head when the answer needs exact cited lines; every item keeps ref/status/freshness.',
     ].join('\n'),
@@ -674,13 +775,20 @@ export function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, op
       path: { type: 'string', description: 'File path inside the configured roots.' },
       line: { type: 'integer', description: '1-based target line (default: the ref anchor, else 1).' },
       window: { type: 'integer', description: 'Context lines per side, 0-20 (default 0).' },
-      as: { type: 'string', enum: READ_MODES, description: 'meta (evidence only), excerpt (default, verbatim lines), or quote (markdown blockquote + citation link + fallback).' },
-      maxBytes: { type: 'integer', description: 'Per-excerpt cap in characters (default 2000, max 65536).' },
+      as: { type: 'string', enum: READ_MODES, description: 'meta (evidence only), excerpt (default, verbatim lines), or quote (blockquote + citation + fallback).' },
+      maxBytes: { type: 'integer', description: 'Per-excerpt cap in characters (default 2000, max 65536); excerpts are capped independently.' },
     },
     output: {
       schema: READ_OUTPUT,
       render: (args, value) => {
-        const v = value as { ok: boolean; items?: ReadItem[]; counts?: { requested: number; returned: number; failed: number }; budget?: AgentBudget; error?: AgentErrorInfo }
+        const v = value as {
+          ok: boolean
+          items?: ReadItem[]
+          counts?: { requested: number; returned: number; failed: number; duplicates?: number; linesDropped?: number }
+          budget?: AgentBudget
+          limits?: { perExcerptChars?: number; batchLimitChars?: number; maxChars?: number; maxRefs?: number }
+          error?: AgentErrorInfo
+        }
         if (v.ok !== true) {
           const err = v.error
           const detail = err === undefined ? '' : ' — ' + (err.remediation ?? '')
@@ -714,7 +822,9 @@ export function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, op
           if (item.warnings !== undefined && item.warnings.length > 0) blocks.push('   warnings: ' + item.warnings.join(', '))
         }
         if (v.budget !== undefined) {
-          blocks.push('(budget: ' + String(v.budget.usedChars) + '/' + String(v.budget.limitChars) + ' chars' + (v.budget.dropped === 0 ? '' : ', ' + String(v.budget.dropped) + ' line(s) dropped') + ')')
+          const perExcerpt = v.limits?.perExcerptChars ?? 0
+          const lineDrops = v.counts?.linesDropped ?? 0
+          blocks.push('(budget: used ' + String(v.budget.usedChars) + '/' + String(v.budget.limitChars) + ' chars · per-excerpt cap ' + String(perExcerpt) + ' chars' + (lineDrops === 0 ? '' : ', ' + String(lineDrops) + ' line(s) dropped') + ' · no batch re-trimming)')
         }
         return [{ type: 'text', text: blocks.join('\n') }]
       },
@@ -726,7 +836,11 @@ export function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, op
       const mode: ReadMode = args.as === 'meta' || args.as === 'quote' ? args.as : 'excerpt'
       const refArg = typeof args.ref === 'string' ? args.ref.trim() : ''
       const pathArg = typeof args.path === 'string' ? args.path.trim() : ''
-      const refsArg = Array.isArray(args.refs) ? args.refs.map(ref => ref.trim()).filter(ref => ref !== '') : undefined
+      const refsInput = Array.isArray(args.refs) ? args.refs.map(ref => ref.trim()).filter(ref => ref !== '') : undefined
+      // 0.23.0: collapse repeated refs before reading them (same string, first
+      // occurrence keeps its position); counts.duplicates reports how many.
+      const refsArg = refsInput === undefined ? undefined : [...new Set(refsInput)]
+      const duplicates = refsInput === undefined || refsArg === undefined ? 0 : refsInput.length - refsArg.length
       const provided = (refArg === '' ? 0 : 1) + (refsArg === undefined ? 0 : 1) + (pathArg === '' ? 0 : 1)
       if (provided !== 1) {
         return fail(AGENT_ERROR_CODES.invalidArgument, 'provide exactly one of ref, refs[], or path', {
@@ -767,6 +881,7 @@ export function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, op
         exec,
         resolveTool,
         citeTool,
+        ...(scope === undefined ? {} : { scope }),
       }
       const outcomes: TargetOutcome[] = []
       for (const target of targets) outcomes.push(await readTarget(target, mode, args.line, targetWindow, maxBytes, ctx))
@@ -795,8 +910,15 @@ export function makeAgentReadTool(rt: LocatorRuntime, content?: ContentIndex, op
       const dropped = outcomes.reduce((total, outcome) => total + (outcome.ok ? outcome.dropped : 0), 0)
       return succeed(TOOL, {
         items,
-        counts: { requested: outcomes.length, returned: outcomes.length - failed.length, failed: failed.length },
-        budget: readBudget(items, dropped, maxBytes, outcomes.length),
+        counts: {
+          requested: outcomes.length,
+          returned: outcomes.length - failed.length,
+          failed: failed.length,
+          duplicates,
+          linesDropped: dropped,
+        },
+        budget: readBudget(items, maxBytes, outcomes.length),
+        limits: readLimits(maxBytes, outcomes.length, maxRefs),
       }, timing)
     },
   })

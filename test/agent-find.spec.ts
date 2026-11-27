@@ -102,6 +102,7 @@ interface FindItem {
   line?: number
   snippet?: string
   why?: string[]
+  sources?: string[]
   ref?: string
   sessionId?: string
   messageId?: string
@@ -171,7 +172,7 @@ describe('locator_find auto mode', () => {
       symbols: [],
       hits: [{ kind: 'file', path: join(root, 'notes.md'), title: 'notes.md', snippet: 'hello world', line: 2, score: 1 }],
     })
-    const tool = makeAgentFindTool(fakeRuntime([nameHit(join(root, 'other.md'))], [root]), content)
+    const tool = makeAgentFindTool(fakeRuntime([], [root]), content)
     const result = await run(tool, { query: 'hello world' }, root)
     expect(result.resolvedMode).toBe('body')
     expect(result.items?.[0]).toMatchObject({ kind: 'file', path: join(root, 'notes.md'), snippet: 'hello world', why: ['body:terms'] })
@@ -186,7 +187,7 @@ describe('locator_find auto mode', () => {
     const result = await run(tool, { query: 'deep search' }, root)
     expect(result.resolvedMode).toBe('name')
     expect(result.items?.[0]?.path).toBe(join(root, 'deep.md'))
-    expect(noteCodes(result)).toContain('auto-body-empty')
+    expect(result.items?.[0]?.sources).toEqual(['name'])
   })
 
   it('uses name mode when no content index is configured', async () => {

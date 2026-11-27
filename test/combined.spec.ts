@@ -158,21 +158,22 @@ describe('combined search', () => {
     expect(twoOn.content?.shortQueryFallback).toBe(true)
     expect(ensured).toBe(1)
     expect(searched).toBe(1)
-    // A longer query containing a short term follows the same fallback policy:
-    // rejected while the fallback is off, admitted by the store when it is on.
+    // 0.23 P0-7: a mixed long/short query is no longer gated by the fallback
+    // policy — the long terms drive the matcher and the short ones are
+    // post-filtered — so the store runs either way instead of being pre-rejected.
     const mixedOff = await run('sql ab', { shortQueryFallback: false })
-    expect(mixedOff.content?.error).toBe('content-query-too-short')
-    expect(ensured).toBe(1)
-    expect(searched).toBe(1)
-    const mixedOn = await run('sql ab')
-    expect(mixedOn.content?.error).toBeUndefined()
+    expect(mixedOff.content?.error).toBeUndefined()
     expect(ensured).toBe(2)
     expect(searched).toBe(2)
+    const mixedOn = await run('sql ab')
+    expect(mixedOn.content?.error).toBeUndefined()
+    expect(ensured).toBe(3)
+    expect(searched).toBe(3)
     // A control character is never admitted, fallback or not.
     const nul = await run('alpha\u0000beta')
     expect(nul.content?.error).toBe('invalid-control-char')
-    expect(ensured).toBe(2)
-    expect(searched).toBe(2)
+    expect(ensured).toBe(3)
+    expect(searched).toBe(3)
   })
 
   it('passes content timeout, scan-capped and bounded-count results through', async () => {

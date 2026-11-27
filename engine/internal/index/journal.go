@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/PerryLink/dsh-locator/engine/internal/statefs"
 )
 
 // JournalName is the file the daemon keeps next to index.snapshot. It holds the
@@ -280,11 +282,11 @@ func (ix *Index) WriteJournalTo(path string, baseID, afterSeq uint64) (int, int,
 		buf = append(buf, frame[:]...)
 		buf = append(buf, payload[:n]...)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := statefs.MkdirAll(filepath.Dir(path)); err != nil {
 		return 0, 0, err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o644); err != nil {
+	if err := statefs.WriteFile(tmp, buf); err != nil {
 		_ = os.Remove(tmp)
 		return 0, 0, err
 	}

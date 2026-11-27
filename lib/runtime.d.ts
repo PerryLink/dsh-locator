@@ -4,6 +4,7 @@
  * @module dsh-locator/runtime
  */
 import type { Config } from './config.ts';
+import { type StateDirPermissions } from './paths.ts';
 /** One search hit. */
 export interface SearchHit {
     path: string;
@@ -153,6 +154,24 @@ export interface EngineStatus {
     saveCount?: number;
     /** Pending work queue depth (refresh/scan), when the engine reports it. */
     queueDepth?: number;
+    /**
+     * Another live engine owns the state directory (0.23 state-dir write lock):
+     * this engine serves the snapshot read-only and does not write.
+     */
+    readOnly?: boolean;
+    /** PID of the engine that owns the state-directory write lock. */
+    lockPid?: number;
+}
+/** One prepared engine binary: the path to spawn plus what had to be done. */
+export interface PreparedEngineBinary {
+    /** The executable to spawn. */
+    path: string;
+    /** True when the executable was copied out of the package (Windows only). */
+    copied: boolean;
+    /** Copy directories removed while pruning old package versions. */
+    cleaned: string[];
+    /** A non-fatal problem; the package binary is then used unchanged. */
+    warning?: string;
 }
 /** Runtime status exposed to the status tool. */
 export interface RuntimeStatus {
@@ -165,6 +184,8 @@ export interface RuntimeStatus {
         current?: string;
     };
     engine?: EngineStatus;
+    /** Result of the startup state-directory permission pass (P0-2 follow-up). */
+    permissions?: StateDirPermissions;
 }
 /** Smallest automatic engine heap limit, in MiB. */
 export declare const AUTO_MEMORY_MIN_MB = 384;
@@ -198,6 +219,27 @@ export declare function autoMemoryLimitMB(totalBytes?: number): number;
  * @returns the engine argv.
  */
 export declare function engineServeArgs(config: Pick<Config, 'excludes' | 'watch' | 'refreshIntervalMs' | 'refreshIncremental' | 'scanWorkers' | 'memoryLimitMB' | 'windowsUsn' | 'includeCaches' | 'watchMaxDirs' | 'snapshotCompression' | 'unwatchedRefreshIntervalMs'>, roots: readonly string[], stateDir: string): string[];
+/**
+ * Copy the package engine binary below the state directory on Windows.
+ *
+ * Windows locks a running executable against replacement, so upgrading the
+ * plugin in place fails with a sharing violation while the old engine is still
+ * running from `bin/win32-<arch>/indexd.exe`. Spawning from
+ * `<stateDir>/engine/<packageVersion>/indexd.exe` instead decouples the
+ * running engine from the package directory: npm can replace the package, the
+ * old engine keeps its private copy, and the next start uses the new version.
+ *
+ * Copies for other package versions are pruned afterwards (best effort: an old
+ * engine may still hold its executable, which Windows refuses to delete and the
+ * next boot retries). On every other platform the package binary is executed
+ * directly and this function is a no-op.
+ * @param binary - the package engine binary.
+ * @param stateDir - the resolved state directory.
+ * @param version - the package version the copy is keyed by.
+ * @param platform - the platform to prepare for (defaults to this one).
+ * @returns the executable path and what was copied/cleaned.
+ */
+export declare function prepareEngineBinary(binary: string, stateDir: string, version: string, platform?: NodeJS.Platform): PreparedEngineBinary;
 /**
  * Owns the engine process. Tools await {@link LocatorRuntime.waitReady} before
  * issuing requests; a missing binary or a crashed engine surfaces as a tool

@@ -30,8 +30,12 @@ export const COMPACT_SNIPPET_CHARS = 160
 export const STANDARD_SNIPPET_CHARS = 240
 /** Full snippets are cut at this many code points. */
 export const FULL_SNIPPET_CHARS = 320
-/** Cursor payload version; a decoded cursor from another version is rejected. */
+/** Cursor payload version of the single-source contract (0.22; still accepted). */
 export const CURSOR_VERSION = 1 as const
+/** Cursor payload version of the cross-source auto contract (0.23). */
+export const CURSOR_VERSION_V2 = 2 as const
+/** Most file-identity hashes one v2 cursor remembers (bounded cursor size). */
+export const CURSOR_SEEN_MAX = 96
 
 /** Tool names that speak the agent envelope. */
 export type AgentToolName = 'locator_find' | 'locator_read' | 'locator_status' | 'locator_admin'
@@ -212,6 +216,9 @@ export interface AgentProvenance {
 /** Kinds of rows the agent find/read tools can return. */
 export type AgentItemKind = 'file' | 'dir' | 'session' | 'symbol'
 
+/** Search source of one auto-mode row: the indexes it was merged from. */
+export type AgentItemSource = 'name' | 'body' | 'symbol'
+
 /**
  * One result row, in the superset shape. Tools build the superset and project
  * it with {@link trimItem} so detail presets never leak extra fields.
@@ -231,6 +238,8 @@ export interface AgentItem {
   snippet?: string
   /** Why this row matched, e.g. "symbol:exact", "body:terms", "name:prefix". */
   why?: string[]
+  /** Index sources that produced this row (auto mode; merged rows list every source). */
+  sources?: AgentItemSource[]
   /** Relevance score (content rank; lower is better for FTS5 bm25). */
   score?: number
   /** Citable evidence ref (ref://file or dsh-session:...). */
@@ -249,9 +258,9 @@ export interface AgentItem {
   sessionId?: string
   /** Message id for session rows (full detail only). */
   messageId?: string
-  /** Indexed event sequence for session rows (full detail only). */
+  /** Indexed event sequence for session rows (compact/standard/full). */
   seq?: number
-  /** Full event ref for session rows (full detail only). */
+  /** Full ref://session-event reference for session rows (compact/standard/full). */
   eventRef?: string
   /** File size in bytes (full detail only). */
   size?: number
@@ -424,12 +433,12 @@ export function errorMessage(error: unknown): string {
   return String(error)
 }
 
-/** Fields a compact item keeps. */
-const COMPACT_ITEM_FIELDS = ['kind', 'path', 'title', 'line', 'snippet', 'why', 'score', 'ref'] as const
+/** Fields a compact item keeps (session rows keep seq/eventRef so find -> read works). */
+const COMPACT_ITEM_FIELDS = ['kind', 'path', 'title', 'line', 'snippet', 'why', 'sources', 'score', 'ref', 'seq', 'eventRef'] as const
 /** Fields a standard item keeps (compact + evidence freshness). */
-const STANDARD_ITEM_FIELDS = ['kind', 'path', 'title', 'line', 'snippet', 'why', 'score', 'ref', 'refStatus', 'freshness', 'language', 'symbolScope'] as const
+const STANDARD_ITEM_FIELDS = ['kind', 'path', 'title', 'line', 'snippet', 'why', 'sources', 'score', 'ref', 'refStatus', 'freshness', 'language', 'symbolScope', 'seq', 'eventRef'] as const
 /** Fields a full item keeps (standard + identity/evidence details). */
-const FULL_ITEM_FIELDS = ['kind', 'path', 'title', 'line', 'snippet', 'why', 'score', 'ref', 'refStatus', 'freshness', 'language', 'symbolScope', 'name', 'size', 'mtime', 'modified', 'ext', 'dir', 'format', 'hash', 'permissions', 'provenance', 'sessionId', 'messageId', 'seq', 'eventRef', 'context', 'contextStart'] as const
+const FULL_ITEM_FIELDS = ['kind', 'path', 'title', 'line', 'snippet', 'why', 'sources', 'score', 'ref', 'refStatus', 'freshness', 'language', 'symbolScope', 'name', 'size', 'mtime', 'modified', 'ext', 'dir', 'format', 'hash', 'permissions', 'provenance', 'sessionId', 'messageId', 'seq', 'eventRef', 'context', 'contextStart'] as const
 
 /** Cut a snippet to the detail preset cap (code-point safe, appends an ellipsis). */
 export function trimSnippet(text: string, detail: AgentDetail = 'compact'): string {
@@ -516,9 +525,9 @@ export function applyItemBudget(items: readonly AgentItem[], maxChars: number): 
   }
 }
 
-/** Opaque continuation cursor of locator_find (base64url JSON). */
+/** Opaque continuation cursor of a single-source locator_find page (v1). */
 export interface AgentCursorPayload {
-  /** Payload version; only CURSOR_VERSION is decoded. */
+  /** Payload version; only CURSOR_VERSION is decoded for this shape. */
   v: 1
   /** Effective search mode this page belongs to. */
   mode: AgentFindMode
@@ -532,6 +541,53 @@ export interface AgentCursorPayload {
   generation?: number
 }
 
+/**
+ * Per-source continuation positions of a cross-source auto page (v2).
+ *
+ * Each value is the raw position one past the last row already consumed from
+ * that source stream; the next page resumes there, so a source row is never
+ * fetched twice. A source absent from the object is consumed from position 0
+ * (and is not part of the page's source set).
+ */
+export interface AgentCursorOffsetsV2 {
+  /** Raw name-index rows consumed by earlier pages. */
+  name?: number
+  /** Raw content-search rows consumed by earlier pages. */
+  body?: number
+  /** Visible symbol rows consumed by earlier pages. */
+  symbol?: number
+}
+
+/** Opaque continuation cursor of a cross-source auto page (v2). */
+export interface AgentCursorV2Payload {
+  /** Payload version; only CURSOR_VERSION_V2 is decoded for this shape. */
+  v: 2
+  /** Mode the page belongs to; "auto" for a cross-source page. */
+  mode: AgentFindMode
+  /** Hash binding the cursor to the query, mode, scope, kinds and where filters. */
+  queryHash: string
+  /** Per-source continuation positions (raw rows consumed by earlier pages). */
+  offsets: AgentCursorOffsetsV2
+  /** Effective scope of the paginated search (set after a workspace fallback). */
+  scope?: AgentScopeMode
+  /** Index generation observed when the cursor was issued (informational). */
+  generation?: number
+  /** Row kinds selected on the first page (auto page binding). */
+  kinds?: AgentItemKind[]
+  /** Whether archived sessions were searched on the first page. */
+  includeArchived?: boolean
+  /**
+   * Bounded hashes of file identities already returned on earlier pages.
+   * A later page can meet the same path again from another source (body vs
+   * name); the hash keeps the page union duplicate-free without carrying the
+   * whole path list. Oldest hashes are dropped past {@link CURSOR_SEEN_MAX}.
+   */
+  seen?: string[]
+}
+
+/** One decoded continuation cursor, from either contract version. */
+export type AgentCursor = AgentCursorPayload | AgentCursorV2Payload
+
 /** Deterministic short hash used to bind a cursor to one query request. */
 export function queryHashOf(parts: unknown): string {
   let text: string
@@ -543,7 +599,7 @@ export function queryHashOf(parts: unknown): string {
   return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16)
 }
 
-/** Encode one cursor payload as an opaque base64url token. */
+/** Encode one single-source (v1) cursor payload as an opaque base64url token. */
 export function encodeCursor(payload: AgentCursorPayload): string {
   const body = {
     v: CURSOR_VERSION,
@@ -556,8 +612,41 @@ export function encodeCursor(payload: AgentCursorPayload): string {
   return Buffer.from(JSON.stringify(body), 'utf8').toString('base64url')
 }
 
-/** Decode one opaque cursor, returning undefined for anything malformed. */
-export function decodeCursor(cursor: unknown): AgentCursorPayload | undefined {
+/**
+ * Encode one cross-source (v2) cursor payload as an opaque base64url token.
+ *
+ * Mirrors the parity surface implemented by scripts/locator-cli.mjs
+ * (AGENT_CURSOR_VERSION = 2): v, mode, queryHash, offsets, scope, generation,
+ * kinds and includeArchived, with the boolean omitted when false.
+ * @param payload - v2 payload built from the page's per-source positions.
+ * @returns the opaque token.
+ */
+export function encodeCursorV2(payload: AgentCursorV2Payload): string {
+  const offsets: AgentCursorOffsetsV2 = {}
+  if (typeof payload.offsets.name === 'number') offsets.name = Math.max(0, Math.trunc(payload.offsets.name))
+  if (typeof payload.offsets.body === 'number') offsets.body = Math.max(0, Math.trunc(payload.offsets.body))
+  if (typeof payload.offsets.symbol === 'number') offsets.symbol = Math.max(0, Math.trunc(payload.offsets.symbol))
+  const body = {
+    v: CURSOR_VERSION_V2,
+    mode: payload.mode,
+    queryHash: payload.queryHash,
+    offsets,
+    ...(payload.scope === undefined ? {} : { scope: payload.scope }),
+    ...(payload.generation === undefined ? {} : { generation: payload.generation }),
+    ...(payload.kinds === undefined ? {} : { kinds: [...payload.kinds] }),
+    ...(payload.includeArchived === true ? { includeArchived: true } : {}),
+    ...(payload.seen === undefined || payload.seen.length === 0 ? {} : { seen: [...payload.seen] }),
+  }
+  return Buffer.from(JSON.stringify(body), 'utf8').toString('base64url')
+}
+
+/** Short deterministic hash of one returned file identity (cursor dedupe memory). */
+export function identityTokenHash(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 8)
+}
+
+/** Decode the shared token envelope of one cursor, or undefined when malformed. */
+function decodeCursorRecord(cursor: unknown): Record<string, unknown> | undefined {
   if (typeof cursor !== 'string') return undefined
   const token = cursor.trim()
   if (token === '' || token.length > 2_048) return undefined
@@ -569,8 +658,11 @@ export function decodeCursor(cursor: unknown): AgentCursorPayload | undefined {
     return undefined
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
-  const record = parsed as Record<string, unknown>
-  if (record.v !== CURSOR_VERSION) return undefined
+  return parsed as Record<string, unknown>
+}
+
+/** Decode one v1 payload record, returning undefined for anything malformed. */
+function decodeCursorV1(record: Record<string, unknown>): AgentCursorPayload | undefined {
   if (typeof record.mode !== 'string' || (AGENT_FIND_MODES as readonly string[]).includes(record.mode) === false) return undefined
   if (typeof record.queryHash !== 'string' || record.queryHash === '') return undefined
   if (typeof record.offset !== 'number' || Number.isInteger(record.offset) === false || record.offset < 0) return undefined
@@ -589,8 +681,64 @@ export function decodeCursor(cursor: unknown): AgentCursorPayload | undefined {
   return payload
 }
 
+/** Decode one v2 payload record, returning undefined for anything malformed. */
+function decodeCursorV2(record: Record<string, unknown>): AgentCursorV2Payload | undefined {
+  if (typeof record.mode !== 'string' || (AGENT_FIND_MODES as readonly string[]).includes(record.mode) === false) return undefined
+  if (typeof record.queryHash !== 'string' || record.queryHash === '') return undefined
+  if (typeof record.offsets !== 'object' || record.offsets === null || Array.isArray(record.offsets)) return undefined
+  const offsets: AgentCursorOffsetsV2 = {}
+  for (const [source, value] of Object.entries(record.offsets as Record<string, unknown>)) {
+    if (source !== 'name' && source !== 'body' && source !== 'symbol') return undefined
+    if (typeof value !== 'number' || Number.isInteger(value) === false || value < 0) return undefined
+    offsets[source] = value
+  }
+  const payload: AgentCursorV2Payload = {
+    v: CURSOR_VERSION_V2,
+    mode: record.mode as AgentFindMode,
+    queryHash: record.queryHash,
+    offsets,
+  }
+  if (typeof record.scope === 'string' && (AGENT_SCOPE_MODES as readonly string[]).includes(record.scope)) {
+    payload.scope = record.scope as AgentScopeMode
+  }
+  if (typeof record.generation === 'number' && Number.isInteger(record.generation) && record.generation > 0) {
+    payload.generation = record.generation
+  }
+  if (Array.isArray(record.kinds)) {
+    const kinds: AgentItemKind[] = []
+    for (const entry of record.kinds) {
+      if (typeof entry !== 'string' || (['file', 'dir', 'session', 'symbol'] as readonly string[]).includes(entry) === false) return undefined
+      if (kinds.includes(entry as AgentItemKind) === false) kinds.push(entry as AgentItemKind)
+    }
+    payload.kinds = kinds
+  }
+  if (record.includeArchived !== undefined) {
+    if (typeof record.includeArchived !== 'boolean') return undefined
+    if (record.includeArchived) payload.includeArchived = true
+  }
+  if (record.seen !== undefined) {
+    if (Array.isArray(record.seen) === false || record.seen.length > CURSOR_SEEN_MAX) return undefined
+    const seen: string[] = []
+    for (const entry of record.seen) {
+      if (typeof entry !== 'string' || /^[a-f0-9]{8,16}$/.test(entry) === false) return undefined
+      if (seen.includes(entry) === false) seen.push(entry)
+    }
+    if (seen.length > 0) payload.seen = seen
+  }
+  return payload
+}
+
+/** Decode one opaque cursor (v1 or v2), returning undefined for anything malformed. */
+export function decodeCursor(cursor: unknown): AgentCursor | undefined {
+  const record = decodeCursorRecord(cursor)
+  if (record === undefined) return undefined
+  if (record.v === CURSOR_VERSION) return decodeCursorV1(record)
+  if (record.v === CURSOR_VERSION_V2) return decodeCursorV2(record)
+  return undefined
+}
+
 /** Whether a decoded cursor belongs to the current request (query/mode binding). */
-export function cursorMatches(payload: AgentCursorPayload, expected: { queryHash: string; mode?: AgentFindMode }): boolean {
+export function cursorMatches(payload: AgentCursor, expected: { queryHash: string; mode?: AgentFindMode }): boolean {
   if (payload.queryHash !== expected.queryHash) return false
   if (expected.mode === undefined || expected.mode === 'auto') return true
   return payload.mode === expected.mode
@@ -680,6 +828,7 @@ export const AGENT_ITEM_SCHEMA = {
     line: { type: 'integer', description: '1-based matched/declaration line, when known.' },
     snippet: { type: 'string', description: 'Bounded matched text (compact: at most 160 code points).' },
     why: { type: 'array', items: { type: 'string' }, description: 'Why this row matched, e.g. "symbol:exact" or "body:terms".' },
+    sources: { type: 'array', items: { type: 'string', enum: ['name', 'body', 'symbol'] }, description: 'Index sources that produced this row (auto mode; merged rows list every source).' },
     score: { type: 'number', description: 'Relevance score (content rank; lower is better for FTS5 bm25).' },
     ref: { type: 'string', description: 'Citable evidence ref (ref://file or dsh-session:...).' },
     refStatus: { type: 'string', enum: ['fresh', 'stale', 'missing', 'tombstoned', 'unknown'], description: 'Evidence freshness label (standard/full).' },
@@ -689,8 +838,8 @@ export const AGENT_ITEM_SCHEMA = {
     provenance: AGENT_PROVENANCE_SCHEMA,
     sessionId: { type: 'string', description: 'Session id for session rows (full detail only).' },
     messageId: { type: 'string', description: 'Message id for session rows (full detail only).' },
-    seq: { type: 'integer', description: 'Indexed event sequence for session rows (full detail only).' },
-    eventRef: { type: 'string', description: 'Full event ref for session rows (full detail only).' },
+    seq: { type: 'integer', description: 'Indexed event sequence for session rows (compact/standard/full).' },
+    eventRef: { type: 'string', description: 'Full ref://session-event?sid=...&seq=N reference for session rows (compact/standard/full).' },
     size: { type: 'integer', description: 'File size in bytes (full detail only).' },
     mtime: { type: 'integer', description: 'Modification time in epoch ms (full detail only).' },
     modified: { type: 'string', description: 'ISO-8601 modification time (full detail only).' },

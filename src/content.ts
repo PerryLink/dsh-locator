@@ -16,7 +16,7 @@
  * @module dsh-locator/content
  */
 
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs'
 import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { cpus, homedir, loadavg } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
@@ -207,7 +207,38 @@ const WARNINGS_RESOLVED_BY_REBUILD: ReadonlySet<string> = new Set([
   // rebuilt database is still over budget, so dropping a pre-build occurrence
   // cannot hide a current problem.
   'content-db-over-budget',
+  // An explicit full rebuild is exactly the override the config-drift guard
+  // asks for, so the fresh database resolves the suspicion.
+  'content-config-reset-suspected',
 ])
+
+/** Schema-default body budget a reset profile block falls back to (config.ts). */
+const DEFAULT_CONTENT_MAX_TOTAL_BYTES = 1_600_000_000
+
+/** Small JSON fingerprint of the last effective caps, kept next to content.db. */
+const EFFECTIVE_STATE_FILE = 'content-config.json'
+
+/** Cap on sample paths kept per warning code or as coverage misses (0.23). */
+const MAX_SAMPLE_PATHS = 20
+
+/** Bytes that must stay free for the OS after a full rebuild (preflight, 0.23). */
+const DEFAULT_DISK_RESERVE_BYTES = 256 * 1024 * 1024
+
+/** Headroom over the current database size a full rebuild is estimated to need. */
+const REBUILD_SPACE_FACTOR = 1.25
+
+/** Last-effective caps plus the high-water body mark used by the guard (0.23). */
+interface ContentEffectiveState {
+  version: 1
+  updatedAt: number
+  caps: { maxTotalBytes: number; maxFiles: number; maxFileBytes: number }
+  bodyBytes: number
+  fileDocs: number
+  /** Highest stored body bytes ever recorded for this state directory. */
+  highWaterBodyBytes: number
+  /** A cap-driven rebuild was skipped because the caps look reset. */
+  suspected?: { maxTotalBytes: number; at: number }
+}
 
 /** Concatenated Zstandard frame magic (LE) used by DSH session logs. */
 const ZSTD_MAGIC = 0xfd2fb528
@@ -369,6 +400,12 @@ export interface ContentCoverage {
   evictedDocs: number
   sessions: number
   messages: number
+  /**
+   * Up to 20 paths of indexable candidates the last complete full build/sweep
+   * could not store because of the body/file budget (0.23). A bounded sample,
+   * never the whole miss list: status output must stay small.
+   */
+  missSamples?: string[]
 }
 
 /**
@@ -426,6 +463,23 @@ export interface ContentDiagnostics {
    * event happened after the database was rebuilt.
    */
   warningCounts?: Record<string, number>
+  /** Archived session ids known to the workspace registry (indexed but hidden by default). */
+  archivedSessions: number
+  /** Rows in the additive `symbols` table (0 when symbol indexing is off). */
+  symbols: number
+  /**
+   * Bounded sample paths per warning code (0.23): at most 20 per code, and
+   * only paths the indexable scope accepts. Present only for warnings this
+   * process observed with a path, so status stays a small object.
+   */
+  warningSamples?: Record<string, string[]>
+  /**
+   * The last incremental refresh skipped a destructive cap-driven rebuild
+   * because the effective body cap shrank below the stored bodies and looks
+   * like a reset profile block (0.23 config-drift guard). Run an explicit
+   * content reindex (full) to force the rebuild.
+   */
+  configResetSuspected?: boolean
 }
 
 export interface ContentOptions {
@@ -547,6 +601,26 @@ export interface ContentOptions {
    * done instead of extending the build (default false = inline, chunked).
    */
   optimizeInIdle?: boolean
+  /**
+   * Platform default body caps a missing configuration block resolves to
+   * (0.23 config-drift guard). The plugin/profile schema defaults are 1.6 GB
+   * and 200k files; tests (and embedders with a different platform default)
+   * pass small numbers so a cap shrink can be recognised as "back to default"
+   * without materialising gigabytes.
+   */
+  configDriftDefaults?: { maxTotalBytes?: number; maxFiles?: number }
+  /**
+   * Test/embedder seam: bytes free on the volume holding `stateDir`. Default
+   * reads statfs(2); returning undefined means "unknown, skip the preflight".
+   */
+  diskFreeBytes?: (path: string) => number | undefined
+  /** Bytes that must remain free after a full rebuild (default 256 MiB). */
+  diskReserveBytes?: number
+  /**
+   * Test seam: override the bytes a full rebuild is estimated to need. The
+   * production estimate is the current database size plus headroom.
+   */
+  rebuildRequiredBytes?: number
 }
 
 /** One symbol search hit from the additive `symbols` table. */
@@ -733,6 +807,16 @@ export class ContentIndex {
   private candidateFiles: number | null = null
   /** Documents evicted from the body budget since this instance opened. */
   private evictedDocs = 0
+  /** Bounded sample of indexable candidates the last full pass could not store. */
+  private coverageMissSamples: string[] = []
+  /** Archived session ids known to the workspace registry (diagnostics count). */
+  private knownArchivedSessions = 0
+  /** Rows in the additive symbols table; loaded/persisted so diagnostics stays O(1). */
+  private symbolCount = 0
+  /** Bounded sample paths per warning code (0.23 diagnostics; at most 20 each). */
+  private readonly warningSamples = new Map<string, string[]>()
+  /** The last caps check was skipped by the config-drift guard (0.23). */
+  private configResetSuspectedFlag = false
   private dbBytes = 0
   private walBytes = 0
   /** Live database bytes and free-list bytes, cached by measureDatabase(). */
@@ -827,6 +911,7 @@ export class ContentIndex {
         evictedDocs: this.evictedDocs,
         sessions: this.state.sessions,
         messages: this.state.messages,
+        ...(this.coverageMissSamples.length === 0 ? {} : { missSamples: [...this.coverageMissSamples] }),
       },
       dbBytes: this.dbBytes,
       walBytes: this.walBytes,
@@ -846,7 +931,13 @@ export class ContentIndex {
       engineGeneration: this.engineGeneration,
       symbolsPerFile: this.symbolsPerFile(),
       extractWorker: this.extractWorkerAvailable(),
+      archivedSessions: this.knownArchivedSessions,
+      symbols: this.symbolCount,
       ...(this.warningCounts.size === 0 ? {} : { warningCounts: Object.fromEntries(this.warningCounts) }),
+      ...(this.warningSamples.size === 0
+        ? {}
+        : { warningSamples: Object.fromEntries([...this.warningSamples].map(([warning, samples]) => [warning, [...samples]])) }),
+      ...(this.configResetSuspectedFlag ? { configResetSuspected: true } : {}),
     }
   }
 
@@ -1046,6 +1137,20 @@ export class ContentIndex {
 
   private async full(generation: number): Promise<void> {
     this.lastRefreshMode = 'full'
+    // 0.23 disk-space preflight: a rebuild rewrites the whole content database;
+    // on a nearly full volume that ends with a half-written index and a worse
+    // disk state. Defer instead, surface a readable error, and let the next
+    // refresh (or an explicit admin reindex after freeing space) retry.
+    const space = this.rebuildSpaceProblem()
+    if (space !== null) {
+      this.lastRefreshMode = 'deferred'
+      this.addWarning('content-disk-space-low')
+      this.state.error = 'content rebuild deferred: needs about ' + this.formatMiB(space.requiredBytes)
+        + ' free in ' + this.options.stateDir + ' (' + this.formatMiB(space.freeBytes) + ' available)'
+      this.state.building = false
+      this.progress = null
+      return
+    }
     this.open(true)
     this.totalBytes = 0
     // The freshly recreated database is empty: drop the previous pass's
@@ -1158,8 +1263,20 @@ export class ContentIndex {
       await this.syncSymbols(generation)
       if (generation !== this.generation) return
       // A smaller cap must be enforced against rows written under the previous
-      // larger budget; incremental refresh only adds, it never trims.
-      if (!this.capsSatisfied()) return await this.full(generation)
+      // larger budget; incremental refresh only adds, it never trims. 0.23
+      // config-drift guard: when the body cap shrank below the stored bodies and
+      // looks like a reset profile block, keep the database and warn instead of
+      // deleting a multi-GB index; explicit admin reindex (full) remains the
+      // force. Eviction converges non-destructively on later refreshes.
+      if (!this.capsSatisfied()) {
+        if (this.configResetSuspected()) {
+          this.configResetSuspectedFlag = true
+          this.addWarning('content-config-reset-suspected')
+          this.saveEffectiveState(Math.round(this.totalBytes))
+        } else {
+          return await this.full(generation)
+        }
+      }
       this.beginBatch()
       await this.refreshFiles(generation)
       if (generation !== this.generation) return
@@ -1314,6 +1431,8 @@ export class ContentIndex {
       this.optimizeWarnings = 0
       this.lastVacuumBytes = 0
       this.lastVacuumAt = 0
+      this.symbolCount = 0
+      this.coverageMissSamples = []
       // Warning history is cumulative for the state directory (0.21.1). The
       // in-memory counters can hold a quarantine warning counted before this
       // database existed; persist them into the new content_meta so finish()
@@ -1333,6 +1452,9 @@ export class ContentIndex {
     this.measureDatabase()
     this.measureFtsSegments()
     this.refreshSessionPaths()
+    // Diagnostics reports the archived-session count even before the first
+    // session pass runs; the registry file is small and read once per open.
+    this.knownArchivedSessions = archivedSessionIdsSync().size
   }
 
   /**
@@ -1367,6 +1489,10 @@ export class ContentIndex {
       this.engineGeneration = this.readFlag('engine_generation') ?? null
       this.lastVacuumBytes = this.readFlag('last_vacuum_bytes') ?? 0
       this.lastVacuumAt = this.readFlag('last_vacuum_at') ?? 0
+      // 0.23: a database written before symbol_count existed pays one COUNT here
+      // (once per state directory, then finish() persists the counter).
+      const storedSymbols = this.readFlag('symbol_count')
+      this.symbolCount = storedSymbols ?? this.countSymbolRows()
       this.countersLoaded = true
     } catch {
       // A pre-0.20 database may lack the additive columns/keys; recount lazily.
@@ -1474,10 +1600,14 @@ export class ContentIndex {
    * every occurrence is counted and persisted so diagnostics survive a restart
    * even though the log itself is in memory only; 0.20.2 P1-8).
    */
-  private addWarning(warning: string): void {
+  private addWarning(warning: string, samplePath?: string): void {
     const next = (this.warningCounts.get(warning) ?? 0) + 1
     this.warningCounts.set(warning, next)
     if (warning === 'content-fts-optimize-failed') this.optimizeWarnings = next
+    // 0.23: keep up to MAX_SAMPLE_PATHS sample paths per warning code so status
+    // can point at the files/logs that caused it. Samples are additive evidence
+    // and are recorded even when the code itself is already listed.
+    if (samplePath !== undefined && samplePath !== '') this.addWarningSample(warning, samplePath)
     if (this.db !== null) {
       try { this.writeFlag('warn:' + warning, next) } catch { /* counters are additive */ }
       if (warning === 'content-fts-optimize-failed') {
@@ -1487,6 +1617,25 @@ export class ContentIndex {
     if (this.state.warnings.includes(warning)) return
     if (this.state.warnings.length >= 20) return
     this.state.warnings.push(warning)
+  }
+
+  /**
+   * Record one bounded sample path for a warning code. Paths the indexable scope
+   * rejects are never sampled: a warning must not turn a notIndexed token file
+   * into visible status output.
+   */
+  private addWarningSample(warning: string, path: string): void {
+    if (this.options.isIndexable?.(path) === false) return
+    let samples = this.warningSamples.get(warning)
+    if (samples === undefined) {
+      // Only the <= 20 live warning codes can have samples; the assertion is a
+      // guard for embedders that clear state.warnings but keep calling us.
+      if (this.warningSamples.size >= 20) return
+      samples = []
+      this.warningSamples.set(warning, samples)
+    }
+    if (samples.length >= MAX_SAMPLE_PATHS || samples.includes(path)) return
+    samples.push(path)
   }
 
   /** Terminate every search worker and fail the requests waiting on them. */
@@ -1683,6 +1832,192 @@ export class ContentIndex {
     if (this.options.maxFiles > 0 && this.fileDocs > this.options.maxFiles) return false
     if (this.options.maxFileBytes > 0 && this.oversizedDocs > 0) return false
     return true
+  }
+
+  /** Current effective caps, as persisted in the drift fingerprint. */
+  private currentCaps(): ContentEffectiveState['caps'] {
+    return {
+      maxTotalBytes: this.options.maxTotalBytes ?? 0,
+      maxFiles: this.options.maxFiles,
+      maxFileBytes: this.options.maxFileBytes,
+    }
+  }
+
+  /** The small JSON fingerprint path (next to content.db, never live data). */
+  private effectiveStatePath(): string {
+    return join(this.options.stateDir, EFFECTIVE_STATE_FILE)
+  }
+
+  /**
+   * Read the last effective caps/body fingerprint (0.23 config-drift guard).
+   * Missing, malformed or foreign files mean "no history"; the guard then only
+   * acts when the current body cap is the platform default.
+   */
+  private readEffectiveState(): ContentEffectiveState | null {
+    try {
+      const raw = JSON.parse(readFileSync(this.effectiveStatePath(), 'utf8')) as Partial<ContentEffectiveState>
+      if (raw === null || typeof raw !== 'object' || Number(raw.version) !== 1) return null
+      const caps = raw.caps
+      if (caps === null || typeof caps !== 'object') return null
+      const number = (value: unknown, fallback = 0): number => typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback
+      const suspected = raw.suspected
+      const suspectedState = suspected !== null && typeof suspected === 'object' && Number.isFinite(Number(suspected.maxTotalBytes))
+        ? { maxTotalBytes: number(suspected.maxTotalBytes), at: number(suspected.at) }
+        : undefined
+      return {
+        version: 1,
+        updatedAt: number(raw.updatedAt),
+        caps: {
+          maxTotalBytes: number(caps.maxTotalBytes),
+          maxFiles: number(caps.maxFiles),
+          maxFileBytes: number(caps.maxFileBytes),
+        },
+        bodyBytes: number(raw.bodyBytes),
+        fileDocs: number(raw.fileDocs),
+        highWaterBodyBytes: number(raw.highWaterBodyBytes),
+        ...(suspectedState === undefined ? {} : { suspected: suspectedState }),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Persist the last effective caps plus a sticky high-water body mark (0.23).
+   * `suspected` survives restarts while the same shrunken cap is still in
+   * effect, so a host restart loop cannot turn into a rebuild loop.
+   */
+  private saveEffectiveState(bodyBytes: number): void {
+    try {
+      const caps = this.currentCaps()
+      const prior = this.readEffectiveState()
+      const highWaterBodyBytes = Math.max(prior?.highWaterBodyBytes ?? 0, bodyBytes)
+      const suspected = this.configResetSuspectedFlag && caps.maxTotalBytes > 0
+        ? { maxTotalBytes: caps.maxTotalBytes, at: prior?.suspected?.at ?? Date.now() }
+        : undefined
+      const state: ContentEffectiveState = {
+        version: 1,
+        updatedAt: Date.now(),
+        caps,
+        bodyBytes,
+        fileDocs: this.fileDocs,
+        highWaterBodyBytes,
+        ...(suspected === undefined ? {} : { suspected }),
+      }
+      try { mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 }) } catch { /* already exists */ }
+      writeFileSync(this.effectiveStatePath(), JSON.stringify(state), { mode: 0o600 })
+    } catch {
+      // The fingerprint is advisory: a read-only or full state directory only
+      // loses the guard, never a build.
+    }
+  }
+
+  /**
+   * Whether an over-budget store looks like a reset profile block rather than
+   * an explicit cap change (0.23 config-drift guard).
+   *
+   * The 0.22 live incident: the profile's config block vanished, the effective
+   * `contentMaxTotalBytes` fell back to the 1.6 GB schema default while the
+   * database held more, and the caps check deleted + re-read a 5.5 GB index.
+   * A destructive rebuild is never the right answer to a suspected reset:
+   * keep the database, warn, and let explicit maintenance force it. The same
+   * rule protects an operator who lowered the cap by hand — eviction converges
+   * non-destructively and `locator_admin reindex` remains the explicit force.
+   */
+  private configResetSuspected(): boolean {
+    const cap = this.options.maxTotalBytes ?? 0
+    if (cap <= 0 || this.totalBytes <= cap) return false
+    const defaults = this.options.configDriftDefaults
+    const defaultCap = defaults?.maxTotalBytes ?? DEFAULT_CONTENT_MAX_TOTAL_BYTES
+    const prior = this.readEffectiveState()
+    if (prior === null) return cap === defaultCap
+    // A previous skip with the same cap stays sticky across restarts.
+    if (prior.suspected !== undefined && prior.suspected.maxTotalBytes === cap) return true
+    // A smaller cap than the one the stored bodies were written under is the
+    // suspected reset signal; 0 used to mean "unlimited".
+    const previousCap = prior.caps.maxTotalBytes
+    const shrank = previousCap === 0 || previousCap > cap
+    return shrank && prior.highWaterBodyBytes > cap
+  }
+
+  /** Count the additive symbol rows (used by diagnostics and finish()). */
+  private countSymbolRows(): number {
+    if (this.db === null) return 0
+    try {
+      return Number((this.db.prepare('SELECT COUNT(*) AS n FROM symbols').get() as { n?: number } | undefined)?.n ?? 0)
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Bounded sample of indexable candidates the last complete pass could not
+   * store (body/file budget). Paths the indexable scope rejects are never
+   * sampled, and the list never exceeds {@link MAX_SAMPLE_PATHS}.
+   */
+  private recordCoverageMisses(paths: Iterable<string>): void {
+    const samples: string[] = []
+    for (const path of paths) {
+      if (path === '' || samples.includes(path)) continue
+      if (this.options.isIndexable?.(path) === false) continue
+      samples.push(path)
+      if (samples.length >= MAX_SAMPLE_PATHS) break
+    }
+    this.coverageMissSamples = samples
+  }
+
+  /** Bytes free on the volume holding one path; undefined when unknown. */
+  private freeDiskBytes(path: string): number | undefined {
+    const hook = this.options.diskFreeBytes
+    if (hook !== undefined) {
+      try { return hook(path) } catch { return undefined }
+    }
+    try {
+      const stats = statfsSync(path)
+      const blockSize = Number(stats.bsize)
+      const available = Number(stats.bavail)
+      if (!Number.isFinite(blockSize) || !Number.isFinite(available) || blockSize <= 0) return undefined
+      return Math.max(0, Math.trunc(blockSize * available))
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Estimated bytes a full rebuild needs on the state volume (0.23 preflight).
+   * A rebuild rewrites the same corpus, so the open database's live pages are
+   * the best estimate; a missing database means there is nothing to protect and
+   * the check is skipped.
+   */
+  private estimateRebuildBytes(): number {
+    const override = this.options.rebuildRequiredBytes
+    if (override !== undefined) return Math.max(0, Math.trunc(override))
+    // A rebuild can start before this instance ever opened the database (an
+    // explicit admin reindex at boot), so fall back to the on-disk file size.
+    const onDisk = Math.max(this.dbBytes, this.dbSizeBytes())
+    const current = Math.max(this.dbLiveBytes, onDisk)
+    if (current <= 0) return 0
+    return Math.ceil(current * REBUILD_SPACE_FACTOR)
+  }
+
+  /**
+   * Disk-space preflight for a full rebuild: estimated database bytes plus the
+   * configured reserve must fit on the state volume, otherwise the destructive
+   * rebuild is deferred instead of failing halfway with a full disk.
+   */
+  private rebuildSpaceProblem(): { freeBytes: number; requiredBytes: number } | null {
+    const required = this.estimateRebuildBytes()
+    if (required <= 0) return null
+    const reserve = Math.max(0, Math.trunc(this.options.diskReserveBytes ?? DEFAULT_DISK_RESERVE_BYTES))
+    const free = this.freeDiskBytes(this.options.stateDir)
+    if (free === undefined) return null
+    const needed = required + reserve
+    return free >= needed ? null : { freeBytes: free, requiredBytes: needed }
+  }
+
+  /** Short "N MiB" form for the deferred-rebuild error message. */
+  private formatMiB(bytes: number): string {
+    return String(Math.max(0, Math.round(bytes / (1024 * 1024)))) + ' MiB'
   }
 
   private readFlag(key: string): number | undefined {
@@ -2041,6 +2376,9 @@ export class ContentIndex {
     // applies to the rebuilt database.
     if (this.lastRefreshMode === 'full') {
       this.state.warnings = this.state.warnings.filter(warning => !WARNINGS_RESOLVED_BY_REBUILD.has(warning))
+      // Samples describe the pre-build database too; drop the ones a rebuild
+      // resolved so diagnostics cannot point at a condition that is gone.
+      for (const warning of WARNINGS_RESOLVED_BY_REBUILD) this.warningSamples.delete(warning)
     }
     const counts = this.db!.prepare('SELECT kind_id AS kindId, COUNT(*) AS n FROM docs_meta GROUP BY kind_id').all() as Array<{ kindId: number; n: number }>
     this.state.files = Number(counts.find(row => Number(row.kindId) === DOC_KIND_FILE)?.n ?? 0)
@@ -2052,12 +2390,26 @@ export class ContentIndex {
     this.lastRefreshMs = this.buildStartedAt > 0 ? Date.now() - this.buildStartedAt : 0
     if (this.lastRefreshMode !== 'full') this.liveRefreshMsLast = this.lastRefreshMs
     this.writeTotalBytes()
+    // 0.23 config-drift guard bookkeeping: an explicit full rebuild resolves a
+    // suspected reset, and so does a store that is back under the body cap after
+    // non-destructive eviction. Otherwise the fingerprint keeps the high-water
+    // mark sticky across restarts.
+    const completedBodyBytes = this.readTotalBytes()
+    const bodyCap = this.options.maxTotalBytes ?? 0
+    if (this.lastRefreshMode === 'full' || bodyCap <= 0 || completedBodyBytes <= bodyCap) {
+      this.configResetSuspectedFlag = false
+    }
+    this.saveEffectiveState(completedBodyBytes)
     this.writeFlag('complete', 1)
     this.writeFlag('reasoning', this.options.includeReasoning === true ? 1 : 0)
     this.writeFlag('toolResults', this.options.includeToolResults === true ? 1 : 0)
     this.writeFlag('symbols', this.indexSymbolsEnabled() ? 1 : 0)
     this.writeFlag('symbols_per_file', this.symbolsPerFile())
     this.writeFlag('fts_optimized_at', this.ftsOptimizedAt)
+    // 0.23: diagnostics reports a symbol-row count; persist it so a status call
+    // never has to scan the additive symbols table.
+    this.symbolCount = this.countSymbolRows()
+    try { this.writeFlag('symbol_count', this.symbolCount) } catch { /* diagnostics only */ }
     if (this.engineGeneration !== null) this.writeFlag('engine_generation', this.engineGeneration)
     this.savePersistedCounters()
     this.refreshSessionPaths()
@@ -2378,6 +2730,9 @@ export class ContentIndex {
     candidates.sort((left, right) => right.mtime - left.mtime || left.path.localeCompare(right.path))
     const plan = this.planFullBuild(candidates)
     if (plan.truncated) this.state.truncated = true
+    // 0.23 diagnostics: remember a bounded sample of indexable candidates the
+    // plan could not store, so status can point at what the caps are hiding.
+    const attempted = new Set<string>(plan.selected.map(candidate => candidate.path))
     // Phase 3: read only the selected files, prefetching read/decode/symbol
     // extraction in parallel while the single writer inserts in order.
     await this.readAndStoreCandidates(plan.selected, generation, true)
@@ -2395,6 +2750,7 @@ export class ContentIndex {
         if (selectedPaths.has(candidate.path)) continue
         if (maxFiles > 0 && this.fileDocs >= maxFiles) break
         if (cap > 0 && this.totalBytes + this.estimateCandidateBytes(candidate) > cap) continue
+        attempted.add(candidate.path)
         fill.push(candidate)
         if (fill.length >= fillBatch) {
           await this.readAndStoreCandidates(fill, generation, true)
@@ -2403,6 +2759,17 @@ export class ContentIndex {
         }
       }
       if (fill.length > 0) await this.readAndStoreCandidates(fill, generation, true)
+    }
+    if (this.state.truncated) {
+      const missed: string[] = []
+      for (const candidate of candidates) {
+        if (attempted.has(candidate.path)) continue
+        missed.push(candidate.path)
+        if (missed.length >= MAX_SAMPLE_PATHS) break
+      }
+      this.recordCoverageMisses(missed)
+    } else {
+      this.coverageMissSamples = []
     }
     candidates.length = 0
     if (this.engineGeneration !== null) {
@@ -2788,6 +3155,7 @@ export class ContentIndex {
       if ((deleted & 63) === 0) await this.refreshBreathe(deleted)
     }
     this.deleteSymbolsBulk(disappeared)
+    const retried = new Set<string>()
     for (const entry of deferred) {
       if (generation !== this.generation) return
       if (this.sweepBudgetExceeded()) { complete = false; break }
@@ -2795,8 +3163,16 @@ export class ContentIndex {
       const row = await this.readFileDoc(entry.path, entry.name, entry.mtime)
       if (row === null) continue
       if (!await this.addDoc(row)) { this.state.truncated = true; continue }
+      retried.add(entry.path)
       this.countIndexed()
       await this.refreshBreathe()
+    }
+    // 0.23 diagnostics: keep a bounded sample of the candidates a complete
+    // sweep had to defer (body/file budget), or clear it when everything fit.
+    if (complete) {
+      const missed = deferred.filter(entry => !retried.has(entry.path)).map(entry => entry.path)
+      if (missed.length === 0 && !capped) this.coverageMissSamples = []
+      else this.recordCoverageMisses(missed)
     }
     // A partial sweep must not overwrite the exact denominator from the last
     // complete build/sweep.
@@ -2898,7 +3274,7 @@ export class ContentIndex {
       return { key: `file:${path}`, body, kind: 'file', path, title: name, sessionId: null, messageId: null, nodeKey: null, mtime, format: cached.format }
     }
     const extracted = await this.extractDocumentBody(path, data, textCap)
-    for (const warning of extracted.warnings) this.addWarning(warning)
+    for (const warning of extracted.warnings) this.addWarning(warning, path)
     // A worker crash/timeout is transient; caching "nothing extractable" for it
     // would keep the document out of the index for the rest of the process.
     const transient = extracted.warnings.some(warning => warning === 'content-extract-worker-failed'
@@ -3078,7 +3454,7 @@ export class ContentIndex {
     if (documentFormat(name) !== null) {
       if (!this.extractDocumentsEnabled()) return false
       if (size > this.documentMaxBytes()) {
-        this.addWarning('content-document-too-large')
+        this.addWarning('content-document-too-large', path)
         return false
       }
       return true
@@ -3209,13 +3585,13 @@ export class ContentIndex {
         }
         const indexed = await this.indexSessionLines(file, state, delta.lines, generation, delta.state, fresh)
         if (!indexed.ok) {
-          this.addWarning('content-session-log-unreadable')
+          this.addWarning('content-session-log-unreadable', file.path)
           return false
         }
         // Advance the stored byte offset only past the frames actually decoded;
         // a truncated tail (a frame still being written) is read next time.
         this.writeSessionSource(file, indexed.cwd, delta.completeBytes, indexed.lastLine, indexed.title, delta.truncated ? 1 : 0)
-        if (delta.truncated) this.addWarning('content-session-truncated')
+        if (delta.truncated) this.addWarning('content-session-truncated', file.path)
         return true
       }
     }
@@ -3225,7 +3601,7 @@ export class ContentIndex {
     const readEnd = oversized ? Math.min(size, maxBytes) : size
     const decode = await this.openSessionDecode(file, 0, readEnd, oversized ? SESSION_HEAD_CHARS : Number.POSITIVE_INFINITY)
     if (decode === null) {
-      this.addWarning('content-session-log-unreadable')
+      this.addWarning('content-session-log-unreadable', file.path)
       return false
     }
     this.deletePath(file.path)
@@ -3235,11 +3611,11 @@ export class ContentIndex {
       // The previous rows were already replaced by this partial read; drop the
       // tail state so the next refresh re-reads the whole log from scratch.
       try { this.db!.prepare('DELETE FROM sources WHERE path = ?').run(file.path) } catch { /* retry via a full read anyway */ }
-      this.addWarning('content-session-log-unreadable')
+      this.addWarning('content-session-log-unreadable', file.path)
       return false
     }
     this.writeSessionSource(file, indexed.cwd, decode.completeBytes, indexed.lastLine, indexed.title, oversized ? 1 : 0)
-    if (oversized) this.addWarning('content-session-truncated')
+    if (oversized) this.addWarning('content-session-truncated', file.path)
     return true
   }
 
@@ -3466,7 +3842,12 @@ export class ContentIndex {
    */
   private async sessionCandidates(): Promise<Array<{ path: string; mtime: number }>> {
     const files = await sessionFiles(this.sessionRoots())
-    const archived = this.options.includeArchived === true ? new Set<string>() : await archivedSessionIds()
+    // Archived logs are indexed either way; only the query-time exclusion set
+    // depends on the option. The count is reported even when the option
+    // includes them, so status can say how many archived sessions exist.
+    const archivedIds = await archivedSessionIds()
+    this.knownArchivedSessions = archivedIds.size
+    const archived = this.options.includeArchived === true ? new Set<string>() : archivedIds
     this.archivedSessions = archived
     const max = this.options.maxSessions > 0 ? this.options.maxSessions : Number.POSITIVE_INFINITY
     const out: Array<{ path: string; mtime: number }> = []
@@ -4982,8 +5363,17 @@ function dshHome(): string {
 
 /** Archived session ids recorded by the Workspace registry; empty when absent. */
 async function archivedSessionIds(): Promise<Set<string>> {
+  return archivedSessionIdsSync()
+}
+
+/**
+ * Synchronous variant of {@link archivedSessionIds} for diagnostics: the
+ * Workspace registry file is small, and status must answer the archived count
+ * even before the first asynchronous session pass.
+ */
+function archivedSessionIdsSync(): Set<string> {
   try {
-    const raw = await readFile(join(dshHome(), 'storages', 'workspace.json'), 'utf8')
+    const raw = readFileSync(join(dshHome(), 'storages', 'workspace.json'), 'utf8')
     const parsed = JSON.parse(raw) as { global?: { archivedSessionIds?: unknown } }
     const ids = parsed.global?.archivedSessionIds
     return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [])

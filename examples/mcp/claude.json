@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "dsh-locator": {
+      "command": "npx",
+      "args": ["-y", "dsh-locator-mcp", "--api=2026-11"]
+    }
+  }
+}

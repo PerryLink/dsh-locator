@@ -67,6 +67,7 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
     scanWorkers: 0,
     memoryLimitMB: 0,
     contentIndex: false,
+    legacyTools: true,
     contentLazy: true,
     contentMaxFileBytes: 1_000_000,
     contentMaxTotalBytes: 0,
@@ -162,9 +163,9 @@ describe.skipIf(!existsSync(binary))('plugin mount', () => {
     try {
       apply(ctx, config)
       stopEngines.push(() => { for (const dispose of disposers.reverse()) dispose() })
-      // The content half also mounts locator_find, locator_reindex and the
-      // symbol data layer (outline/symbol/repo_map).
-      expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['locator_find', 'locator_reindex', 'locator_outline', 'locator_symbol', 'locator_repo_map']))
+      // 0.23 default: the 3+1 surface only; legacy tools are opt-in.
+      expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['locator_find', 'locator_read', 'locator_status', 'locator_admin']))
+      expect(tools.map(tool => tool.name)).not.toContain('locator_search')
       const statusTool = tools.find(tool => tool.name === 'locator_status') as RegisteredTool
       await waitForIndex(statusTool)
       // Nothing content-related must exist before the first content use.
@@ -353,7 +354,7 @@ describe('HTTP surface gating (no engine required)', () => {
     // A Web server alone is not enough: exposing the routes would be fail-open.
     const mounted = mount()
     try {
-      expect(mounted.tools).toEqual(expect.arrayContaining(['locator_search', 'locator_status']))
+      expect(mounted.tools).toEqual(expect.arrayContaining(['locator_find', 'locator_status']))
       expect(mounted.routes).toEqual([])
     } finally {
       mounted.dispose()
@@ -370,6 +371,9 @@ describe('HTTP surface gating (no engine required)', () => {
         '/dsh-locator/reveal',
         '/dsh-locator/search',
         '/dsh-locator/status',
+        '/dsh-locator/v1/find',
+        '/dsh-locator/v1/read',
+        '/dsh-locator/v1/status',
       ])
     } finally {
       mounted.dispose()

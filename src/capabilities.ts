@@ -22,6 +22,12 @@ export interface CapabilityCard {
   permission: { approval: 'none' | 'ask'; sandbox: 'none' | 'write' | 'any' }
   state: 'available' | 'unknown'
   source: 'tools' | 'skills'
+  /**
+   * 0.23.0: the host asked to defer this tool's schema (legacy surface). Deferred
+   * cards rank below resident ones and their keyword matches weigh less, so the
+   * 3+1 AI-first tools stay on top without hiding real maintenance tools.
+   */
+  deferred: boolean
 }
 
 /** One snapshot of the live capability surface. */
@@ -75,6 +81,22 @@ const RISK_OVERRIDES: Readonly<Record<string, RiskOverride>> = {
   locator_refresh: {
     level: 'write',
     actions: ['refreshes persisted index state'],
+  },
+  // 0.23.0 P0-9: the AI-first read tool's description legitimately mentions
+  // "shell cat/head" as the thing it replaces; that must not turn it exec/ask.
+  locator_read: {
+    level: 'read',
+    actions: ['reads file/session evidence and returns verbatim excerpts; never writes or executes'],
+  },
+  // The routed maintenance tool must not read as a harmless admin helper: every
+  // action either rebuilds persisted state or writes a file.
+  locator_admin: {
+    level: 'write',
+    actions: [
+      'rebuild: rescans the file-name index and replaces its persisted snapshot (minutes of disk I/O)',
+      'reindex: rebuilds (full) or refreshes the content database',
+      'export: writes a SQLite snapshot file to disk (can take tens of seconds)',
+    ],
   },
 }
 
@@ -148,9 +170,23 @@ function keywordsOf(text: string): string[] {
   return tokenize(text).filter(token => !TAG_STOP_WORDS.has(token)).slice(0, 6)
 }
 
-/** Infer risk/permission from a tool name, description and parameter schema. */
-export function inferRisk(name: string, description: string, parameters?: Record<string, unknown>): CapabilityCard['risk'] & { permission: CapabilityCard['permission'] } {
-  const haystack = `${name} ${description}`.toLowerCase()
+/**
+ * Infer risk/permission from a tool name and parameter schema.
+ *
+ * 0.23.0 P0-9: the description no longer feeds the exec/write keyword match.
+ * Descriptions legitimately NAME dangerous things as the thing a read-only tool
+ * replaces ("use it instead of shell cat/head") or warns against ("do not
+ * install image libraries"), which made locator_read look exec and read_image
+ * look write. Only the name (and the declared schema) can declare side effects;
+ * the description still feeds discovery keywords/tags. The parameter is kept
+ * for API compatibility and future heuristics.
+ * @param name - tool name; the only keyword source for exec/write inference.
+ * @param _description - accepted for compatibility; not used for risk keywords.
+ * @param parameters - declared parameter schema (JSON-Schema shape).
+ * @returns risk level/actions/basis plus the approval/sandbox permission echo.
+ */
+export function inferRisk(name: string, _description: string, parameters?: Record<string, unknown>): CapabilityCard['risk'] & { permission: CapabilityCard['permission'] } {
+  const nameLower = name.toLowerCase()
   const properties = parameters !== undefined && typeof parameters === 'object' && parameters !== null && typeof (parameters as { properties?: unknown }).properties === 'object'
     ? Object.keys((parameters as { properties: Record<string, unknown> }).properties)
     : []
@@ -159,8 +195,8 @@ export function inferRisk(name: string, description: string, parameters?: Record
   if (hasProperty('sandbox_permissions')) escalations.push('can request escalated sandbox permissions')
   if (hasProperty('allowOutsideStateDir')) escalations.push('can write outside the plugin state directory (allowOutsideStateDir)')
   if (hasProperty('overwrite')) escalations.push('can overwrite an existing file (overwrite)')
-  const nameExec = EXEC_WORDS.some(word => haystack.includes(word))
-  const nameWrite = WRITE_WORDS.some(word => haystack.includes(word))
+  const nameExec = EXEC_WORDS.some(word => nameLower.includes(word))
+  const nameWrite = WRITE_WORDS.some(word => nameLower.includes(word))
   const schemaExec = hasProperty('command') || hasProperty('cmd')
   const schemaWrite = hasProperty('content') || hasProperty('sandbox_permissions') || hasProperty('allowOutsideStateDir') || hasProperty('overwrite')
   const override = riskOverrideOf(name)
@@ -208,7 +244,7 @@ export function inferRisk(name: string, description: string, parameters?: Record
 /** Convert one DSH ToolDefinition into a capability card. */
 function toolCard(definition: unknown): CapabilityCard | undefined {
   if (typeof definition !== 'object' || definition === null) return undefined
-  const record = definition as { name?: unknown; description?: unknown; parameters?: unknown; output?: unknown }
+  const record = definition as { name?: unknown; description?: unknown; parameters?: unknown; output?: unknown; deferLoading?: unknown }
   if (typeof record.name !== 'string' || record.name === '') return undefined
   const name = record.name
   const description = typeof record.description === 'string' ? record.description : ''
@@ -228,6 +264,7 @@ function toolCard(definition: unknown): CapabilityCard | undefined {
     permission: risk.permission,
     state: 'available',
     source: 'tools',
+    deferred: record.deferLoading === true,
   }
 }
 
@@ -248,6 +285,8 @@ function skillCard(skill: unknown): CapabilityCard | undefined {
     permission: { approval: 'none', sandbox: 'none' },
     state: invocation?.modelInvocable === false ? 'unknown' : 'available',
     source: 'skills',
+    // Skills are a catalog lookup, not a deferred tool schema.
+    deferred: false,
   }
 }
 
@@ -295,6 +334,35 @@ export interface CapabilityHit {
 }
 
 /**
+ * Intent synonyms matched against tool NAMES only. The 0.22 AI-first surface
+ * says "find"; the legacy surface said "search", so a plain lexical match let
+ * the deferred locator_search outrank the resident locator_find for a normal
+ * "search files" intent. Synonyms keep both discoverable; the deferred weight
+ * (and the resident tie-break) then put the current tool first.
+ */
+const NAME_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
+  find: ['search', 'lookup', 'locate', 'grep'],
+  search: ['find', 'lookup', 'locate', 'grep'],
+  grep: ['search', 'find'],
+  read: ['cat', 'view', 'show'],
+  cite: ['citation', 'reference'],
+  status: ['health'],
+  admin: ['maintenance'],
+}
+
+/** Whether one card name matches an intent term directly or through a synonym. */
+function nameMatches(name: string, term: string): boolean {
+  if (name.includes(term)) return true
+  const synonyms = NAME_SYNONYMS[term]
+  return synonyms !== undefined && synonyms.some(synonym => name.includes(synonym))
+}
+
+/** Legacy/deferred tool cards sort after resident ones on an equal score. */
+function deferredRank(card: CapabilityCard): number {
+  return card.kind === 'tool' && card.deferred ? 1 : 0
+}
+
+/**
  * Rank capability cards against an intent and optional filters.
  * @param cards - snapshot cards.
  * @param intent - what the caller wants to do.
@@ -324,16 +392,28 @@ export function searchCapabilities(
   const scored: CapabilityHit[] = []
   for (const card of matches) {
     const haystack = tokenize(`${card.name} ${card.summary} ${card.tags.join(' ')}`)
+    const deferred = card.kind === 'tool' && card.deferred
+    const name = card.name.toLowerCase()
     const why: string[] = []
     let score = 0
     for (const term of terms) {
-      if (card.name.toLowerCase().includes(term)) { score += 6; why.push(`name:${term}`); continue }
-      if (haystack.includes(term)) { score += 2; why.push(`text:${term}`) }
+      if (nameMatches(name, term)) {
+        score += deferred ? 5 : 6
+        why.push(`name:${term}`)
+        continue
+      }
+      if (haystack.includes(term)) {
+        score += deferred ? 1 : 2
+        why.push(`text:${term}`)
+      }
     }
     if (terms.length === 0) { score = 1; why.push('intent-empty: lists capabilities') }
     if (score > 0) scored.push({ card, score, why: why.slice(0, 6) })
   }
-  scored.sort((left, right) => right.score - left.score || left.card.id.localeCompare(right.card.id))
+  // 0.23.0: on an equal score the resident (non-deferred) tool wins; a deferred
+  // legacy tool keeps its lower weight, so relevance still beats residency for
+  // maintenance intents (e.g. "rebuild index" → locator_rebuild first).
+  scored.sort((left, right) => right.score - left.score || deferredRank(left.card) - deferredRank(right.card) || left.card.id.localeCompare(right.card.id))
   return { hits: scored.slice(offset, offset + limit), total: scored.length }
 }
 
@@ -497,6 +577,7 @@ const CARD_SCHEMA = {
     risk: { type: 'object', additionalProperties: false, properties: { level: { type: 'string' }, actions: { type: 'array', items: { type: 'string' } }, basis: { type: 'string' } } },
     permission: { type: 'object', additionalProperties: false, properties: { approval: { type: 'string' }, sandbox: { type: 'string' } } },
     state: { type: 'string' }, source: { type: 'string' },
+    deferred: { type: 'boolean', description: 'Tool schema is deferred (legacy surface); resident cards rank first.' },
   },
 } as const
 

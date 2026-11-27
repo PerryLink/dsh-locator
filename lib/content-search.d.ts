@@ -9,10 +9,15 @@
  * `ORDER BY rank` statement made a SQLite sorter evaluate it for every match
  * (measured 2.7 s for "the" on a 1 GB corpus; 60 ms with this split).
  *
- * Every unbounded-looking path has an explicit budget: queries shorter than a
- * trigram are rejected instead of degrading into a full-table LIKE/GLOB scan,
- * and the whole-word post-filter stops after a fixed number of rows, body bytes
- * or milliseconds and reports a bounded count.
+ * Every unbounded-looking path has an explicit budget and a short term never
+ * degrades a whole query into a full-table LIKE/GLOB scan (0.23, P0-7): when a
+ * query mixes long terms with 2-codepoint terms the trigram matcher serves the
+ * long ones and the short ones are enforced as a JS post-filter over the
+ * candidates; a 1-codepoint term is dropped with a `terms-dropped` warning
+ * when a long term exists; only an all-short query is rejected or answered by
+ * the bounded short-query fallback. The whole-word/post-filter scan stops after
+ * a fixed number of rows, body bytes or milliseconds and reports a bounded
+ * count.
  *
  * 0.21.0 adapts the query layer to content schema v4: docs_meta identifies a
  * document by (path_id, kind_id) and keeps the path text once in the normalized
@@ -107,14 +112,19 @@ export interface ContentSearchOptions {
      */
     rankAdaptive?: boolean;
     /**
-     * Bounded LIKE fallback for 2-codepoint queries (0.20.2, P0-2). The trigram
-     * index cannot serve a 2-character term (ai / js / 索引), so such a query is
+     * Bounded LIKE fallback for queries whose every term is too short for the
+     * trigram index (0.20.2, P0-2; narrowed in 0.23). The trigram index cannot
+     * serve a 2-character term (ai / js / 索引), so an all-short query is
      * normally rejected with 'content-query-too-short'. When this is true the
      * query is answered by a bounded scan instead: file-name (stored path) hits
      * first, then body hits under a fixed wall-clock budget, with a
      * 'content-query-short-fallback' warning and shortQueryFallback: true on the
-     * result. One-codepoint queries stay rejected. Default off for direct
-     * embedders; the plugin turns it on from contentShortQueryFallback.
+     * result. This option never gates a mixed query: with at least one long term
+     * the long terms drive FTS/BM25 and 2-codepoint terms are post-filtered in JS
+     * (P0-7). An all-short query containing a 1-codepoint term stays rejected,
+     * because a single character cannot produce a useful bounded page. Default
+     * off for direct embedders; the plugin turns it on from
+     * contentShortQueryFallback.
      */
     shortQueryFallback?: boolean;
     /** Drop session documents entirely (the unknown-session fallback). */
@@ -181,8 +191,10 @@ export declare const RANK_ADAPTIVE_THRESHOLD = 2000;
 export declare const DEGRADED_COUNT_LIMIT = 500;
 /**
  * Shortest term the bounded short-query fallback accepts (0.20.2, P0-2). One
- * codepoint is still rejected: a single character matches so much of a corpus
- * that even a bounded scan is not worth answering.
+ * codepoint is never served: in a mixed query it is dropped (warning
+ * `terms-dropped`) because a single character matches so much of a corpus
+ * that it cannot be a useful AND term, and in an all-short query it stays
+ * 'content-query-too-short'.
  */
 export declare const SHORT_TERM_MIN = 2;
 /**
@@ -238,16 +250,28 @@ export declare function decodeExtendedForNames(input: string): DecodedExtended;
 /** Result of the query-entry checks shared by searchContent and the panel. */
 export interface ContentQueryCheck {
     ok: boolean;
-    /** Literal terms for normal mode; one phrase for extended mode. */
+    /**
+     * Literal terms for the trigram matcher (normal mode); one phrase for
+     * extended mode. Short terms that the matcher cannot serve are kept out of
+     * this list: dropped 1-codepoint terms disappear, 2-codepoint terms move to
+     * {@link postFilterTerms}.
+     */
     terms: string[];
+    /**
+     * 2-codepoint terms of a mixed long/short query (0.23, P0-7). They cannot be
+     * served by the trigram index, but the query still has long terms, so they
+     * are enforced as a JS post-filter over the FTS candidates instead of
+     * degrading the whole query to a bounded LIKE scan. Empty for all-long,
+     * all-short and extended queries.
+     */
+    postFilterTerms: string[];
     phrase: boolean;
     warnings: string[];
     error?: string;
     /**
-     * True when every term is too short for the trigram index but long enough for
-     * the bounded short-query fallback (2 codepoints). Callers that did not opt
-     * into the fallback get an error instead, so this is only set with
-     * `allowShort`.
+     * True when every term is too short for the trigram index but the bounded
+     * short-query fallback can answer the query (2 codepoints, `allowShort`).
+     * Callers that did not opt into the fallback get an error instead.
      */
     short: boolean;
 }
@@ -261,19 +285,23 @@ export interface ContentQueryCheckOptions {
     allowShort?: boolean;
 }
 /**
- * Validate a content query before it reaches SQL.
+ * Validate a content query before it reaches SQL (0.23 contract, P0-7).
  *
  * Content search only supports substrings the FTS5 trigram tokenizer can
  * serve. A 1–2 character term used to fall back to a whole-corpus `LIKE` scan,
- * which is both slow and unbounded; it became a hard error in 0.20.0. 0.20.2
- * reintroduces it as an explicit, bounded fallback: callers that pass
- * `allowShort` accept 2-codepoint terms and searchContent answers them with a
- * deadline-bounded scan. The same limits apply after extended-mode escapes are
- * decoded, and lengths are measured in Unicode code points so emoji are not
- * mistaken for long text.
+ * which is both slow and unbounded; it became a hard error in 0.20.0 and a
+ * bounded, opt-in fallback in 0.20.2. 0.23 narrows the fallback to all-short
+ * queries: a mixed long/short query keeps its long terms on the FTS/BM25 path
+ * and enforces the 2-codepoint terms with a bounded JS post-filter, so a single
+ * short term can no longer degrade the whole query. 1-codepoint terms are only
+ * dropped when a long term exists (warning `terms-dropped`); on their own they
+ * stay 'content-query-too-short'. Extended mode is one literal phrase, so its
+ * length is measured over the whole decoded phrase including spaces (the
+ * trigram tokenizer serves any 3+ code-point phrase). Lengths are measured in
+ * Unicode code points so emoji are not mistaken for long text.
  * @param query - raw query text.
  * @param matchMode - `normal` (whitespace-separated terms) or `extended`.
- * @param options - `allowShort` opts into the bounded fallback.
+ * @param options - `allowShort` opts into the bounded all-short fallback.
  * @returns normalized terms, or the first entry error.
  */
 export declare function checkContentQuery(query: string, matchMode: ContentMatchMode, options?: ContentQueryCheckOptions): ContentQueryCheck;
@@ -318,11 +346,15 @@ export declare function configureSearchConnection(db: DatabaseSync): void;
  * re-sorted in page by term frequency/title/depth/line. Narrow sets keep the
  * exact bm25 order unchanged.
  *
- * Short queries (0.20.2, P0-2): with options.shortQueryFallback a 2-codepoint
- * query is answered by the bounded name+body fallback (see
- * shortQueryFallbackSearch) instead of being rejected; the result carries
- * shortQueryFallback: true and a 'content-query-short-fallback' warning.
- * One-codepoint queries stay rejected.
+ * Short queries (0.20.2, P0-2; narrowed in 0.23, P0-7): with
+ * options.shortQueryFallback an all-short 2-codepoint query is answered by the
+ * bounded name+body fallback (see shortQueryFallbackSearch) instead of being
+ * rejected; the result carries shortQueryFallback: true and a
+ * 'content-query-short-fallback' warning. An all-short query containing a
+ * 1-codepoint term stays rejected. A query that mixes long and short terms
+ * never takes the fallback: its long terms drive FTS/BM25 and its 2-codepoint
+ * terms are enforced as a JS post-filter over the candidates (scanFiltered),
+ * while 1-codepoint terms are dropped with a 'terms-dropped' warning.
  *
  * Counting (0.20.0, P1-3): the page uses rowid-subquery filters while the count
  * uses docs-column filters, and wide filtered sets report a bounded count

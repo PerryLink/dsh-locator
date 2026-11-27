@@ -42,8 +42,21 @@ function succeed(tool: string, fields: Record<string, unknown>, timing: AgentTim
 }
 const TOOL = 'locator_status'
 
-/** The brief payload is designed to stay under this serialized size. */
-export const STATUS_BRIEF_MAX_CHARS = 600
+/**
+ * The brief payload is designed to stay under this serialized size. 0.23.0
+ * raised it from 600 to 1,400 because the brief now carries what P0-5 showed it
+ * was hiding: the engine warning (e.g. degraded watching), the root list and
+ * the content-truncated flag. The bundled limits (4 roots, 96 chars each;
+ * 240-char warning) keep even the worst case under this ceiling; a realistic
+ * brief with 2 roots and a warning stays around 700-900 chars.
+ */
+export const STATUS_BRIEF_MAX_CHARS = 1_400
+/** Longest engine warning kept in the brief; longer ones are cut with an ellipsis. */
+export const STATUS_BRIEF_WARNING_MAX_CHARS = 240
+/** Index roots listed in the brief; the rest stays counted only. */
+export const STATUS_BRIEF_MAX_ROOTS = 4
+/** Longest root path kept in the brief. */
+export const STATUS_BRIEF_ROOT_MAX_CHARS = 96
 
 /** Subset of the legacy status value this module reads (everything else is opaque). */
 interface LegacyStatusValue {
@@ -56,6 +69,10 @@ interface LegacyStatusValue {
   files?: number
   dirs?: number
   watching?: boolean
+  version?: string
+  platform?: string
+  watchDegraded?: boolean
+  watchReason?: string
   roots?: string[]
   content?: {
     enabled?: boolean
@@ -93,6 +110,7 @@ const STATUS_OUTPUT = {
         watching: { type: 'boolean' },
         scanning: { type: 'boolean' },
         roots: { type: 'integer', description: 'Number of configured index roots.' },
+        watchDegraded: { type: 'boolean', description: 'The native watcher covers only part of the roots (incremental refresh compensates).' },
       },
     },
     content: {
@@ -104,6 +122,7 @@ const STATUS_OUTPUT = {
         files: { type: 'integer' },
         sessions: { type: 'integer' },
         messages: { type: 'integer' },
+        truncated: { type: 'boolean', description: 'The content index evicted/truncated docs; some bodies are not searchable.' },
       },
     },
     scope: {
@@ -116,6 +135,11 @@ const STATUS_OUTPUT = {
         ocr: { type: 'boolean' },
       },
     },
+    roots: { type: 'array', items: { type: 'string' }, description: 'Configured index roots (brief: first 4, long paths shortened; truncated lists the cut).' },
+    warning: { type: 'string', description: 'Last engine warning (for example degraded watcher coverage), truncated.' },
+    engineVersion: { type: 'string', description: 'Engine binary version when the running engine reports it.' },
+    generation: { type: 'integer', description: 'Index generation (moves on every real mutation) when the runtime can report it.' },
+    truncated: { type: 'array', items: { type: 'string' }, description: 'Brief sections that were shortened: "warning", "roots".' },
     status: {
       type: 'object',
       additionalProperties: true,
@@ -130,30 +154,81 @@ function countOf(value: number | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0
 }
 
+/** Engine fields the legacy payload does not forward; read from the pushed stats copy. */
+interface CachedEngineMeta {
+  generation?: number
+  watchDegraded?: boolean
+  watchReason?: string
+}
+
+/**
+ * Best-effort generation/watch health from the runtime's pushed engine stats.
+ * The legacy status call moments earlier refreshed that copy (1 s TTL), so this
+ * normally costs no IPC; when the runtime does not expose the cached accessor
+ * the fields are simply omitted instead of paying a second status round-trip.
+ */
+async function cachedEngineMeta(rt: LocatorRuntime): Promise<CachedEngineMeta> {
+  const candidate = (rt as unknown as { engineStatusCached?: (ttlMs?: number) => Promise<unknown> }).engineStatusCached
+  if (typeof candidate !== 'function') return {}
+  try {
+    const engine = await candidate.call(rt, 1_000) as { generation?: unknown; watchDegraded?: unknown; watchReason?: unknown } | undefined
+    if (typeof engine !== 'object' || engine === null) return {}
+    return {
+      ...(typeof engine.generation === 'number' && Number.isFinite(engine.generation) ? { generation: Math.trunc(engine.generation) } : {}),
+      ...(engine.watchDegraded === true ? { watchDegraded: true } : {}),
+      ...(typeof engine.watchReason === 'string' && engine.watchReason !== '' ? { watchReason: engine.watchReason } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** Whether the watcher only partially covers the roots (legacy field or engine copy). */
+function watchDegradedOf(value: LegacyStatusValue, meta: CachedEngineMeta): boolean {
+  return value.watchDegraded === true || meta.watchDegraded === true
+}
+
+/** Truncate one string, marking the cut with an ellipsis. */
+function truncateChars(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false }
+  return { text: text.slice(0, Math.max(0, maxChars - 1)) + '…', truncated: true }
+}
+
+/** Bounded root list for the brief (max entries, max chars per path). */
+function briefRoots(roots: readonly string[] | undefined): { roots: string[]; truncated: boolean } {
+  const all = Array.isArray(roots) ? roots.filter((root): root is string => typeof root === 'string') : []
+  const keptSources = all.slice(0, STATUS_BRIEF_MAX_ROOTS)
+  const kept = keptSources.map(root => truncateChars(root, STATUS_BRIEF_ROOT_MAX_CHARS).text)
+  const truncated = all.length > kept.length || keptSources.some(root => root.length > STATUS_BRIEF_ROOT_MAX_CHARS)
+  return { roots: kept, truncated }
+}
+
 /** Build the one-line summary shared by both details. */
-function briefSummary(value: LegacyStatusValue): string {
+function briefSummary(value: LegacyStatusValue, meta: CachedEngineMeta): string {
   const content = value.content
   const parts: string[] = []
   parts.push(value.running === true ? 'engine running' : 'engine stopped')
   parts.push(String(countOf(value.entries)) + ' entries (' + String(countOf(value.files)) + ' files / ' + String(countOf(value.dirs)) + ' dirs)')
-  parts.push(value.watching === true ? 'watcher active' : 'watcher inactive')
+  parts.push(value.watching === true ? (watchDegradedOf(value, meta) ? 'watcher degraded' : 'watcher active') : 'watcher inactive')
   parts.push('roots ' + String(Array.isArray(value.roots) ? value.roots.length : 0))
   if (value.scanning === true) parts.push('scanning')
   if (content?.enabled === true) {
     parts.push(content.building === true
       ? 'content building'
       : 'content ' + String(countOf(content.files)) + ' files / ' + String(countOf(content.messages)) + ' messages')
+    if (content.truncated === true) parts.push('content truncated')
   } else {
     parts.push('content off')
   }
   parts.push('scope ' + String(countOf(value.scope?.activeRules)) + ' rule(s)')
+  if (typeof value.warning === 'string' && value.warning !== '') parts.push('warning')
   return parts.join(' · ')
 }
 
-/** Brief index/content/scope blocks; every array is reduced to a count. */
-function briefFields(value: LegacyStatusValue): {
-  index: { running: boolean; entries: number; files: number; dirs: number; watching: boolean; scanning: boolean; roots: number }
-  content: { enabled: boolean; building: boolean; files: number; sessions: number; messages: number }
+/** Brief index/content/scope blocks; arrays are reduced to counts (roots list is separate). */
+function briefFields(value: LegacyStatusValue, meta: CachedEngineMeta): {
+  index: { running: boolean; entries: number; files: number; dirs: number; watching: boolean; scanning: boolean; roots: number; watchDegraded: boolean }
+  content: { enabled: boolean; building: boolean; files: number; sessions: number; messages: number; truncated: boolean }
   scope: { activeRules: number; outputBudgetChars: number; rerank: boolean; ocr: boolean }
 } {
   const content = value.content
@@ -167,6 +242,7 @@ function briefFields(value: LegacyStatusValue): {
       watching: value.watching === true,
       scanning: value.scanning === true,
       roots: Array.isArray(value.roots) ? value.roots.length : 0,
+      watchDegraded: watchDegradedOf(value, meta),
     },
     content: {
       enabled: content?.enabled === true,
@@ -174,6 +250,7 @@ function briefFields(value: LegacyStatusValue): {
       files: countOf(content?.files),
       sessions: countOf(content?.sessions),
       messages: countOf(content?.messages),
+      truncated: content?.truncated === true,
     },
     scope: {
       activeRules: countOf(scope?.activeRules),
@@ -206,13 +283,13 @@ export function makeAgentStatusTool(rt: LocatorRuntime, content?: ContentIndex, 
     description: [
       'Report local file-index/content-index health (dsh-locator).',
       '',
-      'detail: brief (default, compact index/content/scope/timing) or full (all status fields: roots, watcher, resources, diagnostics). Call it when search looks stale, to check whether the disk is indexed, or before locator_admin maintenance.',
+      'detail: brief (default: counts, watcher health, roots, warning, generation) or full (every status field: roots, watcher, resources, diagnostics). Call when search looks stale, to check the disk is indexed, or before locator_admin maintenance.',
     ].join('\n'),
     parameters: {
       detail: {
         type: 'string',
         enum: ['brief', 'full'],
-        description: 'brief (default) or full (every status field).',
+        description: 'brief (default) or full.',
       },
     },
     output: {
@@ -222,9 +299,14 @@ export function makeAgentStatusTool(rt: LocatorRuntime, content?: ContentIndex, 
           ok: boolean
           detail?: 'brief' | 'full'
           summary?: string
-          index?: { running?: boolean; entries?: number; files?: number; dirs?: number; watching?: boolean; scanning?: boolean; roots?: number }
-          content?: { enabled?: boolean; building?: boolean; files?: number; sessions?: number; messages?: number }
+          index?: { running?: boolean; entries?: number; files?: number; dirs?: number; watching?: boolean; scanning?: boolean; roots?: number; watchDegraded?: boolean }
+          content?: { enabled?: boolean; building?: boolean; files?: number; sessions?: number; messages?: number; truncated?: boolean }
           scope?: { activeRules?: number; outputBudgetChars?: number; rerank?: boolean; ocr?: boolean }
+          roots?: string[]
+          warning?: string
+          engineVersion?: string
+          generation?: number
+          truncated?: string[]
           error?: AgentErrorInfo
         }
         if (v.ok !== true) {
@@ -247,12 +329,18 @@ export function makeAgentStatusTool(rt: LocatorRuntime, content?: ContentIndex, 
         const index = v.index ?? {}
         const content = v.content ?? {}
         const scope = v.scope ?? {}
+        const rootList = v.roots ?? []
+        const rootNote = rootList.length === 0 ? '' : ' (roots: ' + rootList.join(', ') + (v.truncated?.includes('roots') === true ? ', …' : '') + ')'
         const lines = [
           'locator_status (brief): ' + summary,
-          '  index: ' + String(index.entries ?? 0) + ' entries / ' + String(index.files ?? 0) + ' files / ' + String(index.dirs ?? 0) + ' dirs · roots ' + String(index.roots ?? 0) + (index.watching === true ? ' · watcher active' : ' · watcher inactive') + (index.scanning === true ? ' · scanning' : ''),
-          '  content: ' + (content.enabled === true ? (content.building === true ? 'building' : 'ready') + ' · ' + String(content.files ?? 0) + ' files / ' + String(content.sessions ?? 0) + ' sessions / ' + String(content.messages ?? 0) + ' messages' : 'disabled'),
+          '  index: ' + String(index.entries ?? 0) + ' entries / ' + String(index.files ?? 0) + ' files / ' + String(index.dirs ?? 0) + ' dirs · roots ' + String(index.roots ?? 0) + (index.watching === true ? (index.watchDegraded === true ? ' · watcher degraded' : ' · watcher active') : ' · watcher inactive') + (index.scanning === true ? ' · scanning' : '') + rootNote,
+          '  content: ' + (content.enabled === true ? (content.building === true ? 'building' : 'ready') + ' · ' + String(content.files ?? 0) + ' files / ' + String(content.sessions ?? 0) + ' sessions / ' + String(content.messages ?? 0) + ' messages' + (content.truncated === true ? ' · truncated' : '') : 'disabled'),
           '  scope: ' + String(scope.activeRules ?? 0) + ' rule(s) · output budget ' + String(scope.outputBudgetChars ?? 0) + ' chars · rerank ' + (scope.rerank === true ? 'on' : 'off') + ' · ocr ' + (scope.ocr === true ? 'on' : 'off'),
         ]
+        if (v.engineVersion !== undefined || v.generation !== undefined) {
+          lines.push('  engine: ' + [v.engineVersion === undefined ? '' : 'v' + v.engineVersion, v.generation === undefined ? '' : 'generation ' + String(v.generation)].filter(part => part !== '').join(' · '))
+        }
+        if (v.warning !== undefined) lines.push('  warning: ' + v.warning)
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
@@ -269,7 +357,11 @@ export function makeAgentStatusTool(rt: LocatorRuntime, content?: ContentIndex, 
       }
       const value = raw as LegacyStatusValue
       if (value.ok !== true) return failed(TOOL, unavailableError(value), timing)
-      const summary = briefSummary(value)
+      // The brief must answer "is this index usable and why not": it carries
+      // the engine warning (P0-5), the bounded root list, the content-truncated
+      // flag and, when cheap, the index generation/engine version.
+      const meta = detail === 'brief' ? await cachedEngineMeta(rt) : {}
+      const summary = briefSummary(value, meta)
       if (detail === 'full') {
         return succeed(TOOL, {
           detail: 'full' as const,
@@ -277,8 +369,24 @@ export function makeAgentStatusTool(rt: LocatorRuntime, content?: ContentIndex, 
           status: value,
         }, timing)
       }
-      const fields = briefFields(value)
-      return succeed(TOOL, { detail: 'brief' as const, summary, ...fields }, timing)
+      const fields = briefFields(value, meta)
+      const roots = briefRoots(value.roots)
+      const warning = typeof value.warning === 'string' && value.warning !== ''
+        ? truncateChars(value.warning, STATUS_BRIEF_WARNING_MAX_CHARS)
+        : undefined
+      const truncated: string[] = []
+      if (warning?.truncated === true) truncated.push('warning')
+      if (roots.truncated) truncated.push('roots')
+      return succeed(TOOL, {
+        detail: 'brief' as const,
+        summary,
+        ...fields,
+        roots: roots.roots,
+        ...(warning === undefined ? {} : { warning: warning.text }),
+        ...(value.version === undefined ? {} : { engineVersion: value.version }),
+        ...(meta.generation === undefined ? {} : { generation: meta.generation }),
+        ...(truncated.length === 0 ? {} : { truncated }),
+      }, timing)
     },
   })
 }

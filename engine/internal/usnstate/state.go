@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/PerryLink/dsh-locator/engine/internal/scan"
+	"github.com/PerryLink/dsh-locator/engine/internal/statefs"
 )
 
 // File is the on-disk shape.
@@ -39,11 +40,11 @@ func Save(stateDir string, st scan.USNState) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := statefs.MkdirAll(stateDir); err != nil {
 		return err
 	}
 	tmp := Path(stateDir) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := statefs.WriteFile(tmp, data); err != nil {
 		return err
 	}
 	return os.Rename(tmp, Path(stateDir))

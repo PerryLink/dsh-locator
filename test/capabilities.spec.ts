@@ -307,3 +307,122 @@ describe('capability snapshot cache identity (0.21.1)', () => {
     expect(seen).toHaveLength(2)
   })
 })
+
+/**
+ * 0.23.0: a realistic 3+1 resident surface plus the deferred legacy tools, so
+ * ranking can be asserted with the real names/descriptions.
+ */
+function residentSources(): CapabilitySources {
+  const tool = (name: string, description: string, properties: Record<string, unknown> = {}, deferLoading = false) => ({
+    name,
+    description,
+    parameters: { type: 'object', properties },
+    ...(deferLoading ? { deferLoading: true } : {}),
+  })
+  return {
+    tools: {
+      definitions: () => [
+        tool('locator_find', 'Search local file names and bodies or session messages by phrase; every hit carries a citable ref.', { query: { type: 'string' } }),
+        tool('locator_read', 'Read a file/session ref from locator_find instead of shell cat/head.', { ref: { type: 'string' } }),
+        tool('locator_status', 'Report local file-index/content-index health and the effective ignore rules.', {}),
+        tool('locator_admin', 'Index maintenance: rebuild the name index, reindex content or export a snapshot.', { action: { type: 'string' } }),
+        tool('locator_search', 'Search local file names (legacy).', { query: { type: 'string' } }, true),
+        tool('locator_resolve', 'Resolve evidence refs (legacy).', { ref: { type: 'string' } }, true),
+        tool('locator_cite', 'Render citations for evidence refs (legacy).', { refs: { type: 'array' } }, true),
+        tool('locator_rebuild', 'Rebuild the local file index from scratch.', { roots: { type: 'array' } }, true),
+        tool('locator_reindex', 'Rebuild or refresh the content index.', { full: { type: 'boolean' } }, true),
+      ],
+      get: () => ({}),
+    },
+    skills: { list: async () => [] },
+  }
+}
+
+describe('capability risk uses the name, not read-only description examples (0.23.0 P0-9)', () => {
+  it('keeps a read-only description that mentions shell/install/execute at read', () => {
+    const image = inferRisk('read_image', 'Read a PNG/JPEG image. Large images are downscaled; do not install image libraries or create thumbnails, and never shell out to an execute command.')
+    expect(image.level).toBe('read')
+    expect(image.permission).toEqual({ approval: 'none', sandbox: 'none' })
+    const preview = inferRisk('preview_file', 'Read a file preview; do not edit, write, delete or execute anything.')
+    expect(preview.level).toBe('read')
+    // The schema still declares side effects on its own (name is not the only input).
+    const schemaWrite = inferRisk('copy_record', 'Copy a record', { type: 'object', properties: { content: { type: 'string' } } })
+    expect(schemaWrite.level).toBe('write')
+  })
+
+  it('pins locator_read at read/none and locator_admin at write/ask with concrete actions', () => {
+    const read = inferRisk('locator_read', 'Read a ref; use it instead of shell cat/head and never run a bash command.')
+    expect(read.level).toBe('read')
+    expect(read.permission).toEqual({ approval: 'none', sandbox: 'none' })
+    expect(read.basis).toBe('override')
+    expect(read.actions.join(' ')).toContain('reads')
+    const admin = inferRisk('locator_admin', 'Index maintenance: rebuild, reindex or export.')
+    expect(admin.level).toBe('write')
+    expect(admin.permission).toEqual({ approval: 'ask', sandbox: 'write' })
+    expect(admin.basis).toBe('override')
+    const actions = admin.actions.join(' ')
+    expect(actions).toContain('rebuild')
+    expect(actions).toContain('reindex')
+    expect(actions).toContain('export')
+    expect(actions).toContain('writes')
+  })
+})
+
+describe('capability cards for the 0.23.0 surface', () => {
+  it('marks resident vs deferred tools and keeps each risk honest', async () => {
+    const snapshot = await buildCapabilitySnapshot(residentSources())
+    const byId = (id: string) => snapshot.cards.find(card => card.id === id)
+    expect(byId('tool:locator_read')?.risk.level).toBe('read')
+    expect(byId('tool:locator_read')?.permission.approval).toBe('none')
+    expect(byId('tool:locator_read')?.deferred).toBe(false)
+    expect(byId('tool:locator_find')?.deferred).toBe(false)
+    expect(byId('tool:locator_status')?.deferred).toBe(false)
+    expect(byId('tool:locator_admin')?.risk.level).toBe('write')
+    expect(byId('tool:locator_admin')?.permission).toEqual({ approval: 'ask', sandbox: 'write' })
+    expect(byId('tool:locator_search')?.deferred).toBe(true)
+    expect(byId('tool:locator_rebuild')?.deferred).toBe(true)
+  })
+})
+
+describe('capability resident ranking (0.23.0 P0-9)', () => {
+  it('ranks the resident locator_find above the deferred legacy locator_search', async () => {
+    const snapshot = await buildCapabilitySnapshot(residentSources())
+    const hits = searchCapabilities(snapshot.cards, 'search files by name')
+    const ids = hits.hits.map(hit => hit.card.id)
+    expect(ids[0]).toBe('tool:locator_find')
+    const findAt = ids.indexOf('tool:locator_find')
+    const searchAt = ids.indexOf('tool:locator_search')
+    expect(findAt).toBeGreaterThanOrEqual(0)
+    expect(searchAt).toBeGreaterThanOrEqual(0)
+    expect(findAt).toBeLessThan(searchAt)
+  })
+
+  it('keeps relevance ahead of residency for a maintenance intent', async () => {
+    const snapshot = await buildCapabilitySnapshot(residentSources())
+    const hits = searchCapabilities(snapshot.cards, 'rebuild the file name index')
+    expect(hits.hits[0]?.card.id).toBe('tool:locator_rebuild')
+    // A resident tool that only weakly matches must not jump the real action.
+    const statusAt = hits.hits.findIndex(hit => hit.card.id === 'tool:locator_status')
+    expect(statusAt === -1 || statusAt > 0).toBe(true)
+  })
+
+  it('prefers the resident tool when the score is exactly equal', () => {
+    const cards = [
+      { id: 'tool:shared_tool', kind: 'tool' as const, name: 'shared_tool', summary: 'zeta helper', tags: [], risk: { level: 'read' as const, actions: [], basis: 'name' as const }, permission: { approval: 'none' as const, sandbox: 'none' as const }, state: 'available' as const, source: 'tools' as const, deferred: true },
+      { id: 'tool:zeta_tool', kind: 'tool' as const, name: 'zeta_tool', summary: 'plain helper', tags: [], risk: { level: 'read' as const, actions: [], basis: 'name' as const }, permission: { approval: 'none' as const, sandbox: 'none' as const }, state: 'available' as const, source: 'tools' as const, deferred: false },
+    ]
+    const hits = searchCapabilities(cards, 'shared zeta')
+    // shared_tool: name match (5) + text zeta (1) = 6; zeta_tool: name zeta (6) = 6.
+    expect(hits.hits[0]?.score).toBe(6)
+    expect(hits.hits[1]?.score).toBe(6)
+    expect(hits.hits[0]?.card.id).toBe('tool:zeta_tool')
+  })
+
+  it('keeps the deferred flag in the tool output schema', async () => {
+    const [searchTool] = makeCapabilityTools(residentSources())
+    const value = await searchTool.execute({ intent: 'find text in files', limit: 5 }, {} as never) as { hits?: Array<{ card: { id: string; deferred?: boolean } }> }
+    expect(value.hits?.[0]?.card.id).toBe('tool:locator_find')
+    expect(value.hits?.every(hit => typeof hit.card.deferred === 'boolean')).toBe(true)
+    expect(validateJsonSchemaValue(searchTool.output.schema as unknown as Parameters<typeof validateJsonSchemaValue>[0], value)).toEqual([])
+  })
+})

@@ -191,6 +191,15 @@ export interface Config {
    */
   outputBudgetChars?: number
   /**
+   * Register the pre-0.22 legacy tools (search/explore/outline/symbol/
+   * repo_map/resolve/cite/rebuild/reindex/export) alongside the 3+1 surface.
+   * Off by default in 0.23: legacy tools are excluded from the agent catalog,
+   * which keeps the native declaration at ~4.4 KB and the PTC schema at
+   * ~12 KB. Set true for one release if an old prompt or client still calls
+   * them by name; the tools are then registered with deferLoading.
+   */
+  legacyTools?: boolean
+  /**
    * Optional external rerank command for content hits. Empty (the default)
    * disables it. The command is spawned without a shell and speaks JSON on
    * stdin/stdout: `{ protocol: "rerank/v1", query, hits: [{path,title,snippet,
@@ -351,6 +360,7 @@ export const Config: Schema<Config> = Schema.object({
   notSearchable: Schema.array(Schema.string()).default([]),
   notReadable: Schema.array(Schema.string()).default([]),
   outputBudgetChars: Schema.number().default(8000),
+  legacyTools: Schema.boolean().default(false),
   rerankCommand: Schema.string().default(''),
   ocrCommand: Schema.string().default(''),
   urlFreshness: Schema.boolean().default(false),

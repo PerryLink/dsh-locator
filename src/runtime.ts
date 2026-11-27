@@ -5,10 +5,12 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { chmodSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { totalmem } from 'node:os'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { Config } from './config.ts'
+import { packageVersion, secureStateDir, type StateDirPermissions } from './paths.ts'
 
 /** One search hit. */
 export interface SearchHit {
@@ -165,6 +167,25 @@ export interface EngineStatus {
   saveCount?: number
   /** Pending work queue depth (refresh/scan), when the engine reports it. */
   queueDepth?: number
+  /**
+   * Another live engine owns the state directory (0.23 state-dir write lock):
+   * this engine serves the snapshot read-only and does not write.
+   */
+  readOnly?: boolean
+  /** PID of the engine that owns the state-directory write lock. */
+  lockPid?: number
+}
+
+/** One prepared engine binary: the path to spawn plus what had to be done. */
+export interface PreparedEngineBinary {
+  /** The executable to spawn. */
+  path: string
+  /** True when the executable was copied out of the package (Windows only). */
+  copied: boolean
+  /** Copy directories removed while pruning old package versions. */
+  cleaned: string[]
+  /** A non-fatal problem; the package binary is then used unchanged. */
+  warning?: string
 }
 
 interface Pending {
@@ -185,6 +206,8 @@ export interface RuntimeStatus {
   warning?: string
   scanning?: { phase: string; entries?: number; current?: string }
   engine?: EngineStatus
+  /** Result of the startup state-directory permission pass (P0-2 follow-up). */
+  permissions?: StateDirPermissions
 }
 
 /** Smallest automatic engine heap limit, in MiB. */
@@ -274,6 +297,98 @@ export function engineServeArgs(
 }
 
 /**
+ * Copy the package engine binary below the state directory on Windows.
+ *
+ * Windows locks a running executable against replacement, so upgrading the
+ * plugin in place fails with a sharing violation while the old engine is still
+ * running from `bin/win32-<arch>/indexd.exe`. Spawning from
+ * `<stateDir>/engine/<packageVersion>/indexd.exe` instead decouples the
+ * running engine from the package directory: npm can replace the package, the
+ * old engine keeps its private copy, and the next start uses the new version.
+ *
+ * Copies for other package versions are pruned afterwards (best effort: an old
+ * engine may still hold its executable, which Windows refuses to delete and the
+ * next boot retries). On every other platform the package binary is executed
+ * directly and this function is a no-op.
+ * @param binary - the package engine binary.
+ * @param stateDir - the resolved state directory.
+ * @param version - the package version the copy is keyed by.
+ * @param platform - the platform to prepare for (defaults to this one).
+ * @returns the executable path and what was copied/cleaned.
+ */
+export function prepareEngineBinary(
+  binary: string,
+  stateDir: string,
+  version: string,
+  platform: NodeJS.Platform = process.platform,
+): PreparedEngineBinary {
+  const result: PreparedEngineBinary = { path: binary, copied: false, cleaned: [] }
+  if (platform !== 'win32') return result
+  const engineDir = join(stateDir, 'engine')
+  // A directory name, never a path: separators become '_' and leading dots are
+  // stripped so a hostile package version cannot escape the engine directory.
+  const safeVersion = version
+    .replace(/[^0-9A-Za-z._-]/g, '_')
+    .replace(/\.{2,}/g, '_')
+    .replace(/^\.+/, '') || 'unknown'
+  const copyDir = join(engineDir, safeVersion)
+  const copy = join(copyDir, 'indexd.exe')
+  try {
+    mkdirSync(copyDir, { recursive: true, mode: 0o700 })
+  } catch (error) {
+    result.warning = `cannot create the engine copy directory ${copyDir}: ${errorMessage(error)}`
+    return result
+  }
+  let stale = true
+  try {
+    const source = statSync(binary)
+    const existing = statSync(copy)
+    stale = existing.size !== source.size || existing.mtimeMs < source.mtimeMs
+  } catch {
+    // Missing copy (first run) or missing source; the copyFileSync below reports
+    // a missing package binary properly.
+    stale = true
+  }
+  if (stale) {
+    const temporary = copy + '.tmp-' + String(process.pid)
+    try {
+      copyFileSync(binary, temporary)
+      try { chmodSync(temporary, 0o755) } catch { /* Windows ignores POSIX modes */ }
+      renameSync(temporary, copy)
+      result.copied = true
+      result.path = copy
+    } catch (error) {
+      try { rmSync(temporary, { force: true }) } catch { /* keep the old copy */ }
+      result.warning = `cannot copy the engine to ${copy}: ${errorMessage(error)}; spawning ${binary} instead`
+      return result
+    }
+  } else {
+    result.path = copy
+  }
+  try {
+    for (const entry of readdirSync(engineDir)) {
+      if (entry === safeVersion) continue
+      const old = join(engineDir, entry)
+      try {
+        rmSync(old, { recursive: true, force: true })
+        result.cleaned.push(old)
+      } catch {
+        // A still-running engine from that version holds its executable; the
+        // next boot retries. Not a warning: this is the normal upgrade path.
+      }
+    }
+  } catch {
+    // The directory disappeared between mkdir and readdir; the copy above is fine.
+  }
+  return result
+}
+
+/** Message of an unknown thrown value. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
  * Owns the engine process. Tools await {@link LocatorRuntime.waitReady} before
  * issuing requests; a missing binary or a crashed engine surfaces as a tool
  * error carrying the engine's own message.
@@ -315,6 +430,12 @@ export class LocatorRuntime {
   start(): void {
     if (this.started || this.disposed) return
     this.started = true
+    // Old (<=0.22) engines created the state directory 0755 and the snapshot
+    // 0644. Tighten what already exists before the engine opens it; the new
+    // engine writes 0700/0600 itself. Best effort: a read-only profile must not
+    // prevent the engine from starting.
+    const permissions = secureStateDir(this.stateDir)
+    this.status.permissions = permissions
     this.spawn()
   }
 
@@ -328,11 +449,15 @@ export class LocatorRuntime {
         // A read-only install cannot be fixed here; spawn reports the real error.
       }
     }
+    // Windows: spawn a private copy below the state directory so an in-place
+    // package upgrade can replace bin/ while this engine keeps running.
+    const prepared = prepareEngineBinary(this.binary, this.stateDir, packageVersion())
+    if (prepared.warning !== undefined) console.error(`[dsh-locator] ${prepared.warning}`)
     const args = engineServeArgs(this.config, this.roots, this.stateDir)
 
     let child: ChildProcessWithoutNullStreams
     try {
-      child = spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      child = spawn(prepared.path, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     } catch (error) {
       this.fail(error)
       return
@@ -460,6 +585,8 @@ export class LocatorRuntime {
       ...(typeof params.saveMs === 'number' ? { saveMs: params.saveMs } : {}),
       ...(typeof params.saveCount === 'number' ? { saveCount: params.saveCount } : {}),
       ...(typeof params.queueDepth === 'number' ? { queueDepth: params.queueDepth } : {}),
+      ...(params.readOnly === true ? { readOnly: true } : {}),
+      ...(typeof params.lockPid === 'number' ? { lockPid: params.lockPid } : {}),
       ...(params.watchInitializing === true ? { watchInitializing: true } : {}),
       ...(typeof params.queryCount === 'number' ? { queryCount: params.queryCount } : {}),
       ...(typeof params.lastQueryMs === 'number' ? { lastQueryMs: params.lastQueryMs } : {}),

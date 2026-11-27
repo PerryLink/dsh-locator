@@ -198,7 +198,9 @@ jobs:
     needs: [preflight, engine]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # contents: write lets the job create/update the GitHub Release and upload
+      # the npm tarball + sha256sums.txt after a successful publish (0.23.0).
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -347,6 +349,62 @@ jobs:
           # failure, and let the rerun-after-approval path above finish cleanly.
           echo "::error::dsh-locator@${VERSION} is not publicly visible yet. npm staged publishing requires a maintainer to approve it with 2FA (CLI: 'npm stage list' then 'npm stage approve <id>', or the package page on npmjs.com). Re-run this job after approval: the guard above treats an already published matching SHA as a no-op."
           exit 1
+      - name: Create or update the GitHub Release with the tarball
+        # Runs after the published version has been proven to point at this SHA
+        # (and on the staged-publish retry path, where publish is skipped because
+        # the matching version already exists). Idempotent: an existing release
+        # is edited and its assets are replaced.
+        if: ${{ inputs.publish }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tarball="dist/dsh-locator-${VERSION}.tgz"
+          if [ ! -f "${tarball}" ]; then
+            echo "::error::npm tarball ${tarball} is missing; it is built earlier in this job"
+            exit 1
+          fi
+          ( cd dist && sha256sum "dsh-locator-${VERSION}.tgz" ) > dist/sha256sums.txt
+          echo "assets:"
+          cat dist/sha256sums.txt
+
+          # Release notes: the CHANGELOG section for this version, or a minimal
+          # fallback. Never block the release on CHANGELOG formatting here -- the
+          # preflight already requires the heading.
+          notes="$(mktemp)"
+          awk -v version="${VERSION}" '
+            $0 ~ "^## " version "([^0-9]|$)" { found = 1; next }
+            found && /^## [0-9]/ { exit }
+            found { print }
+          ' CHANGELOG.md > "${notes}"
+          if [ ! -s "${notes}" ]; then
+            printf 'Release %s (%s)\n' "${TAG}" "${SHA}" > "${notes}"
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists; updating its notes and assets"
+            gh release edit "${TAG}" --title "${TAG}" --notes-file "${notes}"
+          else
+            echo "creating release ${TAG}"
+            gh release create "${TAG}" --title "${TAG}" --notes-file "${notes}" --verify-tag
+          fi
+          gh release upload "${TAG}" "${tarball}" dist/sha256sums.txt --clobber
+
+          # Prove the assets are attached; a release with zero assets is exactly
+          # the 0.22.0 regression this step exists to prevent.
+          assets="$(gh release view "${TAG}" --json assets --jq '.assets[].name' | sort)"
+          for asset in "dsh-locator-${VERSION}.tgz" sha256sums.txt; do
+            if ! grep -qx "${asset}" <<<"${assets}"; then
+              echo "::error::release ${TAG} is missing the asset ${asset}"
+              exit 1
+            fi
+          done
+          echo "release ${TAG} now carries: ${assets}"
+
       - name: Dry run complete (npm publish skipped)
         if: ${{ !inputs.publish }}
         run: |

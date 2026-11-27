@@ -26,8 +26,12 @@ export declare const COMPACT_SNIPPET_CHARS = 160;
 export declare const STANDARD_SNIPPET_CHARS = 240;
 /** Full snippets are cut at this many code points. */
 export declare const FULL_SNIPPET_CHARS = 320;
-/** Cursor payload version; a decoded cursor from another version is rejected. */
+/** Cursor payload version of the single-source contract (0.22; still accepted). */
 export declare const CURSOR_VERSION: 1;
+/** Cursor payload version of the cross-source auto contract (0.23). */
+export declare const CURSOR_VERSION_V2: 2;
+/** Most file-identity hashes one v2 cursor remembers (bounded cursor size). */
+export declare const CURSOR_SEEN_MAX = 96;
 /** Tool names that speak the agent envelope. */
 export type AgentToolName = 'locator_find' | 'locator_read' | 'locator_status' | 'locator_admin';
 /** Search modes understood by locator_find (auto resolves symbol -> body -> name). */
@@ -139,6 +143,8 @@ export interface AgentProvenance {
 }
 /** Kinds of rows the agent find/read tools can return. */
 export type AgentItemKind = 'file' | 'dir' | 'session' | 'symbol';
+/** Search source of one auto-mode row: the indexes it was merged from. */
+export type AgentItemSource = 'name' | 'body' | 'symbol';
 /**
  * One result row, in the superset shape. Tools build the superset and project
  * it with {@link trimItem} so detail presets never leak extra fields.
@@ -158,6 +164,8 @@ export interface AgentItem {
     snippet?: string;
     /** Why this row matched, e.g. "symbol:exact", "body:terms", "name:prefix". */
     why?: string[];
+    /** Index sources that produced this row (auto mode; merged rows list every source). */
+    sources?: AgentItemSource[];
     /** Relevance score (content rank; lower is better for FTS5 bm25). */
     score?: number;
     /** Citable evidence ref (ref://file or dsh-session:...). */
@@ -176,9 +184,9 @@ export interface AgentItem {
     sessionId?: string;
     /** Message id for session rows (full detail only). */
     messageId?: string;
-    /** Indexed event sequence for session rows (full detail only). */
+    /** Indexed event sequence for session rows (compact/standard/full). */
     seq?: number;
-    /** Full event ref for session rows (full detail only). */
+    /** Full ref://session-event reference for session rows (compact/standard/full). */
     eventRef?: string;
     /** File size in bytes (full detail only). */
     size?: number;
@@ -313,9 +321,9 @@ export interface AgentItemBudgetResult {
  * @returns kept items, their budget report and the dropped count.
  */
 export declare function applyItemBudget(items: readonly AgentItem[], maxChars: number): AgentItemBudgetResult;
-/** Opaque continuation cursor of locator_find (base64url JSON). */
+/** Opaque continuation cursor of a single-source locator_find page (v1). */
 export interface AgentCursorPayload {
-    /** Payload version; only CURSOR_VERSION is decoded. */
+    /** Payload version; only CURSOR_VERSION is decoded for this shape. */
     v: 1;
     /** Effective search mode this page belongs to. */
     mode: AgentFindMode;
@@ -328,14 +336,70 @@ export interface AgentCursorPayload {
     /** Index generation observed when the cursor was issued (informational). */
     generation?: number;
 }
+/**
+ * Per-source continuation positions of a cross-source auto page (v2).
+ *
+ * Each value is the raw position one past the last row already consumed from
+ * that source stream; the next page resumes there, so a source row is never
+ * fetched twice. A source absent from the object is consumed from position 0
+ * (and is not part of the page's source set).
+ */
+export interface AgentCursorOffsetsV2 {
+    /** Raw name-index rows consumed by earlier pages. */
+    name?: number;
+    /** Raw content-search rows consumed by earlier pages. */
+    body?: number;
+    /** Visible symbol rows consumed by earlier pages. */
+    symbol?: number;
+}
+/** Opaque continuation cursor of a cross-source auto page (v2). */
+export interface AgentCursorV2Payload {
+    /** Payload version; only CURSOR_VERSION_V2 is decoded for this shape. */
+    v: 2;
+    /** Mode the page belongs to; "auto" for a cross-source page. */
+    mode: AgentFindMode;
+    /** Hash binding the cursor to the query, mode, scope, kinds and where filters. */
+    queryHash: string;
+    /** Per-source continuation positions (raw rows consumed by earlier pages). */
+    offsets: AgentCursorOffsetsV2;
+    /** Effective scope of the paginated search (set after a workspace fallback). */
+    scope?: AgentScopeMode;
+    /** Index generation observed when the cursor was issued (informational). */
+    generation?: number;
+    /** Row kinds selected on the first page (auto page binding). */
+    kinds?: AgentItemKind[];
+    /** Whether archived sessions were searched on the first page. */
+    includeArchived?: boolean;
+    /**
+     * Bounded hashes of file identities already returned on earlier pages.
+     * A later page can meet the same path again from another source (body vs
+     * name); the hash keeps the page union duplicate-free without carrying the
+     * whole path list. Oldest hashes are dropped past {@link CURSOR_SEEN_MAX}.
+     */
+    seen?: string[];
+}
+/** One decoded continuation cursor, from either contract version. */
+export type AgentCursor = AgentCursorPayload | AgentCursorV2Payload;
 /** Deterministic short hash used to bind a cursor to one query request. */
 export declare function queryHashOf(parts: unknown): string;
-/** Encode one cursor payload as an opaque base64url token. */
+/** Encode one single-source (v1) cursor payload as an opaque base64url token. */
 export declare function encodeCursor(payload: AgentCursorPayload): string;
-/** Decode one opaque cursor, returning undefined for anything malformed. */
-export declare function decodeCursor(cursor: unknown): AgentCursorPayload | undefined;
+/**
+ * Encode one cross-source (v2) cursor payload as an opaque base64url token.
+ *
+ * Mirrors the parity surface implemented by scripts/locator-cli.mjs
+ * (AGENT_CURSOR_VERSION = 2): v, mode, queryHash, offsets, scope, generation,
+ * kinds and includeArchived, with the boolean omitted when false.
+ * @param payload - v2 payload built from the page's per-source positions.
+ * @returns the opaque token.
+ */
+export declare function encodeCursorV2(payload: AgentCursorV2Payload): string;
+/** Short deterministic hash of one returned file identity (cursor dedupe memory). */
+export declare function identityTokenHash(value: string): string;
+/** Decode one opaque cursor (v1 or v2), returning undefined for anything malformed. */
+export declare function decodeCursor(cursor: unknown): AgentCursor | undefined;
 /** Whether a decoded cursor belongs to the current request (query/mode binding). */
-export declare function cursorMatches(payload: AgentCursorPayload, expected: {
+export declare function cursorMatches(payload: AgentCursor, expected: {
     queryHash: string;
     mode?: AgentFindMode;
 }): boolean;
@@ -500,6 +564,14 @@ export declare const AGENT_ITEM_SCHEMA: {
             };
             readonly description: "Why this row matched, e.g. \"symbol:exact\" or \"body:terms\".";
         };
+        readonly sources: {
+            readonly type: "array";
+            readonly items: {
+                readonly type: "string";
+                readonly enum: readonly ["name", "body", "symbol"];
+            };
+            readonly description: "Index sources that produced this row (auto mode; merged rows list every source).";
+        };
         readonly score: {
             readonly type: "number";
             readonly description: "Relevance score (content rank; lower is better for FTS5 bm25).";
@@ -595,11 +667,11 @@ export declare const AGENT_ITEM_SCHEMA: {
         };
         readonly seq: {
             readonly type: "integer";
-            readonly description: "Indexed event sequence for session rows (full detail only).";
+            readonly description: "Indexed event sequence for session rows (compact/standard/full).";
         };
         readonly eventRef: {
             readonly type: "string";
-            readonly description: "Full event ref for session rows (full detail only).";
+            readonly description: "Full ref://session-event?sid=...&seq=N reference for session rows (compact/standard/full).";
         };
         readonly size: {
             readonly type: "integer";

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/PerryLink/dsh-locator/engine/internal/statefs"
 )
 
 const (
@@ -147,7 +149,7 @@ func (ix *Index) SaveBase(path string, opt SnapshotOptions) (SnapshotInfo, error
 		baseID = newBaseID()
 	}
 	header, payload, info := ix.encodeBaseSnapshot(baseID, opt.Compression)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := statefs.MkdirAll(filepath.Dir(path)); err != nil {
 		return info, err
 	}
 	tmp := path + ".tmp"
@@ -171,7 +173,7 @@ var snapshotWriteFile = writeSnapshotFile
 
 // writeSnapshotFile writes the header and (optionally compressed) payload.
 func writeSnapshotFile(tmp string, header, payload []byte, comp Compression) error {
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := statefs.Create(tmp)
 	if err != nil {
 		return err
 	}
