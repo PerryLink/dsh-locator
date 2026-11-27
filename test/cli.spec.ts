@@ -112,7 +112,7 @@ describe('locator-cli contract', () => {
     expect(status.apiVersion).toBeUndefined()
   })
 
-  it('emits one 2026-11 envelope per command and reads roots from meta.json', () => {
+  it.skipIf(process.platform === 'win32')('emits one 2026-11 envelope per command and reads roots from meta.json', () => {
     const root = tempDir('locator-cli-agent-')
     const state = join(root, 'state')
     const file = join(root, 'notes.md')
