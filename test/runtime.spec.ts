@@ -1,6 +1,6 @@
 import { chmodSync, realpathSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Config } from '../src/config.ts'
 import {
@@ -325,7 +325,7 @@ describe('windows engine copy', () => {
   it('keeps a hostile version from escaping the engine directory', () => {
     const { source, state } = fixture()
     const prepared = prepareEngineBinary(source, state, '..\\..\\evil', 'win32')
-    expect(prepared.path.startsWith(join(state, 'engine') + '/')).toBe(true)
+    expect(resolve(prepared.path).startsWith(resolve(join(state, 'engine')) + sep)).toBe(true)
     expect(prepared.path).not.toContain('..')
   })
 

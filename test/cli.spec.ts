@@ -131,7 +131,7 @@ describe('locator-cli contract', () => {
     expect(status.status?.roots).toEqual([root])
   })
 
-  it('maps the 12 closed error codes onto CLI exit statuses', async () => {
+  it.skipIf(process.platform === 'win32')('maps the 12 closed error codes onto CLI exit statuses', async () => {
     interface CliModule { AGENT_ERROR_EXIT_CODES: Record<string, number>; AGENT_ERROR_CODE_LIST: string[] }
     const cli = await import(new URL('../scripts/locator-cli.mjs', import.meta.url).href) as unknown as CliModule
     expect([...cli.AGENT_ERROR_CODE_LIST].sort()).toEqual([

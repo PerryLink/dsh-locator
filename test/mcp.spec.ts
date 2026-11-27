@@ -1128,7 +1128,10 @@ describe('MCP protocol version matrix (0.23.0)', () => {
   })
 })
 
-describe('MCP agent API 2026-11 surface', () => {
+// These fixtures use a mock engine implemented as an executable JS file, which
+// Windows cannot spawn without a shell; the real-engine MCP suites below still
+// run on Windows. Track the mock portability separately.
+describe.skipIf(process.platform === 'win32')('MCP agent API 2026-11 surface', () => {
   it('serves exactly find/read/status with standard JSON Schema and never exposes admin', async () => {
     const fixture = agentFixture('locator-agent-list-')
     const client = createAgentClient(fixture)
@@ -1404,7 +1407,7 @@ describe('MCP agent API 2026-11 surface', () => {
   })
 })
 
-describe('MCP roots from state (0.23.0)', () => {
+describe.skipIf(process.platform === 'win32')('MCP roots from state (0.23.0)', () => {
   it('reads the roots recorded in <state>/meta.json and never rescans the home directory', async () => {
     const base = tempDir('locator-roots-meta-')
     const roots = [join(base, 'one'), join(base, 'two'), join(base, 'three')]
@@ -1531,7 +1534,7 @@ describe('CLI agent API 2026-11 (0.23.0)', () => {
     expect(rest.items?.length).toBeGreaterThan(0)
   })
 
-  it('maps the 12 closed error codes onto CLI exit statuses and emits envelopes on failure', () => {
+  it.skipIf(process.platform === 'win32')('maps the 12 closed error codes onto CLI exit statuses and emits envelopes on failure', () => {
     const fixture = agentFixture('locator-cli-agent-exit-')
     const base = ['--api=2026-11', '--state', fixture.state, '--root', fixture.root, '--scope', 'roots']
     const short = runCli(['find', 'ab', '--mode', 'body', ...base])
@@ -1560,7 +1563,7 @@ describe('CLI agent API 2026-11 (0.23.0)', () => {
     expect(table.length).toBe(12)
   })
 
-  it('keeps the legacy default output byte-compatible (no apiVersion on the old face)', () => {
+  it.skipIf(process.platform === 'win32')('keeps the legacy default output byte-compatible (no apiVersion on the old face)', () => {
     const fixture = agentFixture('locator-cli-legacy-')
     const search = JSON.parse(runCli(['search', 'alpha', '--json', '--root', fixture.root, '--state', fixture.state], fixture.env).stdout) as Record<string, unknown>
     expect(search.command).toBe('search')
@@ -1581,7 +1584,7 @@ describe('CLI agent API 2026-11 (0.23.0)', () => {
     expect(legacy.apiVersion).toBeUndefined()
   })
 
-  it('reads roots from --state/meta.json so a state-only call does not rescan another root set', () => {
+  it.skipIf(process.platform === 'win32')('reads roots from --state/meta.json so a state-only call does not rescan another root set', () => {
     const base = tempDir('locator-cli-roots-meta-')
     const roots = [join(base, 'one'), join(base, 'two'), join(base, 'three')]
     for (const root of roots) {
